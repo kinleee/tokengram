@@ -1,0 +1,45 @@
+# ChromaDB verilənlər bazası
+chroma_db/
+
+# API açarları
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual mühit
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Hash store
+.file_hashes.json
+
+# Model cache
+models_cache/
+
+# MLA Agent hook növbəsi
+.mla_pending.txt
+.mla_pending.processing
+
+# MLA Agent sessiya analytics log
+.mla_session_log.jsonl
+
+# Claude Code lokal/şəxsi tənzimləmələr (settings.json paylaşılır)
+.claude/settings.local.json

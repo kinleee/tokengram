@@ -1,0 +1,711 @@
+"""
+============================================
+document_loader.py — Fayl Oxuyucu və AST Chunking
+============================================
+MƏRHƏLƏ 1: Layihə qovluğundakı kod fayllarını tapır,
+AST (Abstract Syntax Tree) əsaslı ağıllı bölmə ilə
+semantik bütünlüyü qoruyaraq chunk-lara bölür.
+
+Dəstəklənən dillər:
+- Python (.py) — AST ilə funksiya/sinif səviyyəsində bölmə
+- Solidity (.sol) — Regex ilə contract/function səviyyəsində bölmə
+- SQL (.sql) — Regex ilə statement səviyyəsində bölmə
+- Markdown (.md) — Başlıq səviyyəsində bölmə
+"""
+
+import ast
+import re
+import logging
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass, field
+
+# DİQQƏT: langchain_text_splitters import-u 20+ saniyə çəkir.
+# Top-level import etsək, hər `from document_loader import CodeChunk`
+# çağırışı (məs. MCP server tool-da) bu cəzanı ödəyir.
+# Ona görə yalnız real istifadə olunan funksiyalar daxilində lazy import edirik.
+
+import config
+
+# Logging konfiqurasiyası
+logger = logging.getLogger(__name__)
+
+
+# ============================================
+# DATA MODELI
+# ============================================
+
+@dataclass
+class CodeChunk:
+    """Bir kod blokunu (chunk) təmsil edən data sinfi.
+    
+    Attributes:
+        content: Chunk-un mətn məzmunu
+        metadata: Faylın adı, yolu, uzantısı, chunk indeksi və s.
+        enriched_context: Opsional kontekstual izah (--enrich ilə)
+    """
+    content: str
+    metadata: Dict[str, str] = field(default_factory=dict)
+    enriched_context: Optional[str] = None
+
+    @property
+    def full_content(self) -> str:
+        """Kontekst + məzmun birləşdirilmiş versiya (indeksləmə üçün)"""
+        if self.enriched_context:
+            return f"[KONTEKST: {self.enriched_context}]\n{self.content}"
+        return self.content
+
+    @property
+    def unique_id(self) -> str:
+        """Unikal chunk ID-si (upsert üçün)"""
+        file_path = self.metadata.get("file_path", "unknown")
+        chunk_idx = self.metadata.get("chunk_index", "0")
+        return f"{file_path}::chunk_{chunk_idx}"
+
+
+# ============================================
+# FAYL TAPMA
+# ============================================
+
+def find_code_files(directory: str) -> List[Path]:
+    """Verilmiş qovluqda dəstəklənən kod fayllarını rekursiv olaraq tapır.
+    
+    Args:
+        directory: Axtarılacaq qovluğun yolu
+        
+    Returns:
+        Tapılan faylların Path siyahısı
+        
+    Raises:
+        FileNotFoundError: Qovluq mövcud deyilsə
+        PermissionError: Qovluğa giriş icazəsi yoxdursa
+    """
+    dir_path = Path(directory).resolve()
+    
+    if not dir_path.exists():
+        raise FileNotFoundError(f"Qovluq tapılmadı: {dir_path}")
+    
+    if not dir_path.is_dir():
+        raise NotADirectoryError(f"Bu bir qovluq deyil: {dir_path}")
+    
+    found_files = []
+    
+    try:
+        for file_path in dir_path.rglob("*"):
+            # Qovluq yoxlaması — istisna edilən qovluqları keç
+            if any(excluded in file_path.parts for excluded in config.EXCLUDED_DIRS):
+                continue
+            
+            # Fayl uzantısı yoxlaması
+            if file_path.is_file() and file_path.suffix in config.SUPPORTED_EXTENSIONS:
+                found_files.append(file_path)
+                
+    except PermissionError as e:
+        logger.warning(f"İcazə xətası, bəzi fayllar keçildi: {e}")
+    
+    logger.info(f"📁 {len(found_files)} kod faylı tapıldı: {dir_path}")
+    return sorted(found_files)
+
+
+# ============================================
+# AST-ƏSASLI PYTHON CHUNKİNG
+# ============================================
+
+def _extract_source_segment(source: str, node: ast.AST) -> Optional[str]:
+    """AST node-unun mənbə kodundakı seqmentini çıxarır.
+    
+    ast.get_source_segment bəzən None qaytara bilər, bu halda
+    sətir nömrələrinə əsasən manual çıxarma edirik.
+    """
+    try:
+        segment = ast.get_source_segment(source, node)
+        if segment:
+            return segment
+    except Exception:
+        pass
+    
+    # Fallback: sətir nömrələri ilə çıxar
+    try:
+        lines = source.splitlines()
+        start = node.lineno - 1  # 0-indexed
+        end = getattr(node, 'end_lineno', len(lines))
+        return "\n".join(lines[start:end])
+    except Exception as e:
+        logger.warning(f"Seqment çıxarma uğursuz: {e}")
+        return None
+
+
+def _split_large_class(source: str, class_node: ast.ClassDef, 
+                       max_size: int) -> List[str]:
+    """Böyük sinifi metodlarına görə bölür.
+    
+    Əgər sinif max_size-dan böyükdürsə, hər metodu
+    ayrıca chunk olaraq çıxarır. Sinifin başlığı və
+    class-level dəyişənləri birinci chunk-a əlavə olunur.
+    """
+    chunks = []
+    lines = source.splitlines()
+    
+    # Sinif başlığı (class adı, docstring, class-level dəyişənlər)
+    header_lines = []
+    class_start = class_node.lineno - 1
+    
+    for child in ast.iter_child_nodes(class_node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # İlk metoddan əvvəlki hər şey header-dir
+            header_end = child.lineno - 1
+            header_lines = lines[class_start:header_end]
+            break
+    
+    if header_lines:
+        header = "\n".join(header_lines)
+        chunks.append(header)
+    
+    # Hər metodu ayrıca chunk et
+    for child in ast.iter_child_nodes(class_node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            segment = _extract_source_segment(source, child)
+            if segment:
+                # Sinif adını kontekst kimi əlavə et
+                context_line = f"# Sinif: {class_node.name}\n"
+                chunks.append(context_line + segment)
+    
+    return chunks
+
+
+def chunk_python(source: str, file_path: str) -> List[CodeChunk]:
+    """Python faylını AST ilə funksiya/sinif səviyyəsində bölür.
+    
+    Strategiya:
+    1. AST parse et
+    2. Hər top-level funksiya/sinifi ayrıca chunk et
+    3. Böyük sinifləri metodlarına böl
+    4. Top-level kodu (import, sabitlər) ayrıca chunk et
+    5. AST parse uğursuzsa → fallback text splitter
+    
+    Args:
+        source: Python mənbə kodu
+        file_path: Faylın yolu (metadata üçün)
+        
+    Returns:
+        CodeChunk siyahısı
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        logger.warning(f"⚠️ AST parse uğursuz ({file_path}): {e}. Fallback istifadə olunur.")
+        return _fallback_chunk(source, file_path, language="python")
+    
+    chunks = []
+    processed_lines = set()  # Hansı sətirlərin artıq işləndiyini izlə
+    chunk_index = 0
+    
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            segment = _extract_source_segment(source, node)
+            if segment:
+                if len(segment) <= config.AST_MAX_CHUNK_SIZE:
+                    chunks.append(CodeChunk(
+                        content=segment,
+                        metadata={
+                            "file_name": Path(file_path).name,
+                            "file_path": str(file_path),
+                            "file_extension": ".py",
+                            "chunk_index": str(chunk_index),
+                            "chunk_type": "function",
+                            "symbol_name": node.name,
+                        }
+                    ))
+                    chunk_index += 1
+                else:
+                    # Çox böyük funksiya — text splitter ilə böl
+                    sub_chunks = _fallback_chunk(segment, file_path, language="python")
+                    for sc in sub_chunks:
+                        sc.metadata["chunk_index"] = str(chunk_index)
+                        sc.metadata["chunk_type"] = "function_part"
+                        sc.metadata["symbol_name"] = node.name
+                        chunks.append(sc)
+                        chunk_index += 1
+                
+                # İşlənmiş sətirləri qeyd et
+                for line_no in range(node.lineno, getattr(node, 'end_lineno', node.lineno) + 1):
+                    processed_lines.add(line_no)
+        
+        elif isinstance(node, ast.ClassDef):
+            segment = _extract_source_segment(source, node)
+            if segment:
+                if len(segment) <= config.AST_MAX_CHUNK_SIZE:
+                    chunks.append(CodeChunk(
+                        content=segment,
+                        metadata={
+                            "file_name": Path(file_path).name,
+                            "file_path": str(file_path),
+                            "file_extension": ".py",
+                            "chunk_index": str(chunk_index),
+                            "chunk_type": "class",
+                            "symbol_name": node.name,
+                        }
+                    ))
+                    chunk_index += 1
+                else:
+                    # Böyük sinif — metodlarına böl
+                    class_chunks = _split_large_class(source, node, config.AST_MAX_CHUNK_SIZE)
+                    for cc in class_chunks:
+                        chunks.append(CodeChunk(
+                            content=cc,
+                            metadata={
+                                "file_name": Path(file_path).name,
+                                "file_path": str(file_path),
+                                "file_extension": ".py",
+                                "chunk_index": str(chunk_index),
+                                "chunk_type": "class_part",
+                                "symbol_name": node.name,
+                            }
+                        ))
+                        chunk_index += 1
+                
+                for line_no in range(node.lineno, getattr(node, 'end_lineno', node.lineno) + 1):
+                    processed_lines.add(line_no)
+    
+    # Top-level kod (import-lar, sabitlər, global dəyişənlər)
+    all_lines = source.splitlines()
+    top_level_lines = []
+    for i, line in enumerate(all_lines, 1):
+        if i not in processed_lines and line.strip():
+            top_level_lines.append(line)
+    
+    if top_level_lines:
+        top_level_code = "\n".join(top_level_lines)
+        if top_level_code.strip():
+            chunks.insert(0, CodeChunk(
+                content=top_level_code,
+                metadata={
+                    "file_name": Path(file_path).name,
+                    "file_path": str(file_path),
+                    "file_extension": ".py",
+                    "chunk_index": "0",
+                    "chunk_type": "top_level",
+                    "symbol_name": "imports_and_globals",
+                }
+            ))
+            # Mövcud chunk indexlərini yenidən nömrələ
+            for i, chunk in enumerate(chunks):
+                chunk.metadata["chunk_index"] = str(i)
+    
+    logger.info(f"  🐍 Python AST: {Path(file_path).name} → {len(chunks)} chunk")
+    return chunks
+
+
+# ============================================
+# SOLİDİTY CHUNKİNG (Regex-əsaslı)
+# ============================================
+
+# Solidity strukturlarını tanıyan regex nümunələri
+_SOLIDITY_CONTRACT_PATTERN = re.compile(
+    r'((?:abstract\s+)?contract\s+\w+[^{]*\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})',
+    re.DOTALL
+)
+_SOLIDITY_FUNCTION_PATTERN = re.compile(
+    r'(function\s+\w+\s*\([^)]*\)[^{]*\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})',
+    re.DOTALL
+)
+_SOLIDITY_EVENT_PATTERN = re.compile(
+    r'(event\s+\w+\s*\([^)]*\)\s*;)',
+    re.DOTALL
+)
+_SOLIDITY_MODIFIER_PATTERN = re.compile(
+    r'(modifier\s+\w+\s*(?:\([^)]*\))?\s*\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})',
+    re.DOTALL
+)
+
+
+def chunk_solidity(source: str, file_path: str) -> List[CodeChunk]:
+    """Solidity faylını contract/function səviyyəsində bölür.
+    
+    Strategiya:
+    1. Contract bloklarını tap
+    2. Hər contract-ı ölçüsünə görə bütöv saxla və ya funksiyalarına böl
+    3. Import/pragma sətirləri ayrıca chunk
+    
+    Args:
+        source: Solidity mənbə kodu
+        file_path: Faylın yolu
+        
+    Returns:
+        CodeChunk siyahısı
+    """
+    chunks = []
+    chunk_index = 0
+    processed_ranges = []
+    
+    # 1. Contract bloklarını tap
+    for match in _SOLIDITY_CONTRACT_PATTERN.finditer(source):
+        contract_code = match.group(1)
+        
+        # Contract adını çıxar
+        name_match = re.search(r'contract\s+(\w+)', contract_code)
+        contract_name = name_match.group(1) if name_match else "Unknown"
+        
+        if len(contract_code) <= config.AST_MAX_CHUNK_SIZE:
+            # Kiçik contract — bütöv saxla
+            chunks.append(CodeChunk(
+                content=contract_code,
+                metadata={
+                    "file_name": Path(file_path).name,
+                    "file_path": str(file_path),
+                    "file_extension": ".sol",
+                    "chunk_index": str(chunk_index),
+                    "chunk_type": "contract",
+                    "symbol_name": contract_name,
+                }
+            ))
+            chunk_index += 1
+        else:
+            # Böyük contract — funksiyalarına böl
+            for func_match in _SOLIDITY_FUNCTION_PATTERN.finditer(contract_code):
+                func_code = func_match.group(1)
+                func_name_match = re.search(r'function\s+(\w+)', func_code)
+                func_name = func_name_match.group(1) if func_name_match else "anonymous"
+                
+                chunks.append(CodeChunk(
+                    content=f"// Contract: {contract_name}\n{func_code}",
+                    metadata={
+                        "file_name": Path(file_path).name,
+                        "file_path": str(file_path),
+                        "file_extension": ".sol",
+                        "chunk_index": str(chunk_index),
+                        "chunk_type": "function",
+                        "symbol_name": f"{contract_name}.{func_name}",
+                    }
+                ))
+                chunk_index += 1
+            
+            # Modifier-ləri əlavə et
+            for mod_match in _SOLIDITY_MODIFIER_PATTERN.finditer(contract_code):
+                mod_code = mod_match.group(1)
+                chunks.append(CodeChunk(
+                    content=f"// Contract: {contract_name}\n{mod_code}",
+                    metadata={
+                        "file_name": Path(file_path).name,
+                        "file_path": str(file_path),
+                        "file_extension": ".sol",
+                        "chunk_index": str(chunk_index),
+                        "chunk_type": "modifier",
+                        "symbol_name": contract_name,
+                    }
+                ))
+                chunk_index += 1
+        
+        processed_ranges.append((match.start(), match.end()))
+    
+    # 2. Top-level (pragma, import)
+    top_level = _extract_unprocessed(source, processed_ranges)
+    if top_level.strip():
+        chunks.insert(0, CodeChunk(
+            content=top_level,
+            metadata={
+                "file_name": Path(file_path).name,
+                "file_path": str(file_path),
+                "file_extension": ".sol",
+                "chunk_index": "0",
+                "chunk_type": "top_level",
+                "symbol_name": "pragma_and_imports",
+            }
+        ))
+        for i, chunk in enumerate(chunks):
+            chunk.metadata["chunk_index"] = str(i)
+    
+    # Heç bir struktural chunk tapılmadısa → fallback
+    if not chunks:
+        return _fallback_chunk(source, file_path, language="solidity")
+    
+    logger.info(f"  ⛓️  Solidity: {Path(file_path).name} → {len(chunks)} chunk")
+    return chunks
+
+
+# ============================================
+# SQL CHUNKİNG (Statement-əsaslı)
+# ============================================
+
+_SQL_STATEMENT_PATTERN = re.compile(
+    r'((?:CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|SELECT|WITH|MERGE|EXEC|DECLARE|IF|BEGIN|GRANT|REVOKE)\b[^;]*;)',
+    re.DOTALL | re.IGNORECASE
+)
+
+
+def chunk_sql(source: str, file_path: str) -> List[CodeChunk]:
+    """SQL faylını statement səviyyəsində bölür.
+    
+    Args:
+        source: SQL mənbə kodu
+        file_path: Faylın yolu
+        
+    Returns:
+        CodeChunk siyahısı
+    """
+    chunks = []
+    chunk_index = 0
+    
+    for match in _SQL_STATEMENT_PATTERN.finditer(source):
+        statement = match.group(1).strip()
+        if not statement:
+            continue
+        
+        # Statement tipini müəyyən et
+        stmt_type = statement.split()[0].upper() if statement.split() else "UNKNOWN"
+        
+        # Cədvəl/prosedur adını çıxar
+        name_match = re.search(
+            r'(?:TABLE|VIEW|PROCEDURE|FUNCTION|TRIGGER|INDEX)\s+(?:\[?\w+\]?\.)?(\[?\w+\]?)',
+            statement, re.IGNORECASE
+        )
+        symbol_name = name_match.group(1) if name_match else stmt_type
+        
+        if len(statement) <= config.AST_MAX_CHUNK_SIZE:
+            chunks.append(CodeChunk(
+                content=statement,
+                metadata={
+                    "file_name": Path(file_path).name,
+                    "file_path": str(file_path),
+                    "file_extension": ".sql",
+                    "chunk_index": str(chunk_index),
+                    "chunk_type": f"sql_{stmt_type.lower()}",
+                    "symbol_name": symbol_name,
+                }
+            ))
+            chunk_index += 1
+        else:
+            # Böyük statement → text splitter ilə böl
+            sub_chunks = _fallback_chunk(statement, file_path, language="sql")
+            for sc in sub_chunks:
+                sc.metadata["chunk_index"] = str(chunk_index)
+                sc.metadata["chunk_type"] = f"sql_{stmt_type.lower()}_part"
+                sc.metadata["symbol_name"] = symbol_name
+                chunks.append(sc)
+                chunk_index += 1
+    
+    # Heç bir statement tapılmadısa → fallback
+    if not chunks:
+        return _fallback_chunk(source, file_path, language="sql")
+    
+    logger.info(f"  🗃️  SQL: {Path(file_path).name} → {len(chunks)} chunk")
+    return chunks
+
+
+# ============================================
+# MARKDOWN CHUNKİNG (Başlıq-əsaslı)
+# ============================================
+
+def chunk_markdown(source: str, file_path: str) -> List[CodeChunk]:
+    """Markdown faylını başlıq səviyyəsində bölür.
+    
+    Strategiya: # və ## başlıqlarına görə bölür,
+    hər bölmə öz başlığı ilə birlikdə bir chunk olur.
+    
+    Args:
+        source: Markdown mənbə məzmunu
+        file_path: Faylın yolu
+        
+    Returns:
+        CodeChunk siyahısı
+    """
+    # Lazy import — langchain top-level import 20+ saniyə çəkir
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    # Markdown üçün xüsusi separatorlar
+    md_splitter = RecursiveCharacterTextSplitter(
+        separators=["\n# ", "\n## ", "\n### ", "\n#### ", "\n\n", "\n", " "],
+        chunk_size=config.FALLBACK_CHUNK_SIZE,
+        chunk_overlap=config.FALLBACK_CHUNK_OVERLAP,
+        keep_separator=True,
+    )
+    
+    texts = md_splitter.split_text(source)
+    chunks = []
+    
+    for i, text in enumerate(texts):
+        # Başlığı çıxar (varsa)
+        header_match = re.match(r'^(#{1,4})\s+(.+?)$', text.strip(), re.MULTILINE)
+        symbol_name = header_match.group(2) if header_match else f"section_{i}"
+        
+        chunks.append(CodeChunk(
+            content=text,
+            metadata={
+                "file_name": Path(file_path).name,
+                "file_path": str(file_path),
+                "file_extension": ".md",
+                "chunk_index": str(i),
+                "chunk_type": "markdown_section",
+                "symbol_name": symbol_name,
+            }
+        ))
+    
+    logger.info(f"  📝 Markdown: {Path(file_path).name} → {len(chunks)} chunk")
+    return chunks
+
+
+# ============================================
+# FALLBACK TEXT SPLİTTER
+# ============================================
+
+def _fallback_chunk(source: str, file_path: str, language: str = "python") -> List[CodeChunk]:
+    """AST/regex uğursuz olduqda istifadə olunan ümumi text splitter.
+    
+    LangChain RecursiveCharacterTextSplitter istifadə edir.
+    Dil-spesifik separator-lar tətbiq olunur.
+    
+    Args:
+        source: Mənbə kodu
+        file_path: Faylın yolu
+        language: Proqramlaşdırma dili
+        
+    Returns:
+        CodeChunk siyahısı
+    """
+    # Dil-spesifik separator-lar
+    separators_map = {
+        "python": ["\nclass ", "\ndef ", "\nasync def ", "\n\n", "\n", " "],
+        "solidity": ["\ncontract ", "\nfunction ", "\nmodifier ", "\nevent ", "\n\n", "\n", " "],
+        "sql": ["\nCREATE ", "\nALTER ", "\nSELECT ", "\nINSERT ", "\nUPDATE ", "\n\n", "\n", " "],
+    }
+    
+    separators = separators_map.get(language, ["\n\n", "\n", " "])
+
+    # Lazy import — langchain top-level import 20+ saniyə çəkir
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    splitter = RecursiveCharacterTextSplitter(
+        separators=separators,
+        chunk_size=config.FALLBACK_CHUNK_SIZE,
+        chunk_overlap=config.FALLBACK_CHUNK_OVERLAP,
+        keep_separator=True,
+    )
+    
+    texts = splitter.split_text(source)
+    ext = Path(file_path).suffix
+    
+    chunks = []
+    for i, text in enumerate(texts):
+        chunks.append(CodeChunk(
+            content=text,
+            metadata={
+                "file_name": Path(file_path).name,
+                "file_path": str(file_path),
+                "file_extension": ext,
+                "chunk_index": str(i),
+                "chunk_type": "text_split",
+                "symbol_name": f"block_{i}",
+            }
+        ))
+    
+    logger.info(f"  📄 Fallback: {Path(file_path).name} → {len(chunks)} chunk")
+    return chunks
+
+
+# ============================================
+# KÖMƏKÇI FONKSİYALAR
+# ============================================
+
+def _extract_unprocessed(source: str, processed_ranges: List[Tuple[int, int]]) -> str:
+    """Artıq işlənmiş aralıqları çıxararaq qalan mətni qaytarır."""
+    if not processed_ranges:
+        return source
+    
+    result_parts = []
+    last_end = 0
+    
+    for start, end in sorted(processed_ranges):
+        if last_end < start:
+            result_parts.append(source[last_end:start])
+        last_end = max(last_end, end)
+    
+    if last_end < len(source):
+        result_parts.append(source[last_end:])
+    
+    return "\n".join(result_parts)
+
+
+# ============================================
+# ƏSA FUNKSIYA — FAYLLARI OXUYUB CHUNK-LARA BÖL
+# ============================================
+
+# Fayl uzantısına görə chunking strategiyası
+_CHUNKER_MAP = {
+    ".py": chunk_python,
+    ".sol": chunk_solidity,
+    ".sql": chunk_sql,
+    ".md": chunk_markdown,
+}
+
+
+def load_and_chunk_files(file_paths: List[Path]) -> List[CodeChunk]:
+    """Verilmiş faylları oxuyub chunk-lara bölür.
+    
+    Hər fayl üçün uzantısına uyğun chunking strategiyası tətbiq olunur:
+    - .py → AST-əsaslı chunking
+    - .sol → Regex-əsaslı chunking
+    - .sql → Statement-əsaslı chunking
+    - .md → Başlıq-əsaslı chunking
+    
+    Args:
+        file_paths: Oxunacaq faylların Path siyahısı
+        
+    Returns:
+        Bütün fayllardan yaranan CodeChunk siyahısı
+    """
+    all_chunks = []
+    errors = []
+    
+    for file_path in file_paths:
+        try:
+            # Faylı oxu
+            source = file_path.read_text(encoding="utf-8", errors="replace")
+            
+            # Boş faylları keç
+            if not source.strip():
+                logger.debug(f"Boş fayl keçildi: {file_path}")
+                continue
+            
+            # Uyğun chunker-i seç
+            ext = file_path.suffix
+            chunker = _CHUNKER_MAP.get(ext)
+            
+            if chunker:
+                chunks = chunker(source, str(file_path))
+            else:
+                # Naməlum uzantı — fallback
+                chunks = _fallback_chunk(source, str(file_path))
+            
+            all_chunks.extend(chunks)
+            
+        except UnicodeDecodeError as e:
+            logger.warning(f"⚠️ Kodlaşdırma xətası ({file_path}): {e}")
+            errors.append(str(file_path))
+        except Exception as e:
+            logger.error(f"❌ Xəta ({file_path}): {e}")
+            errors.append(str(file_path))
+    
+    if errors:
+        logger.warning(f"⚠️ {len(errors)} fayl oxuna bilmədi: {errors}")
+    
+    logger.info(f"✅ Cəmi: {len(all_chunks)} chunk yaradıldı ({len(file_paths)} fayldan)")
+    return all_chunks
+
+
+def load_directory(directory: str) -> List[CodeChunk]:
+    """Qovluğu tam indeksləmək üçün əlverişli funksiya.
+    
+    find_code_files + load_and_chunk_files birləşdirilmiş versiya.
+    
+    Args:
+        directory: İndeksləmə üçün qovluq yolu
+        
+    Returns:
+        CodeChunk siyahısı
+    """
+    files = find_code_files(directory)
+    if not files:
+        logger.warning(f"⚠️ Heç bir kod faylı tapılmadı: {directory}")
+        return []
+    
+    return load_and_chunk_files(files)
