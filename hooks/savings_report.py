@@ -12,10 +12,13 @@ istifadəçiyə göstərir, sonra log-u təmizləyir.
 
 import json
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
+# Per-task savings tarixçəsi — Claude/Claude Code yenidən oxuya bilsin deyə.
+SAVINGS_HISTORY = PROJECT_ROOT / ".mla_savings_history.jsonl"
 
 
 def main() -> int:
@@ -72,6 +75,24 @@ def main() -> int:
         f"→ {pct:.1f}% qənaət"
     )
     sys.stderr.write(msg + "\n")
+
+    # Tarixçəni arşivlə — sonradan cumulative qənaət hesabatı üçün.
+    # Bir sətir = bir task. JSONL formatı append-safe-dir.
+    try:
+        record = {
+            "ts": time.time(),
+            "searches": len(entries),
+            "actual_tokens": total_actual,
+            "baseline_tokens": baseline,
+            "saving_tokens": saving,
+            "saving_pct": round(pct, 2),
+            "file_count": len(unique_files),
+        }
+        with open(SAVINGS_HISTORY, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except IOError:
+        # Arşivləmə uğursuz olsa belə, hesabat artıq stderr-ə yazılıb
+        pass
 
     # Log-u təmizlə (sonrakı task üçün)
     try:

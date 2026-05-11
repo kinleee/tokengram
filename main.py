@@ -170,6 +170,74 @@ def cmd_reset(args):
 
 
 # ============================================
+# ƏMR — SAVINGS (token qənaəti tarixçəsi)
+# ============================================
+
+def cmd_savings(args):
+    """savings_report.py hook-unun yığdığı per-task arşivi göstər."""
+    import json
+    from datetime import datetime, timedelta
+
+    project_root = Path(__file__).resolve().parent
+    history = project_root / ".mla_savings_history.jsonl"
+
+    if not history.exists():
+        print("⚠️  .mla_savings_history.jsonl yoxdur — hələ search_code çağırılmayıb")
+        print("    (yaxud Stop hook arxivə yazmamış sənin əvvəlki versiya olub)")
+        return 0
+
+    records = []
+    for line in history.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    if not records:
+        print("⚠️  Tarixçə boşdur")
+        return 0
+
+    total_searches = sum(r.get("searches", 0) for r in records)
+    total_actual = sum(r.get("actual_tokens", 0) for r in records)
+    total_baseline = sum(r.get("baseline_tokens", 0) for r in records)
+    total_saving = total_baseline - total_actual
+    pct = (total_saving / total_baseline * 100) if total_baseline > 0 else 0.0
+
+    # Son 24 saat
+    cutoff = datetime.now().timestamp() - 86400
+    recent = [r for r in records if r.get("ts", 0) >= cutoff]
+    r_actual = sum(r.get("actual_tokens", 0) for r in recent)
+    r_baseline = sum(r.get("baseline_tokens", 0) for r in recent)
+    r_saving = r_baseline - r_actual
+    r_pct = (r_saving / r_baseline * 100) if r_baseline > 0 else 0.0
+
+    print("📊 MLA Agent — Token Qənaəti Tarixçəsi")
+    print("=" * 50)
+    print(f"  Tasklar (cəmi):       {len(records):,}")
+    print(f"  search_code çağırışı: {total_searches:,}")
+    print()
+    print(f"  Cəmi istifadə:        {total_actual:>10,} tok")
+    print(f"  Cəmi baseline:        {total_baseline:>10,} tok")
+    print(f"  Qənaət:               {total_saving:>10,} tok ({pct:.1f}%)")
+    print()
+    print(f"  Son 24 saat:          {len(recent)} task, "
+          f"{r_saving:,} tok qənaət ({r_pct:.1f}%)")
+
+    if args.verbose:
+        print()
+        print("Son 10 task:")
+        for r in records[-10:]:
+            ts = datetime.fromtimestamp(r.get("ts", 0)).strftime("%m-%d %H:%M")
+            print(f"  {ts}  {r.get('searches', 0)} axtarış, "
+                  f"{r.get('saving_tokens', 0):,} tok qənaət ({r.get('saving_pct', 0):.1f}%)")
+
+    return 0
+
+
+# ============================================
 # ƏMR — RESET-QUEUE (emergency)
 # ============================================
 
@@ -267,6 +335,12 @@ def build_parser():
         help="Stuck pending növbə fayllarını sil (MCP donduqda)",
     )
     p_rq.set_defaults(func=cmd_reset_queue)
+
+    # savings (token qənaəti tarixçəsi)
+    p_sv = sub.add_parser("savings", help="Token qənaəti tarixçəsini göstər")
+    p_sv.add_argument("--verbose", "-V", action="store_true",
+                      help="Son 10 task detallı")
+    p_sv.set_defaults(func=cmd_savings)
 
     # route
     p_route = sub.add_parser("route", help="Smart router məsləhəti")

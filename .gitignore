@@ -41,5 +41,8 @@ models_cache/
 # MLA Agent sessiya analytics log
 .mla_session_log.jsonl
 
+# MLA Agent per-task qənaət tarixçəsi (per-machine, push olunmamalıdır)
+.mla_savings_history.jsonl
+
 # Claude Code lokal/şəxsi tənzimləmələr (settings.json paylaşılır)
 .claude/settings.local.json
