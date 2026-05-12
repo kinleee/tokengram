@@ -19,6 +19,7 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     vscode.StatusBarAlignment.Right,
     100,
   );
+  item.command = 'mla.menu';
   item.show();
 
   const refresh = () => {

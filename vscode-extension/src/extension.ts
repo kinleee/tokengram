@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
+import { registerMenuCommand } from './menu';
 import { createStatusBar } from './statusBar';
 
 export function activate(context: vscode.ExtensionContext) {
+  context.subscriptions.push(registerMenuCommand(context));
   const statusBar = createStatusBar(context);
   context.subscriptions.push(statusBar);
 }
