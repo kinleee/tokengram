@@ -15,6 +15,14 @@ import sys
 import time
 from pathlib import Path
 
+# Windows-un default stderr encoding-i cp1252-dir, Azərbaycan hərfləri
+# `ş` kimi escape olunur (test phase3 bu bug-u tutdu). UTF-8-ə force.
+if sys.platform == "win32":
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 # Per-task savings tarixçəsi — Claude/Claude Code yenidən oxuya bilsin deyə.

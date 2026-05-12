@@ -41,11 +41,15 @@ def _read_session_log():
 
 
 def _run_hook(script: Path, payload: dict, timeout: float = 5.0):
+    # Explicit UTF-8 — Windows-un cp1252 default-u Azərbaycan hərflərini
+    # mojibake-yə çevirir.
     proc = subprocess.run(
         [PYTHON, str(script)],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
     return proc.returncode, proc.stdout, proc.stderr

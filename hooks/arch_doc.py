@@ -9,6 +9,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# Windows-da gələcəkdə stderr-ə Azərbaycanca log yazsaq, savings_report
+# ilə eyni cp1252 escape problemi olmasın. Defensive default.
+if sys.platform == "win32":
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 ARCH_STATE = PROJECT_ROOT / ".mla_arch_state.json"
