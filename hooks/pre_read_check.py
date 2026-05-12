@@ -11,9 +11,12 @@ import sys
 import time
 from pathlib import Path
 
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS
+
 THRESHOLD_BLOCK = 50
 THRESHOLD_WARN = 30
-INDEXED_EXTS = {".py", ".md", ".sol", ".sql"}
 
 
 def main():
@@ -73,9 +76,10 @@ def main():
             pass
 
         msg = (
-            f"MLA enforcement: '{file_path.name}' {line_count} setir, ChromaDB-de indeksli.\n"
+            f"MLA enforcement: '{file_path.name}' {line_count} setir, indekslemeye uyqundur.\n"
             f"   Evvel: mcp__mla-agent__search_code mode=fast query=\"...\"\n"
-            f"   Bypass lazimdirsa: /MlaOff (sonra /MlaOn ile geri qaytar)."
+            f"   Bos cavab gelirse: /MlaReindex (yeni extension chroma_db-de yoxdur).\n"
+            f"   Bypass: /MlaOff (sonra /MlaOn ile geri qaytar)."
         )
         print(msg, file=sys.stderr)
         sys.exit(2)

@@ -10,10 +10,11 @@ Claude Code ilə işlədikdə istifadəyə hazır slash command-lar. Hamısı `.
 | `/MlaResetBar` | Savings history-i sıfırla (köhnəsi backup-a köçürülür), status bar 0-dan başlasın | `hooks/reset_savings.py` |
 | `/MlaArch` | Auto-generated arch doc-u göstər — search_code çağırışlarından tərtib olunmuş fayl xəritəsi + son 20 axtarış mövzusu | `hooks/show_arch.py` |
 | `/MlaSync` | Pending `.mla_session_log.jsonl` entry-lərini manual olaraq history-yə köçür (Stop hook interrupt-dən recovery — P16) | `hooks/savings_report.py` |
+| `/MlaReindex` | ChromaDB-ni cari layihə üçün tam re-index et (`--fresh`). Yeni dil/extension əlavə olunanda və ya köhnə indeksin stale olduğuna şübhə yarananda işə sal | `main.py index . --fresh` |
 
 ## Enforcement davranışı
 
-`hooks/pre_read_check.py` PreToolUse hook-u Read tool-u yoxlayır. Yalnız layihə daxilindəki `.py / .md / .sol / .sql` faylları üçün işləyir.
+`hooks/pre_read_check.py` PreToolUse hook-u Read tool-u yoxlayır. Yalnız layihə daxilindəki indekslənmiş uzantılar üçün işləyir — siyahı `mla_constants.SUPPORTED_EXTENSIONS`-da mərkəzləşdirilib (Python, TS/JS, Go, Rust, Java, C/C++, Ruby, PHP, Swift, Dart, Kotlin, HTML/CSS/SCSS, JSON/YAML/TOML, shell, Terraform). Yeni uzantı əlavə edib `/MlaReindex` çağırmaq lazımdır ki, ChromaDB faktiki içəriyə malik olsun.
 
 | Sətir sayı | Davranış |
 |---|---|

@@ -95,11 +95,33 @@ def find_code_files(directory: str) -> List[Path]:
             # Qovluq yoxlaması — istisna edilən qovluqları keç
             if any(excluded in file_path.parts for excluded in config.EXCLUDED_DIRS):
                 continue
-            
+
+            if not file_path.is_file():
+                continue
+
             # Fayl uzantısı yoxlaması
-            if file_path.is_file() and file_path.suffix in config.SUPPORTED_EXTENSIONS:
-                found_files.append(file_path)
-                
+            if file_path.suffix not in config.SUPPORTED_EXTENSIONS:
+                continue
+
+            # Fayl adı / suffix qara siyahısı (lock faylları, minified bundles,
+            # generated kod, MLA internal state) — bunlar indeksə dəyməz
+            name = file_path.name
+            if any(name.startswith(p) for p in config.EXCLUDED_FILE_PATTERNS):
+                continue
+            if any(name.endswith(s) for s in config.EXCLUDED_FILE_SUFFIXES):
+                continue
+
+            # Ölçü tavanı — vendor bundle / data dump faylları embedding-də OOM
+            # və ya indeksdə şişməyə səbəb ola bilər
+            try:
+                if file_path.stat().st_size > config.MAX_FILE_SIZE_BYTES:
+                    logger.debug(f"Ölçü tavanı keçildi, keçildi: {file_path}")
+                    continue
+            except OSError:
+                continue
+
+            found_files.append(file_path)
+
     except PermissionError as e:
         logger.warning(f"İcazə xətası, bəzi fayllar keçildi: {e}")
     

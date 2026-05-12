@@ -15,50 +15,15 @@ load_dotenv()
 # ============================================
 # FAYL SİSTEMİ KONFİQURASİYASI
 # ============================================
+# Tək mənbə: `mla_constants.py`. Bütün hooks da oradan import edir,
+# beləliklə 5 yerdə drift olmur.
 
-# Dəstəklənən fayl uzantıları
-SUPPORTED_EXTENSIONS = {".py", ".sol", ".sql", ".md"}
-
-# İndeksləmə zamanı istisna edilən qovluqlar
-EXCLUDED_DIRS = {
-    "chroma_db",
-    "__pycache__",
-    ".git",
-    "node_modules",
-    "venv",
-    ".venv",
-    "env",
-    ".env",
-    "dist",
-    "build",
-    ".eggs",
-    "models_cache",
-    ".idea",
-    ".vscode",
-    # AI agent / tooling qovluqları — bunlar layihə kodu deyil,
-    # baza qarışmasın deyə istisna edirik (memory faylları, telemetry və s.)
-    ".claude",
-    ".aider",
-    ".cursor",
-    ".antigravity",
-    ".mla",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".tox",
-    "site-packages",
-    "target",  # Rust / Java
-    "out",
-    ".next",
-    ".nuxt",
-}
-
-# Glob nümunələri ilə fayl-səviyyəli istisnalar (qovluq-əsaslı deyil).
-# Watcher və hookların öz queue/log fayllarına reaksiya verməməsi üçün.
-EXCLUDED_FILE_PATTERNS = (
-    ".mla_pending",
-    ".mla_session_log",
-    ".file_hashes",
+from mla_constants import (
+    SUPPORTED_EXTENSIONS,
+    EXCLUDED_DIRS,
+    EXCLUDED_FILE_PATTERNS,
+    EXCLUDED_FILE_SUFFIXES,
+    MAX_FILE_SIZE_BYTES,
 )
 
 # ============================================

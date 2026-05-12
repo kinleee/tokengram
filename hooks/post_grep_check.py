@@ -15,8 +15,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 ENFORCEMENT_FLAG = PROJECT_ROOT / ".mla_enforcement.flag"
 
+sys.path.insert(0, str(PROJECT_ROOT))
+from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS
+
 THRESHOLD_LINES = 30
-INDEXED_EXTS = {".py", ".md", ".sol", ".sql"}
 ESTIMATED_ACTUAL_RATIO = 0.15
 
 

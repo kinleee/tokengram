@@ -28,18 +28,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 QUEUE_FILE = PROJECT_ROOT / ".mla_pending.txt"
 
-# Layihəmizin config-indən import etmədən sadə siyahı
-# DİQQƏT: config.py-dəki EXCLUDED_DIRS ilə sinxron saxlamaq lazımdır.
-SUPPORTED_EXTENSIONS = {".py", ".sol", ".sql", ".md"}
-EXCLUDED_DIRS = {
-    "chroma_db", "__pycache__", ".git", "node_modules",
-    "venv", ".venv", "env", ".env", "dist", "build",
-    ".eggs", "models_cache", ".idea", ".vscode",
-    ".claude", ".aider", ".cursor", ".antigravity", ".mla",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox",
-    "site-packages", "target", "out", ".next", ".nuxt",
-}
-EXCLUDED_FILE_PATTERNS = (".mla_pending", ".mla_session_log", ".file_hashes")
+# Mərkəzi siyahılardan import — `mla_constants.py` tək mənbədir.
+sys.path.insert(0, str(PROJECT_ROOT))
+from mla_constants import (
+    SUPPORTED_EXTENSIONS,
+    EXCLUDED_DIRS,
+    EXCLUDED_FILE_PATTERNS,
+    EXCLUDED_FILE_SUFFIXES,
+)
 
 
 def main() -> int:
@@ -62,6 +58,8 @@ def main() -> int:
     if any(part in EXCLUDED_DIRS for part in p.parts):
         return 0
     if any(p.name.startswith(pat) for pat in EXCLUDED_FILE_PATTERNS):
+        return 0
+    if any(p.name.endswith(sfx) for sfx in EXCLUDED_FILE_SUFFIXES):
         return 0
 
     # Növbəyə əlavə et (idempotent — eyni yol çoxlu dəfə ola bilər,
