@@ -18,8 +18,8 @@ venv/
 .venv/
 env/
 
-# IDE
-.vscode/
+# IDE (root only — vscode-extension/.vscode/ contains shared dev config)
+/.vscode/
 .idea/
 *.swp
 *.swo
@@ -43,6 +43,13 @@ models_cache/
 
 # MLA Agent per-task qənaət tarixçəsi (per-machine, push olunmamalıdır)
 .mla_savings_history.jsonl
+.mla_savings_history.jsonl.bak*
+
+# MLA Read-enforcement runtime state (per-machine)
+.mla_enforcement.flag
+
+# Müvəqqəti append/edit faylları
+_tmp_*.md
 
 # Claude Code lokal/şəxsi tənzimləmələr (settings.json paylaşılır)
 .claude/settings.local.json

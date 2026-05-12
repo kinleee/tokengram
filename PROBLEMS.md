@@ -207,3 +207,80 @@ Bunlar artıq həll olunub və burada xatırlatma kimi:
 3. Modeli əl ilə pre-load et: `python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"` — gözləməyəcəksən, amma proqresi görəcəksən
 4. `python main.py index . --fresh` — indi sürətli olmalıdır (~30 saniyə)
 5. Claude Code-u restart et və `mcp__mla-agent__get_stats` çağır → dərhal cavab gəlməlidir
+
+
+---
+
+## 📅 2026-05-12 — Sistem Analizi (UI extension + hook inteqrasiyası sessiyası)
+
+Bu gün VS Code extension MVP-si qurulan, PreToolUse Read hook-u + 4 slash command inteqrə olunan, statsig/firewall yanlış diaqnozu açıqlanan sessiya boyu tapılan problemlər.
+
+### P15 — `search_code` 6+ dəqiqə hang olur background indexing zamanı (kritik)
+
+**Simptom:** Watchdog yeni dəyişmiş faylları indekslədikdə paralel `search_code` çağırışı 6+ dəqiqə cavab vermir. İstifadəçi interrupt etməyə məcbur olur.
+
+**Səbəb:** ChromaDB write-during-read lock kontestasi — indexing yazma əməliyyatı search oxuma əməliyyatını blokladır. 3-4 fayl eyni anda yenidən indekslənirsə kaskad effekti yaranır.
+
+**Təsir:** Claude Code dondurulmuş görünür, SESSION_LOG yarımçıq qalır, user-ə "tool donub" hissi.
+
+**Həll variantları:**
+- ChromaDB read-during-write tolerance (parallel queries while indexing)
+- Search request-lərə hard timeout 10s, sonra fail-fast cavab — donmaqdan yaxşıdır
+- Watchdog debounce-u 2s-dən 10s-ə qaldır — daha az batch, daha az lock saxlanması
+
+---
+
+### P16 — Stop hook user interrupt-da fire olmur (orta)
+
+**Simptom:** İstifadəçi Esc və ya stop düyməsi ilə turn-u kəsdikdə, `savings_report.py` Stop hook-u işə düşmür. `.mla_session_log.jsonl` entry-ləri yığılır, `.mla_savings_history.jsonl`-ə köçürülmür. Status bar widget boş qalır.
+
+**Səbəb:** Claude Code-un interrupt flow-u normal turn-end hook-larını bypass edir (görünür design decision-dir).
+
+**Təsir:** Sayğac boş qalır, baxmayaraq ki search_code uğurla işlədi. User "niyə rəqəm yoxdur?" deyə soruşur.
+
+**Həll variantları:**
+- Yeni `/MlaSync` slash command — SESSION_LOG-u history-ə əl ilə işə sal
+- VS Code extension SESSION_LOG-u də oxusun (history-ə əlavə olaraq) — anlıq görünər
+- PreToolUse hook hər çağırışda əvvəlki session-i flush etsin — yavaşladır amma robust
+
+---
+
+### P17 — Bash environment-də `python` PATH-də yoxdur, `$CLAUDE_PROJECT_DIR` resolve olmur (aşağı)
+
+**Simptom:** Slash command body-də `python "$CLAUDE_PROJECT_DIR/hooks/x.py"` çağırışı exit 127 verir — bash `python` tapmır, `$CLAUDE_PROJECT_DIR`-i isə `/c/Users/.../Git/...` kimi yanlış yola çevirir.
+
+**Səbəb:** Claude Code-un bash sandbox-u sistem PATH-ını və `CLAUDE_PROJECT_DIR` env var-ını miras almır.
+
+**Təsir:** Slash command implementasiyaları absolute path-lərə güvənməyə məcburdur (`C:/Users/.../Python312/python.exe`), başqa maşına portativ deyil.
+
+**Həll variantları:**
+- Slash command body-də Windows `py` launcher (mövcudsa)
+- Sənədli olaraq qəbul et — bu repo Windows + bu istifadəçi üçündür, marketplace versiyasında həll lazımdır
+- `hooks/` skriptlərini shebang-li icra fayllarına çevir (Windows-da nəticəsiz)
+
+---
+
+### P18 — Statsig/api.claude.ai firewall hipotezi yanlış diaqnoz idi (sənədli)
+
+**Real səbəb (təsdiqlənmiş):** Anthropic backend `utilization` endpoint-i organization-wide HTTP 429 rate-limit qaytarır. Account & Usage paneli sonsuz "Loading..." göstərir.
+
+**Yanlış hipotezlər (test etmədən qəbul etdim):**
+- `statsig.anthropic.com` korporativ firewall-da bloklanır → əslində public DNS-də ümumiyyətlə mövcud deyil (NXDOMAIN)
+- `api.claude.ai` korporativ firewall-da bloklanır → eyni hekayə
+
+**Düzgün diaqnoz yolu (sonra tapdım):** Extension log-larında bir-iki dəqiqəyə `Failed to fetch utilization: AxiosError: Request failed with status code 429` görmək olardı. Bunu ilk axtarsaydım, 30 dəqiqəlik hosts file workaround-ı boşa keçməzdi.
+
+**Dərs:** Yeni şikayət gələndə ilk olaraq `~/AppData/Roaming/Code/logs/<latest>/window1/exthost/Anthropic.claude-code/Claude VSCode.log` faylına bax, sonra hipotez qur. Hosts redirect-ləri sonradan revert olundu.
+
+---
+
+### Bu gün quraşdırılan və işlək komponentlər (referans)
+
+- **VS Code extension** `erp-intel.mla-agent` v0.1.0 (4.4 KB esbuild bundle) daimi install
+- **Status bar widget** sağ alt küncdə, file watcher ilə dərhal yenilənir
+- **Yaşıl dolu / boş dairə** — enforcement state visual feedback (ThemeColor `charts.green`)
+- **4 slash command** registered: `/MlaOn`, `/MlaOff`, `/MlaRefreshBar`, `/MlaResetBar`
+- **PreToolUse Read hook** 3-tier davranış (block ≥50, soft-warn 30-49, silent <30)
+- **2 FileSystemWatcher** — flag və history fayllarına bağlı
+- **Manual savings_report.py** interrupt-dan recovery üçün işlək (`python hooks/savings_report.py < /dev/null`)
+- **SLASH_COMMANDS.md** layihə kökündə referans sənəd
