@@ -57,12 +57,20 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     const savedK = (summary.savedTokens24h / 1000).toFixed(1);
     item.text = `${icon} MLA: ${savedK}k saved · ${summary.savedPct24h.toFixed(0)}%`;
     item.color = color;
+    const searchK = summary.savedFromSearch24h.toLocaleString();
+    const blockK = summary.savedFromBlocks24h.toLocaleString();
+    const grepK = summary.savedFromGreps24h.toLocaleString();
     item.tooltip =
       `Enforcement: ${stateLabel}\n` +
       `Last 24h: ${summary.recent24hTasks} tasks, ` +
       `${summary.savedTokens24h.toLocaleString()} tokens saved ` +
       `(${summary.savedPct24h.toFixed(1)}%)\n` +
-      `Lifetime: ${summary.totalTasks} tasks, ${summary.totalSearches} searches`;
+      `  • search_code: ${searchK} tok\n` +
+      `  • Grep: ${grepK} tok (${summary.recent24hGreps} greps)\n` +
+      `  • Read-block: ${blockK} tok (${summary.recent24hBlocks} blocks)\n` +
+      `Lifetime: ${summary.totalTasks} tasks, ` +
+      `${summary.totalSearches} searches, ` +
+      `${summary.totalGreps} greps, ${summary.totalBlocks} blocks`;
   };
 
   refresh();

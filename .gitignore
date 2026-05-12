@@ -48,6 +48,10 @@ models_cache/
 # MLA Read-enforcement runtime state (per-machine)
 .mla_enforcement.flag
 
+# MLA Auto-generated arch doc + state (per-machine, accumulates from session_log)
+.mla_arch.md
+.mla_arch_state.json
+
 # Müvəqqəti append/edit faylları
 _tmp_*.md
 

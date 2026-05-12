@@ -8,6 +8,7 @@
 """
 import json
 import sys
+import time
 from pathlib import Path
 
 THRESHOLD_BLOCK = 50
@@ -55,6 +56,22 @@ def main():
         sys.exit(0)
 
     if line_count >= THRESHOLD_BLOCK:
+        # Block hadisəsini session_log-a yaz — savings_report təxmini qənaəti
+        # baseline-ə əlavə edəcək (Read-də ~10 tok/sətir, biz 0 işlətdik).
+        session_log = project_root / ".mla_session_log.jsonl"
+        try:
+            record = {
+                "ts": time.time(),
+                "type": "read_block",
+                "file": str(file_path),
+                "lines": line_count,
+                "estimated_baseline_tokens": line_count * 10,
+            }
+            with open(session_log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
         msg = (
             f"MLA enforcement: '{file_path.name}' {line_count} setir, ChromaDB-de indeksli.\n"
             f"   Evvel: mcp__mla-agent__search_code mode=fast query=\"...\"\n"
