@@ -1,6 +1,6 @@
 # MLA Agent — Slash Commands
 
-Claude Code ilə işlədikdə istifadəyə hazır 4 slash command. Hamısı `.claude/commands/` qovluğunda yazılıb.
+Claude Code ilə işlədikdə istifadəyə hazır slash command-lar. Hamısı `.claude/commands/` qovluğunda yazılıb.
 
 | Command | Funksiya | Skript |
 |---|---|---|
@@ -9,6 +9,7 @@ Claude Code ilə işlədikdə istifadəyə hazır 4 slash command. Hamısı `.cl
 | `/MlaRefreshBar` | VS Code status bar widget-i indi yenilə — yeni savings yazılıbsa dərhal göstər | `hooks/refresh_bar.py` |
 | `/MlaResetBar` | Savings history-i sıfırla (köhnəsi backup-a köçürülür), status bar 0-dan başlasın | `hooks/reset_savings.py` |
 | `/MlaArch` | Auto-generated arch doc-u göstər — search_code çağırışlarından tərtib olunmuş fayl xəritəsi + son 20 axtarış mövzusu | `hooks/show_arch.py` |
+| `/MlaSync` | Pending `.mla_session_log.jsonl` entry-lərini manual olaraq history-yə köçür (Stop hook interrupt-dən recovery — P16) | `hooks/savings_report.py` |
 
 ## Enforcement davranışı
 
@@ -30,7 +31,7 @@ Stop hook `savings_report.py` hər task sonunda `.mla_session_log.jsonl`-i oxuyu
 |---|---|---|---|
 | **search_code** | MCP tool çağırışı | qaytarılan faylların tam ölçüsü | qaytarılan chunk-ların token sayı |
 | **Grep** (`post_grep_check.py`) | Grep tool indeksli fayl üzərində (≥30 sətir) | `lines * 10` | `baseline * 15%` (heuristik) |
-| **Bash-inspect** (`post_bash_check.py`) | `cat/head/tail/wc/less/more` Bash-da indeksli fayl üzərində (≥50 sətir) | `lines * 10` | `baseline * 20%` (heuristik) |
+| **Bash-inspect** (`post_bash_check.py`) | İndeksli fayl üzərində inspect komandası (≥50 sətir). Tutulan açar sözlər: `cat / head / tail / wc / less / more / awk / sed / type / findstr / gc / Get-Content / Select-String / sls / git show <ref>:<path>` | `lines * 10` | `baseline * 20%` (heuristik) |
 | **Read-block** (`pre_read_check.py`) | Block hadisəsi (≥50 sətir) | `lines * 10` | 0 (oxunmadı) |
 
 Hər birinin **baseline-ı toplu cəm-ə qatılır**, **actual** yalnız faktiki istifadədə (block-larda 0). Status bar widget bu cəmi göstərir, tooltip search/Grep/Read-block breakdown verir (bash-inspect total-a daxildir).
