@@ -17,6 +17,9 @@ if sys.platform == "win32":
     except (AttributeError, OSError):
         pass
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from i18n import tr
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 ARCH_STATE = PROJECT_ROOT / ".mla_arch_state.json"
@@ -76,38 +79,37 @@ def render_doc(state: dict) -> None:
     recent = state["recent_searches"]
 
     lines = [
-        "# MLA Auto-Generated Architecture",
+        f"# {tr('arch_title')}",
         "",
-        f"*Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*  ",
-        f"*Files discovered: {len(state['files'])}*  ",
-        f"*Total `search_code` calls processed: {state['total_searches']}*  ",
-        f"*Recent search history kept: {len(recent)} (max {MAX_RECENT_SEARCHES})*",
+        f"*{tr('arch_meta_last_updated')}: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*  ",
+        f"*{tr('arch_meta_files')}: {len(state['files'])}*  ",
+        f"*{tr('arch_meta_total_searches')}: {state['total_searches']}*  ",
+        f"*{tr('arch_meta_recent')}: {len(recent)} ({tr('arch_meta_max')} {MAX_RECENT_SEARCHES})*",
         "",
-        "Bu fayl `search_code` çağırışlarından avtomatik tərtib olunur. ",
-        "İnsan yazısı deyil — Stop hook hər task sonunda yeniləyir. ",
-        "Manual redaktə yox; faydalı olsa silinə bilər (yenidən qurulacaq).",
+        tr("arch_intro"),
         "",
         "---",
         "",
-        "## Tapılmış Fayllar (search_code-da görsənmə tezliyinə görə)",
+        tr("arch_files_heading"),
         "",
     ]
     if not files_sorted:
-        lines.append("*(Hələ heç bir fayl tapılmayıb. İlk search_code çağırışından sonra doldurulacaq.)*")
+        lines.append(tr("arch_files_empty"))
     else:
         for path, count in files_sorted:
-            lines.append(f"- `{path}` — {count} dəfə")
+            lines.append(tr("arch_files_entry", path=path, count=count))
 
     lines.extend([
         "",
         "---",
         "",
-        f"## Son {len(recent)} Axtarış Mövzusu (yeni → köhnə)",
+        tr("arch_recent_heading", n=len(recent)),
         "",
     ])
     if not recent:
-        lines.append("*(Hələ heç bir axtarış tarixçəsi yoxdur.)*")
+        lines.append(tr("arch_recent_empty"))
     else:
+        no_results = tr("arch_recent_no_results")
         for entry in reversed(recent):
             ts_raw = entry.get("ts", 0)
             try:
@@ -116,7 +118,7 @@ def render_doc(state: dict) -> None:
                 ts = "??-?? ??:??"
             query = entry.get("query", "")
             files = entry.get("files", [])
-            files_str = ", ".join(files[:5]) if files else "*(nəticə yox)*"
+            files_str = ", ".join(files[:5]) if files else no_results
             extra = f" +{len(files)-5}" if len(files) > 5 else ""
             lines.append(f"- **{ts}** — `\"{query}\"` → {files_str}{extra}")
 

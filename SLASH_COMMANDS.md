@@ -1,62 +1,109 @@
 # MLA Agent — Slash Commands
 
-Claude Code ilə işlədikdə istifadəyə hazır slash command-lar. Hamısı `.claude/commands/` qovluğunda yazılıb.
+Ready-to-use slash commands inside Claude Code. All definitions live in
+`.claude/commands/`. Each one is a thin wrapper around the back-end
+Python script of the same name — the VS Code status-bar QuickPick calls
+the very same scripts, so behaviour stays identical across UIs.
 
-| Command | Funksiya | Skript |
+| Command | What it does | Script |
 |---|---|---|
-| `/MlaOn` | Read-enforcement aktiv et — böyük (≥50 sətir) indekslənmiş faylları blokla, search_code istifadəsini məcburi et | `hooks/toggle_mla.py on` |
-| `/MlaOff` | Enforcement deaktiv et — Read sərbəst, search_code məsləhət deyil | `hooks/toggle_mla.py off` |
-| `/MlaRefreshBar` | VS Code status bar widget-i indi yenilə — yeni savings yazılıbsa dərhal göstər | `hooks/refresh_bar.py` |
-| `/MlaResetBar` | Savings history-i sıfırla (köhnəsi backup-a köçürülür), status bar 0-dan başlasın | `hooks/reset_savings.py` |
-| `/MlaArch` | Auto-generated arch doc-u göstər — search_code çağırışlarından tərtib olunmuş fayl xəritəsi + son 20 axtarış mövzusu | `hooks/show_arch.py` |
-| `/MlaSync` | Pending `.mla_session_log.jsonl` entry-lərini manual olaraq history-yə köçür (Stop hook interrupt-dən recovery — P16) | `hooks/savings_report.py` |
-| `/MlaReindex` | ChromaDB-ni cari layihə üçün tam re-index et (`--fresh`). Yeni dil/extension əlavə olunanda və ya köhnə indeksin stale olduğuna şübhə yarananda işə sal | `main.py index . --fresh` |
+| `/MlaOn` | Enable Read-enforcement — block large (≥50 lines) indexed files, force the assistant to use `search_code` | `hooks/toggle_mla.py on` |
+| `/MlaOff` | Disable enforcement — `Read` is unrestricted, `search_code` is optional | `hooks/toggle_mla.py off` |
+| `/MlaRefreshBar` | Force the VS Code status bar to refresh immediately (`mtime` touch) | `hooks/refresh_bar.py` |
+| `/MlaResetBar` | Reset the savings history (old history is moved to a backup); the bar starts from zero | `hooks/reset_savings.py` |
+| `/MlaArch` | Show the auto-generated architecture doc — file map sorted by `search_code` occurrence + last 20 search topics | `hooks/show_arch.py` |
+| `/MlaSync` | Manually flush pending `.mla_session_log.jsonl` entries into the history (recovery when the Stop hook is skipped) | `hooks/savings_report.py` |
+| `/MlaReindex` | Full `--fresh` ChromaDB re-index for the current project. Run after adding a new language/extension or when the index is stale | `main.py index . --fresh` |
 
-## Enforcement davranışı
+## Enforcement behaviour
 
-`hooks/pre_read_check.py` PreToolUse hook-u Read tool-u yoxlayır. Yalnız layihə daxilindəki indekslənmiş uzantılar üçün işləyir — siyahı `mla_constants.SUPPORTED_EXTENSIONS`-da mərkəzləşdirilib (Python, TS/JS, Go, Rust, Java, C/C++, Ruby, PHP, Swift, Dart, Kotlin, HTML/CSS/SCSS, JSON/YAML/TOML, shell, Terraform). Yeni uzantı əlavə edib `/MlaReindex` çağırmaq lazımdır ki, ChromaDB faktiki içəriyə malik olsun.
+The PreToolUse hook `hooks/pre_read_check.py` inspects every `Read` call
+and only acts on files inside the project tree with an indexed extension
+— the list lives in `mla_constants.SUPPORTED_EXTENSIONS` (Python, TS/JS,
+Go, Rust, Java, Kotlin, C/C++/C#, Ruby, PHP, Swift, Dart, HTML/CSS/SCSS,
+JSON/YAML/TOML, shell, Terraform). After adding a new extension, run
+`/MlaReindex` so ChromaDB actually contains content for that file type.
 
-| Sətir sayı | Davranış |
+| Line count | Behaviour |
 |---|---|
-| ≥ 50 | **Block** (exit 2) — search_code istifadə et |
-| 30 – 49 | **Allow + soft tip** (stderr) — search_code daha sərfəli olardı |
-| < 30 | **Silent allow** — cüzi faydadır |
+| ≥ 50 | **Block** (exit 2) — assistant must use `search_code` |
+| 30 – 49 | **Allow + soft tip** (stderr) — `search_code` would be cheaper |
+| < 30 | **Silent allow** — savings are minimal |
 
-State faylı: `.mla_enforcement.flag` (`on` / `off`). **OFF olduqda** `arch_doc.py`, `savings_report.py` və `pre_read_check.py` heç biri işləmir — sayğac dayanır, log yığılmır.
+State file: `.mla_enforcement.flag` (`on` / `off`). When **OFF**, none of
+`arch_doc.py`, `savings_report.py`, `pre_read_check.py` do anything — the
+counter freezes and the session log stops accumulating.
 
-## Token Tracking Mənbələri (4 tip)
+## Token-tracking sources (4 types)
 
-Stop hook `savings_report.py` hər task sonunda `.mla_session_log.jsonl`-i oxuyub bu dörd tip hadisəni cəm edir:
+The Stop hook `savings_report.py` reads `.mla_session_log.jsonl` after
+each task and sums these four event types:
 
-| Tip | Mənbə | Baseline | Actual |
+| Type | Source | Baseline | Actual |
 |---|---|---|---|
-| **search_code** | MCP tool çağırışı | qaytarılan faylların tam ölçüsü | qaytarılan chunk-ların token sayı |
-| **Grep** (`post_grep_check.py`) | Grep tool indeksli fayl üzərində (≥30 sətir) | `lines * 10` | `baseline * 15%` (heuristik) |
-| **Bash-inspect** (`post_bash_check.py`) | İndeksli fayl üzərində inspect komandası (≥50 sətir). Tutulan açar sözlər: `cat / head / tail / wc / less / more / awk / sed / type / findstr / gc / Get-Content / Select-String / sls / git show <ref>:<path>` | `lines * 10` | `baseline * 20%` (heuristik) |
-| **Read-block** (`pre_read_check.py`) | Block hadisəsi (≥50 sətir) | `lines * 10` | 0 (oxunmadı) |
+| **search_code** | MCP tool call | total size of all returned files | tokens in the returned chunks |
+| **Grep** (`post_grep_check.py`) | Grep tool on indexed file (≥30 lines) | `lines * 10` | `baseline * 15%` (heuristic) |
+| **Bash-inspect** (`post_bash_check.py`) | Inspect command on indexed file (≥50 lines). Detected keywords: `cat / head / tail / wc / less / more / awk / sed / type / findstr / gc / Get-Content / Select-String / sls / git show <ref>:<path>` | `lines * 10` | `baseline * 20%` (heuristic) |
+| **Read-block** (`pre_read_check.py`) | A block event (≥50 lines) | `lines * 10` | 0 (file was not read) |
 
-Hər birinin **baseline-ı toplu cəm-ə qatılır**, **actual** yalnız faktiki istifadədə (block-larda 0). Status bar widget bu cəmi göstərir, tooltip search/Grep/Read-block breakdown verir (bash-inspect total-a daxildir).
+Each baseline contributes to the total; **actual** is recorded only when
+the assistant actually consumed tokens (blocks have 0 actual). The status
+bar shows the total; hovering the widget reveals the search / Grep /
+Read-block breakdown (bash-inspect is folded into the total).
 
-Heuristik token nisbətləri (15%/20%) fərziyyədir — gerçək Grep/Bash output token-ləri bilinmir, ona görə Read alternativi token nisbəti təxmin olunur. Konservativ tərəfə meylli (real qənaət bundan da çox ola bilər).
+The 15 % / 20 % ratios are heuristics — true Grep/Bash output token counts
+aren't known to the hook, so we estimate against the Read alternative.
+The estimate skews conservative; real savings are usually higher.
 
-## Arch Doc Layer (Faza A)
+## Localization (`MLA_LANG`)
 
-`hooks/arch_doc.py` Stop hook hər task sonunda işə düşür (savings_report-dan əvvəl) və `.mla_session_log.jsonl`-dakı `search_code` çağırışlarını oxuyub `.mla_arch.md` faylını yenilədir. State `.mla_arch_state.json`-da JSON formasında saxlanır.
+User-facing strings produced by the hooks (block message, savings
+summary, missing-arch-doc note, etc.) are routed through `i18n.py`. The
+default locale is **English**. Switch to Azerbaijani:
 
-**Doc strukturu:**
-- **Tapılmış Fayllar** — sıralanmış (görsənmə tezliyinə görə): hansı fayl neçə search-də qaytarıldı
-- **Son 20 Axtarış Mövzusu** — yeni → köhnə, hər birinin tapıldığı fayllar
+```bash
+export MLA_LANG=az     # Linux / macOS
+$env:MLA_LANG = 'az'   # Windows PowerShell
+```
 
-Hər yeni session-da Claude (sən) `/MlaArch` çağırışı ilə layihə kontekstini bir baxışda görə bilərsən — söhbətə start etməzdən əvvəl. Repeated query-lər üçün doc-da cavab varsa, search_code skip oluna bilər → əlavə qənaət.
+The VS Code extension picks its locale from `vscode.env.language`. See
+the README for details on adding more languages.
 
-**Lokal-only fayllar (gitignore-da):**
+## Auto-generated architecture doc
+
+`hooks/arch_doc.py` runs as the first Stop hook (before
+`savings_report.py`) and incrementally folds the day's `search_code`
+calls into:
+
+- `.mla_arch.md` — human-readable file map + recent searches
+- `.mla_arch_state.json` — internal counters
+
+**Structure of the doc:**
+- **Files discovered** — sorted by occurrence in `search_code` results;
+  files seen most often are the highest-signal entry points.
+- **Last 20 search topics** — newest → oldest, with the files each query
+  returned. Skim this at the start of a session to recover context
+  without burning tokens.
+
+Repeated questions sometimes get answered from the doc alone, allowing
+`search_code` to be skipped → extra savings.
+
+**Local-only files (in `.gitignore`):**
 - `.mla_arch.md` (auto-generated, per-machine)
 - `.mla_arch_state.json` (internal state)
 - `.mla_enforcement.flag` (runtime state)
 - `.mla_savings_history.jsonl{,.bak*}` (per-machine analytics)
 
-## VS Code Extension
+## VS Code extension
 
-Status bar widget (`erp-intel.mla-agent`) `.mla_savings_history.jsonl` faylını oxuyub son 24 saatın qənaətini göstərir. Yaşıl dolu dairə = enforcement ON, boş dairə = OFF.
+The status-bar widget (`erp-intel.mla-agent`) reads
+`.mla_savings_history.jsonl` and shows the last-24-hour savings. A
+**filled green dot** means enforcement is ON, an **empty outline** means
+OFF.
 
-File watcher həm `.mla_enforcement.flag`, həm də `.mla_savings_history.jsonl` üçün quraşdırılıb — hər iki fayl dəyişəndə bar dərhal yenilənir.
+`FileSystemWatcher`s on both `.mla_enforcement.flag` and
+`.mla_savings_history.jsonl` ensure the bar updates immediately when
+either file changes, with a 30-second poll as a safety net.
+
+Click the widget to open a QuickPick with all seven actions above —
+no terminal typing required.

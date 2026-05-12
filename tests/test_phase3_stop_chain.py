@@ -7,6 +7,7 @@ sonda bərpa edir — beləliklə production data toxunulmaz qalır.
 Run: `python tests/test_phase3_stop_chain.py`
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -41,9 +42,10 @@ def _restore(path: Path, data):
         path.write_bytes(data)
 
 
-def _run(script: Path, timeout: float = 10.0):
-    # Explicit UTF-8 — Windows-un cp1252 default-u child-ın UTF-8 stderr
-    # output-unu mojibake-yə çevirir (Azərbaycan hərfləri itir).
+def _run(script: Path, timeout: float = 10.0, lang: str = "en"):
+    """`lang` parametri MLA_LANG env var-ını override edir (default `en`)."""
+    env = dict(os.environ)
+    env["MLA_LANG"] = lang
     proc = subprocess.run(
         [PYTHON, str(script)],
         input="",
@@ -52,6 +54,7 @@ def _run(script: Path, timeout: float = 10.0):
         encoding="utf-8",
         errors="replace",
         timeout=timeout,
+        env=env,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -109,7 +112,8 @@ class TestStopChain(unittest.TestCase):
         )
         rc, _, err = _run(SAVINGS_SCRIPT)
         self.assertEqual(rc, 0)
-        self.assertIn("axtarış", err, msg=f"stderr={err!r}")
+        # Default lokal `en` — xülasə ingiliscə gəlir.
+        self.assertIn("search", err, msg=f"stderr={err!r}")
         # session_log silinməlidir
         self.assertFalse(SESSION_LOG.exists())
         # history bir record-dur
@@ -202,6 +206,17 @@ class TestStopChain(unittest.TestCase):
         self.assertEqual(rc2, 0, msg=err)
         self.assertFalse(SESSION_LOG.exists(), "after savings_report, session_log gone")
         self.assertTrue(HISTORY.exists())
+
+    def test_savings_summary_az_locale(self):
+        """MLA_LANG=az → Azərbaycan dilində xülasə."""
+        SESSION_LOG.write_text(
+            json.dumps({"ts": time.time(), "query": "x", "files": {"a.py": 100}, "actual_tokens": 50}) + "\n",
+            encoding="utf-8",
+        )
+        rc, _, err = _run(SAVINGS_SCRIPT, lang="az")
+        self.assertEqual(rc, 0)
+        self.assertIn("axtarış", err)
+        self.assertIn("qənaət", err)
 
     def test_settings_json_hook_order(self):
         """settings.json-da Stop hook-da arch_doc.py birinci, savings_report.py ikinci sırada gəlir."""

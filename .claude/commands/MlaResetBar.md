@@ -1,5 +1,5 @@
 ---
-description: Savings history-i sıfırla (backup ilə), status bar 0-dan başlasın
+description: Reset savings history (old history is backed up); status bar starts from zero
 ---
 
-`python "$CLAUDE_PROJECT_DIR/hooks/reset_savings.py"` çalışdır, nəticəni bir cümlədə deyin.
+Run `python "$CLAUDE_PROJECT_DIR/hooks/reset_savings.py"` and report the result in one sentence.

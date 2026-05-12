@@ -1,5 +1,5 @@
 ---
-description: ChromaDB-ni cari layihə üçün tam re-index et (yeni extension siyahısı tətbiq olunsun)
+description: Re-index ChromaDB for the current project from scratch (apply new extension list, refresh stale embeddings)
 ---
 
-`python "$CLAUDE_PROJECT_DIR/main.py" index . --fresh` çalışdır. Nəticəni bir cümlədə deyin — neçə fayl indekslənib və müddət.
+Run `python "$CLAUDE_PROJECT_DIR/main.py" index . --fresh` and report the result in one sentence: file count and elapsed time.

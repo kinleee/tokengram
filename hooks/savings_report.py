@@ -23,6 +23,9 @@ if sys.platform == "win32":
     except (AttributeError, OSError):
         pass
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from i18n import tr
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 # Per-task savings tarixçəsi — Claude/Claude Code yenidən oxuya bilsin deyə.
@@ -129,22 +132,26 @@ def main() -> int:
     saving = baseline - actual
     pct = (saving / baseline * 100) if baseline > 0 else 0.0
 
-    # Aktivlik xülasəsi
+    # Aktivlik xülasəsi (lokalizəli)
     parts = []
     if search_count:
-        parts.append(f"{search_count} axtarış")
+        key = "activity_searches_plural" if search_count > 1 else "activity_searches"
+        parts.append(tr(key, n=search_count))
     if grep_count:
-        parts.append(f"{grep_count} Grep")
+        parts.append(tr("activity_greps", n=grep_count))
     if bash_count:
-        parts.append(f"{bash_count} bash-inspect")
+        parts.append(tr("activity_bash", n=bash_count))
     if block_count:
-        parts.append(f"{block_count} Read-block")
-    activity = ", ".join(parts) if parts else "0 hadisə"
+        key = "activity_blocks_plural" if block_count > 1 else "activity_blocks"
+        parts.append(tr(key, n=block_count))
+    activity = ", ".join(parts) if parts else tr("activity_none")
 
-    msg = (
-        f"[mla-agent] Bu task: {activity}, "
-        f"{actual:,} tok istifadə (baseline: {baseline:,} tok) "
-        f"→ {pct:.1f}% qənaət"
+    msg = tr(
+        "savings_summary",
+        activity=activity,
+        actual=actual,
+        baseline=baseline,
+        pct=pct,
     )
     sys.stderr.write(msg + "\n")
 

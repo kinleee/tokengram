@@ -11,15 +11,15 @@ if sys.platform == "win32":
     except (AttributeError, OSError):
         pass
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from i18n import tr
+
 ARCH_DOC = Path(__file__).resolve().parent.parent / ".mla_arch.md"
 
 
 def main() -> int:
     if not ARCH_DOC.exists():
-        print(
-            "Arch doc hələ yaradılmayıb. "
-            "Bir-iki search_code çağırışından sonra Stop hook bu faylı doldurar."
-        )
+        print(tr("arch_missing"))
         return 0
     print(ARCH_DOC.read_text(encoding="utf-8"))
     return 0

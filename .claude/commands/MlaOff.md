@@ -1,5 +1,5 @@
 ---
-description: MLA Read-enforcement deaktiv et (Read sərbəst, search_code məcburi deyil)
+description: Disable MLA Read-enforcement (Read tool is unrestricted; search_code optional)
 ---
 
-`python "$CLAUDE_PROJECT_DIR/hooks/toggle_mla.py" off` çalışdır, nəticəni bir cümlədə deyin.
+Run `python "$CLAUDE_PROJECT_DIR/hooks/toggle_mla.py" off` and report the result in one sentence.

@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { tr } from './i18n';
 import { findHistoryFile, readSavings } from './savingsReader';
 
 const REFRESH_MS = 30_000;
@@ -25,8 +26,8 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
   const refresh = () => {
     const folders = vscode.workspace.workspaceFolders;
     if (!folders || folders.length === 0) {
-      item.text = '$(database) MLA: no project';
-      item.tooltip = 'No workspace folder open';
+      item.text = tr('bar.noProject');
+      item.tooltip = tr('bar.noProjectTip');
       item.color = undefined;
       return;
     }
@@ -41,37 +42,42 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
 
     const historyPath = findHistoryFile();
     if (!historyPath) {
-      item.text = `${icon} MLA: no data · ${stateLabel}`;
-      item.tooltip = `Enforcement: ${stateLabel}\nNo .mla_savings_history.jsonl yet`;
+      item.text = tr('bar.noData', { icon, state: stateLabel });
+      item.tooltip = tr('bar.tipNoData', { state: stateLabel });
       item.color = color;
       return;
     }
 
     const summary = readSavings(historyPath);
     if (!summary) {
-      item.text = `${icon} MLA: starting… · ${stateLabel}`;
-      item.tooltip = `Enforcement: ${stateLabel}\nIndexing or no recent activity`;
+      item.text = tr('bar.starting', { icon, state: stateLabel });
+      item.tooltip = tr('bar.tipStarting', { state: stateLabel });
       item.color = color;
       return;
     }
 
     const savedK = (summary.savedTokens24h / 1000).toFixed(1);
-    item.text = `${icon} MLA: ${savedK}k saved · ${summary.savedPct24h.toFixed(0)}%`;
+    item.text = tr('bar.summary', {
+      icon,
+      savedK,
+      pct: summary.savedPct24h.toFixed(0),
+    });
     item.color = color;
-    const searchK = summary.savedFromSearch24h.toLocaleString();
-    const blockK = summary.savedFromBlocks24h.toLocaleString();
-    const grepK = summary.savedFromGreps24h.toLocaleString();
-    item.tooltip =
-      `Enforcement: ${stateLabel}\n` +
-      `Last 24h: ${summary.recent24hTasks} tasks, ` +
-      `${summary.savedTokens24h.toLocaleString()} tokens saved ` +
-      `(${summary.savedPct24h.toFixed(1)}%)\n` +
-      `  • search_code: ${searchK} tok\n` +
-      `  • Grep: ${grepK} tok (${summary.recent24hGreps} greps)\n` +
-      `  • Read-block: ${blockK} tok (${summary.recent24hBlocks} blocks)\n` +
-      `Lifetime: ${summary.totalTasks} tasks, ` +
-      `${summary.totalSearches} searches, ` +
-      `${summary.totalGreps} greps, ${summary.totalBlocks} blocks`;
+    item.tooltip = tr('bar.tipFull', {
+      state: stateLabel,
+      tasks: summary.recent24hTasks,
+      saved: summary.savedTokens24h.toLocaleString(),
+      pct: summary.savedPct24h.toFixed(1),
+      search: summary.savedFromSearch24h.toLocaleString(),
+      grep: summary.savedFromGreps24h.toLocaleString(),
+      greps: summary.recent24hGreps,
+      block: summary.savedFromBlocks24h.toLocaleString(),
+      blocks: summary.recent24hBlocks,
+      totalTasks: summary.totalTasks,
+      totalSearches: summary.totalSearches,
+      totalGreps: summary.totalGreps,
+      totalBlocks: summary.totalBlocks,
+    });
   };
 
   refresh();

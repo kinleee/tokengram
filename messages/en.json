@@ -1,0 +1,28 @@
+{
+  "read_block": "MLA enforcement: '{name}' has {lines} lines and is indexable.\n   Try first: mcp__mla-agent__search_code mode=fast query=\"...\"\n   If results are empty: /MlaReindex (the new extension may not be in chroma_db yet).\n   Bypass: /MlaOff (re-enable later with /MlaOn).",
+  "read_warn": "TIP: '{name}' is being read ({lines} lines). search_code mode=fast usually returns the same answer in 200-500 tokens; Read takes ~{est_tokens}. (Not blocked — just a suggestion.)",
+
+  "savings_summary": "[mla-agent] This task: {activity}, {actual:,} tok used (baseline: {baseline:,} tok) → {pct:.1f}% saved",
+  "activity_searches": "{n} search",
+  "activity_searches_plural": "{n} searches",
+  "activity_greps": "{n} Grep",
+  "activity_bash": "{n} bash-inspect",
+  "activity_blocks": "{n} Read-block",
+  "activity_blocks_plural": "{n} Read-blocks",
+  "activity_none": "no activity",
+
+  "arch_missing": "Arch doc hasn't been generated yet. After one or two search_code calls, the Stop hook will populate this file.",
+  "arch_title": "MLA Auto-Generated Architecture",
+  "arch_meta_last_updated": "Last updated",
+  "arch_meta_files": "Files discovered",
+  "arch_meta_total_searches": "Total `search_code` calls processed",
+  "arch_meta_recent": "Recent search history kept",
+  "arch_meta_max": "max",
+  "arch_intro": "This file is auto-generated from search_code calls. Not human-written — the Stop hook updates it after each task. Manual edits are discouraged; the file will be regenerated.",
+  "arch_files_heading": "## Files (sorted by occurrence in search_code)",
+  "arch_files_empty": "*(No files yet. Will be populated after the first search_code call.)*",
+  "arch_files_entry": "- `{path}` — {count} times",
+  "arch_recent_heading": "## Last {n} Search Topics (newest → oldest)",
+  "arch_recent_empty": "*(No search history yet.)*",
+  "arch_recent_no_results": "*(no results)*"
+}

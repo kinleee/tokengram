@@ -44,7 +44,11 @@ def _restore(p: Path, data):
         p.write_bytes(data)
 
 
-def _run(script: Path, args=(), timeout=5):
+def _run(script: Path, args=(), timeout=5, lang: str = "en"):
+    """`lang` MLA_LANG env-ini override edir (default `en`)."""
+    import os
+    env = dict(os.environ)
+    env["MLA_LANG"] = lang
     proc = subprocess.run(
         [PYTHON, str(script), *args],
         capture_output=True,
@@ -52,6 +56,7 @@ def _run(script: Path, args=(), timeout=5):
         encoding="utf-8",
         errors="replace",
         timeout=timeout,
+        env=env,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -150,7 +155,14 @@ class TestSlashCommandBackends(unittest.TestCase):
 
     def test_show_arch_missing_file_friendly_message(self):
         ARCH_DOC.unlink(missing_ok=True)
+        # Default lokal `en`
         rc, out, _ = _run(SHOW_ARCH)
+        self.assertEqual(rc, 0)
+        self.assertIn("hasn't been generated", out)
+
+    def test_show_arch_missing_file_az_locale(self):
+        ARCH_DOC.unlink(missing_ok=True)
+        rc, out, _ = _run(SHOW_ARCH, lang="az")
         self.assertEqual(rc, 0)
         self.assertIn("hələ yaradılmayıb", out)
 

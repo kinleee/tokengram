@@ -1,37 +1,47 @@
-# MLA Agent — Hybrid RAG Kod Axtarış Sistemi
+# MLA Agent — Hybrid RAG Code Search for AI Assistants
 
-Claude Code üçün lokal kod axtarış MCP server-i.
-**Token qənaəti:** Real ölçülmüş **~70%** (orta Python layihəsində).
+> Azərbaycanca versiya: [README.az.md](README.az.md)
+
+Local MCP server that lets Claude Code (and other MCP-capable AI assistants)
+search your project via hybrid RAG instead of `Read`-ing whole files.
+**Measured token savings: ~70%** on a typical Python project.
+
 **Progressive RAM:** 93 MB (BM25-only) → 700 MB (semantic) → 900 MB (+ reranker).
 
-## Nədir bu?
+## What it is
 
-İş yoldaşına Claude Code-da kod haqqında sual verəndə Claude faylları `Read` ilə tam oxuyur — hər sorğuda 5-10K input token gedir. MLA Agent layihəni əvvəlcədən vektorlaşdırır və Claude soruşduqda yalnız **uyğun ~3-5 chunk** qaytarır. Yəni:
+When you ask Claude Code a question about your code, the assistant normally
+reads whole files into its context window — 5–10K input tokens per query. MLA
+Agent pre-vectorizes your project and returns only the **3–5 most relevant
+chunks** when Claude asks. So:
 
-- ⚡ **70% daha az input token** → daha ucuz API çağırışları
-- 🔒 **Lokal-only** — kodun heç bir yerə getmir (lokal embedding + lokal axtarış)
-- ♻️ **Avtomatik re-index** — sən fayl save edəndə MCP avtomatik yeniləyir
-- 🎯 **Hybrid search** — semantic (meaning) + BM25 (keyword) + cross-encoder reranker
+- ⚡ **~70% fewer input tokens** → cheaper API calls
+- 🔒 **Local-only** — your code never leaves the machine (local embeddings,
+  local search)
+- ♻️ **Auto re-index** — saved files are picked up by the MCP server
+  automatically
+- 🎯 **Hybrid search** — semantic (meaning) + BM25 (keyword) + cross-encoder
+  reranker
 
-## Nə vaxt İŞƏ YARAYIR?
-- ✅ Orta-böyük Python/JS/Go layihələri (50+ fayl)
-- ✅ "Bu funksiya hara çağırılır?" tipli kontekstual suallar
-- ✅ Refactoring üçün kontekst yığma
+## When it works
+- ✅ Medium-to-large Python / JS / Go / Rust projects (50+ files)
+- ✅ Contextual questions: *"where is this function called from?"*
+- ✅ Refactoring (gathering all touch points)
 
-## Nə vaxt İŞƏ YARAMIR (hələlik)?
-- ❌ <20 fayllı layihələr — Claude onsuz da hər şeyi oxuya bilir
-- ❌ 4 GB RAM-dan az olan maşınlar (embedding + reranker üçün lazımdır)
-- ❌ Python qurulmamış sistemlər
+## When it doesn't (yet)
+- ❌ Projects with < 20 files — Claude can just read them all
+- ❌ Machines with < 4 GB RAM (embedding + reranker need headroom)
+- ❌ Systems without Python installed
 
 ---
 
-## Quraşdırma (~3 dəqiqə)
+## Install (~3 minutes)
 
-### Tələblər
+### Requirements
 - Python 3.10+
 - VS Code + Claude Code extension
-- 4 GB RAM (8 GB tövsiyə)
-- ~500 MB disk (model cache üçün)
+- 4 GB RAM (8 GB recommended)
+- ~500 MB disk (for model cache)
 
 ### Windows
 ```powershell
@@ -47,142 +57,231 @@ cd mla-agent
 ./setup.sh
 ```
 
-### Sonra
-1. **VS Code-u tam bağla və yenidən aç** (MCP server-i pickup üçün)
-2. Claude Code-da `/mcp` — `mla-agent` `connected` olmalıdır
-3. Sual ver:
-   > "mla-agent.search_code istifadə et — autentifikasiya harada həyata keçirilib?"
+### After install
+1. **Close VS Code completely and reopen it** (so it picks up the new MCP
+   server entry).
+2. In Claude Code, run `/mcp` — `mla-agent` should appear as `connected`.
+3. Ask a question:
+   > "Use mla-agent.search_code — where is authentication handled?"
 
-Claude avtomatik MCP tool-u çağırır, top-4 ən uyğun chunk-ı kontekst kimi alır, və sənə cavab verir.
+Claude calls the MCP tool automatically, receives the top-4 matching chunks
+as context, and answers.
 
 ---
 
-## Başqa layihəni indeksləşdirmək
+## Indexing another project
 
-Hər layihə üçün ayrı indeksləmə lazımdır.
+Each project needs its own index.
 
-### Variant 1 — yeni layihə üçün setup-ı yenidən qaç
+### Option 1 — run setup again with a project path
 ```powershell
 ./setup.ps1 -ProjectDir "C:\path\to\my-project"
 ```
 
-### Variant 2 — manual əmr
+### Option 2 — direct command
 ```bash
 python main.py index /path/to/my-project --fresh
 ```
 
-> **Diqqət:** Hal-hazırda `chroma_db/` MLA Agent qovluğunda saxlanılır. Yəni eyni anda yalnız bir layihə indekslənmiş ola bilər. Multi-project dəstəyi gələn versiyadadır.
+> **Note:** `chroma_db/` currently lives inside the MLA Agent folder, so only
+> one project can be indexed at a time. Multi-project support is on the
+> roadmap.
 
 ---
 
-## CLI Əmrləri
+## CLI
 
 ```bash
-python main.py index <dir> [--fresh]    # İndeksləşdir
-python main.py stats                     # Baza statistikası
-python main.py route <dir>               # Smart router məsləhəti
-python main.py reset --yes               # Bazanı sıfırla
-python main.py watch <dir>               # Avtomatik re-index (Ctrl+C ilə dayan)
-python main.py ask "sual"                # CLI üzərindən sual (API açarı lazım)
+python main.py index <dir> [--fresh]    # Index a project
+python main.py stats                     # Index statistics
+python main.py route <dir>               # Smart router suggestion
+python main.py reset --yes               # Wipe the index
+python main.py watch <dir>               # Auto re-index (Ctrl+C to stop)
+python main.py ask "question"            # CLI-only (requires API key)
 ```
 
 ---
 
-## MCP Alətləri
+## MCP tools
 
-Claude Code avtomatik bunları görür və lazım olduqda çağırır:
+Claude Code discovers these automatically and calls them on demand:
 
-| Alət | Nə edir |
-|------|---------|
-| `search_code(query, top_k, mode, file_type)` | 3-tier axtarış (aşağıda) |
-| `index_directory(path, fresh)` | Layihəni indeksləşdir |
-| `index_file(path)` | Tək faylı re-index |
-| `get_stats()` | Baza statistikası |
-| `route_project(path)` | Layihə ölçüsünə əsaslanan tövsiyə |
+| Tool | What it does |
+|---|---|
+| `search_code(query, top_k, mode, file_type)` | 3-tier search (see below) |
+| `index_directory(path, fresh)` | Index a project |
+| `index_file(path)` | Re-index a single file |
+| `get_stats()` | Index statistics |
+| `route_project(path)` | Project-size-aware recommendation |
 
-### search_code rejimləri (progressive RAM)
+### `search_code` modes (progressive RAM)
 
-| `mode` | RAM artımı | İlk çağırış | Hansı sorğular |
-|--------|-----------|-------------|----------------|
-| `"fast"` (default) | **0 MB** | ~50ms | Funksiya/sinif/fayl adı, sintaktik axtarış |
-| `"semantic"` | +400-700 MB | 30-60s | "Auth necə işləyir" tipli konseptual sorğular |
-| `"rerank"` | +200 MB | +30s ilk | Maksimum sıralanma keyfiyyəti |
+| `mode` | RAM delta | First call | Best for |
+|---|---|---|---|
+| `"fast"` (default) | **0 MB** | ~50 ms | Function / class / file-name lookup, syntactic search |
+| `"semantic"` | +400–700 MB | 30–60 s cold | Conceptual queries (*"how does auth work?"*) |
+| `"rerank"` | +200 MB | +30 s first | Maximum ranking quality |
 
-**İdealca:** Claude default `"fast"` istifadə edir. Sintaktik nəticə kifayətdirsə, dayanır. Konseptual cavab lazımdırsa, `"semantic"`-ə keçir. Reranker yalnız çox vacib seçimlər üçün.
-
----
-
-## Auto Re-Index
-
-İki paralel mexanizm — hər ikisi eyni növbəyə (`.mla_pending.txt`) yazır, MCP-nin fon işçisi dren edir:
-
-### 1. Daxili watcher (default, **bütün IDE-lərdə işləyir**)
-MCP server startup-da watchdog ilə proyekt qovluğunu izləyir. VS Code, Antigravity, Cursor — fərq etməz. Hooks lazım deyil.
-- İzləniləcək qovluq: MCP serverin `cwd`-si (default), və ya `MLA_WATCH_DIR` env override
-- Söndürmək: `MLA_DISABLE_WATCHER=1`
-- Debounce: 2s (çoxsaylı save-lər birləşir)
-
-### 2. Claude Code hooks (yalnız Claude Code-da)
-- `PostToolUse` (~50ms) — Edit/Write/MultiEdit-dən sonra fayl yolu növbəyə yazılır
-- `Stop` — Claude cavabı bitəndə (artıq pasif: əsas iş MCP fon işçisi tərəfindən görülür)
-
-İki mexanizm birgə işləyir — drainer hash check + dedup edir, ikiqat re-index olmur.
+Ideally Claude defaults to `"fast"`. If a syntactic result is enough, it
+stops. For conceptual answers it escalates to `"semantic"`. Reranker is
+reserved for the highest-stakes picks.
 
 ---
 
-## Tez-tez sorulan suallar
+## Slash commands
 
-### API açarı lazımdır?
-**Yox.** Claude Code-da MCP üzərindən istifadə edirsənsə, bütün düşünmə Claude tərəfindən edilir. API açarı yalnız standalone CLI `python main.py ask` üçün lazımdır.
+Drop-in actions inside Claude Code (each wraps the back-end Python script
+of the same name; the VS Code status-bar QuickPick calls them too):
 
-### İlk axtarış niyə yavaşdır?
-İlk MCP `search_code` çağırışı ~10-30s — embedding modeli RAM-a yüklənir. Sonrakı çağırışlar ~100ms.
+| Command | What it does |
+|---|---|
+| `/MlaOn` | Enable Read-enforcement (block large indexed files) |
+| `/MlaOff` | Disable enforcement |
+| `/MlaRefreshBar` | Force the status bar to refresh |
+| `/MlaResetBar` | Reset savings history (old history is backed up) |
+| `/MlaArch` | Show the auto-generated architecture doc |
+| `/MlaSync` | Manually flush session log → history |
+| `/MlaReindex` | Full re-index after extension list changes |
 
-### Hansı dilləri dəstəkləyir?
-- Python (.py) — AST-based chunking
-- Solidity (.sol) — Regex-based
-- SQL (.sql) — Statement-based
-- Markdown (.md) — Heading-based
-
-JavaScript/TypeScript hələ fallback splitter istifadə edir (gələn versiyada AST əlavə olunacaq).
-
-### Ne qədər disk yer tutur?
-- Embedding model: ~130 MB (bge-small)
-- Reranker model: ~90 MB (ms-marco-MiniLM)
-- ChromaDB indeks: ~5-10 KB / fayl (təxmini)
-
-100 fayllı layihə üçün cəmi: ~220 MB.
-
-### Problem var?
-Bax: [PROBLEMS.md](PROBLEMS.md) — quraşdırma zamanı qarşılaşdığımız 14 problem və hər birinin həlli.
+See [SLASH_COMMANDS.md](SLASH_COMMANDS.md) for behaviour details and the
+4-source token-tracking model.
 
 ---
 
-## Layihə Quruluşu
+## Supported file types (36 extensions)
+
+```
+.py .sol .sql .md
+.ts .tsx .js .jsx .mjs .cjs
+.go .rs .java .kt .cs .cpp .cc .cxx .c .h .hpp
+.rb .php .swift .dart
+.html .css .scss
+.json .yaml .yml .toml
+.sh .bash .ps1 .tf
+```
+
+Excluded by default: `node_modules/`, `dist/`, `build/`, `target/`,
+`.venv/`, `.next/`, … plus lock files (`package-lock.json`, `Cargo.lock`,
+`go.sum`, …), minified bundles (`*.min.js`, `*.bundle.js`), source maps,
+and any file > **1 MB**. All filters live in `mla_constants.py`.
+
+---
+
+## Localization
+
+User-facing strings are localized. Two languages are bundled out of the
+box: **English** (default) and **Azerbaijani**.
+
+```bash
+# Linux / macOS
+export MLA_LANG=az   # Azerbaijani
+export MLA_LANG=en   # English (default)
+
+# Windows PowerShell
+$env:MLA_LANG = 'az'
+```
+
+The VS Code extension picks its locale from `vscode.env.language` (your
+VS Code display language).
+
+**To add another language**: copy `messages/en.json` to
+`messages/<code>.json`, translate the values, and add the code to
+`_SUPPORTED` in [i18n.py](i18n.py). For the extension, add a new entry to
+`MESSAGES` and to `detectLocale()` in
+[vscode-extension/src/i18n.ts](vscode-extension/src/i18n.ts).
+
+---
+
+## VS Code status bar
+
+The widget at the bottom-right shows a live `X.Xk saved · YY%` counter
+based on the last 24 hours of activity. Hovering reveals a breakdown
+(search / Grep / Read-block) plus lifetime totals.
+
+Click the widget to open a QuickPick with all 6 actions (toggle, refresh,
+arch doc, sync, re-index, reset) — no terminal typing needed.
+
+---
+
+## Auto re-index
+
+Two parallel mechanisms feed the same queue (`.mla_pending.txt`); the
+MCP server's background worker drains it:
+
+### 1. Built-in watcher (default; works in **every IDE**)
+The MCP server uses `watchdog` to watch the project folder. VS Code,
+Antigravity, Cursor, plain editors — all good. No hooks needed.
+
+- Override the watched directory: `MLA_WATCH_DIR=/path/to/project`
+- Disable: `MLA_DISABLE_WATCHER=1`
+- Debounce: 2 s (rapid saves are coalesced)
+
+### 2. Claude Code hooks (Claude Code only)
+- `PostToolUse` (~50 ms) after every `Edit` / `Write` / `MultiEdit` —
+  queues the file
+- `Stop` — drains the queue and updates the architecture doc
+
+Both mechanisms cooperate: the drainer hashes + deduplicates, so no file
+is re-indexed twice.
+
+---
+
+## FAQ
+
+### Do I need an API key?
+**No.** When you use MLA via the MCP server inside Claude Code, all
+reasoning happens in Claude. An API key is only needed for the standalone
+CLI command `python main.py ask`.
+
+### Why is the first search slow?
+The first MCP `search_code` call takes 10–30 s — the embedding model
+loads into RAM. Subsequent calls are ~100 ms.
+
+### What's the disk footprint?
+- Embedding model: ~130 MB (`bge-small-en-v1.5`)
+- Reranker model: ~90 MB (`ms-marco-MiniLM-L-6-v2`)
+- ChromaDB index: ~5–10 KB per file
+- Total for a 100-file project: ~220 MB.
+
+### Something broke?
+Check [PROBLEMS.md](PROBLEMS.md) — 14 issues encountered during
+development and how each was resolved. The test pass record is in
+[TEST_REPORT.md](TEST_REPORT.md) (66/66 green).
+
+---
+
+## Project layout
 
 ```
 mla-agent/
-├── config.py              # Bütün parametrlər
-├── document_loader.py     # AST + regex chunking
+├── config.py              # All parameters (re-exports from mla_constants)
+├── mla_constants.py       # Single source for extension / dir / file filters
+├── i18n.py                # tr() — localized message lookup
+├── messages/
+│   ├── en.json            # English strings (default)
+│   └── az.json            # Azerbaijani strings
+├── document_loader.py     # AST + regex + fallback chunking
 ├── vector_store.py        # ChromaDB wrapper
 ├── search_engine.py       # Hybrid (semantic + BM25 + reranker)
-├── llm_agent.py           # Standalone CLI agent (opsional)
-├── smart_router.py        # Layihə ölçüsünə əsaslanan rejim
-├── file_watcher.py        # Standalone watchdog (opsional)
-├── main.py                # CLI giriş nöqtəsi
-├── mcp_server.py          # Claude Code MCP server
-├── hooks/
-│   ├── queue_change.py    # PostToolUse hook
-│   └── flush_queue.py     # Stop hook
-├── .mcp.json              # Claude Code MCP qeydi
-├── .claude/settings.json  # Hook konfiqurasiyası
-├── setup.ps1, setup.sh    # Quraşdırma skriptləri
-├── PROGRESS.md            # Inkişaf jurnalı
-└── PROBLEMS.md            # Tapılan/həll edilən problemlər
+├── llm_agent.py           # Standalone CLI agent (optional)
+├── smart_router.py        # Project-size-aware mode selector
+├── file_watcher.py        # Standalone watchdog (optional)
+├── main.py                # CLI entry point
+├── mcp_server.py          # MCP server for Claude Code
+├── hooks/                 # All Stop / PreToolUse / PostToolUse hooks
+├── tests/                 # 5 phase suites, 66 cases total
+├── vscode-extension/      # Status-bar widget + QuickPick menu
+├── .mcp.json              # Claude Code MCP registration
+├── .claude/
+│   ├── settings.json      # Hook configuration
+│   └── commands/          # Slash command definitions
+├── setup.ps1, setup.sh    # Install scripts
+├── TEST_PLAN.md, TEST_REPORT.md
+└── PROBLEMS.md
 ```
 
 ---
 
-## Lisenziya
+## License
 
-Daxili istifadə üçün, məhdud paylaşma. Feedback üçün: ilkin.ha@erp-intel.com
+Internal use, restricted distribution. Feedback: ilkin.ha@erp-intel.com

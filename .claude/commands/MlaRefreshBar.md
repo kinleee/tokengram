@@ -1,5 +1,5 @@
 ---
-description: VS Code status bar widget-i dərhal yenilə
+description: Force the VS Code status bar widget to refresh immediately
 ---
 
-`python "$CLAUDE_PROJECT_DIR/hooks/refresh_bar.py"` çalışdır, nəticəni bir cümlədə deyin.
+Run `python "$CLAUDE_PROJECT_DIR/hooks/refresh_bar.py"` and report the result in one sentence.

@@ -11,9 +11,18 @@ import sys
 import time
 from pathlib import Path
 
+# Windows-da AZ locale-ında stderr-ə Azərbaycan hərfləri yazsa cp1252 escape
+# olmasın deyə (savings_report-da göründüyü kimi).
+if sys.platform == "win32":
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS
+from i18n import tr
 
 THRESHOLD_BLOCK = 50
 THRESHOLD_WARN = 30
@@ -75,22 +84,19 @@ def main():
         except OSError:
             pass
 
-        msg = (
-            f"MLA enforcement: '{file_path.name}' {line_count} setir, indekslemeye uyqundur.\n"
-            f"   Evvel: mcp__mla-agent__search_code mode=fast query=\"...\"\n"
-            f"   Bos cavab gelirse: /MlaReindex (yeni extension chroma_db-de yoxdur).\n"
-            f"   Bypass: /MlaOff (sonra /MlaOn ile geri qaytar)."
-        )
-        print(msg, file=sys.stderr)
+        print(tr("read_block", name=file_path.name, lines=line_count), file=sys.stderr)
         sys.exit(2)
 
     if line_count >= THRESHOLD_WARN:
-        tip = (
-            f"TIP: '{file_path.name}' {line_count} setir oxunur. "
-            f"search_code mode=fast adeten eyni cavabi 200-500 token ile verir, "
-            f"Read-de ise ~{line_count * 10} token gedir. (Block deyil, mesleht.)"
+        print(
+            tr(
+                "read_warn",
+                name=file_path.name,
+                lines=line_count,
+                est_tokens=line_count * 10,
+            ),
+            file=sys.stderr,
         )
-        print(tip, file=sys.stderr)
         sys.exit(0)
 
     sys.exit(0)
