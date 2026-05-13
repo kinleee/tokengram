@@ -42,7 +42,16 @@ def main():
     if payload.get("tool_name") != "Read":
         sys.exit(0)
 
-    file_path_str = payload.get("tool_input", {}).get("file_path", "")
+    tool_input = payload.get("tool_input", {})
+
+    # Bounded Read — AI özü tələb edir konkret sətir sayını (limit param).
+    # Token xərci sərhədlidir, blok lazım deyil. THRESHOLD_BLOCK altında
+    # qalan istənilən limit səssiz keçir (refactor üçün chunked Read yolu).
+    limit_val = tool_input.get("limit")
+    if isinstance(limit_val, int) and 0 < limit_val < THRESHOLD_BLOCK:
+        sys.exit(0)
+
+    file_path_str = tool_input.get("file_path", "")
     if not file_path_str:
         sys.exit(0)
 
