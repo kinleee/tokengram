@@ -4,3 +4,7 @@ target/
 !Cargo.lock
 .idea/
 .vscode/
+
+# Runtime LanceDB index + build/run logs — regenerated on `index` / `cargo build`
+mla-search-rs/data/
+*.log
