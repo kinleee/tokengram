@@ -1,0 +1,25 @@
+{
+  "name": "mla-license-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MLA Agent license activation + JWT issuance on Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env production",
+    "db:create": "wrangler d1 create mla-licenses",
+    "db:migrate": "wrangler d1 execute mla-licenses --file=schema.sql",
+    "db:migrate:remote": "wrangler d1 execute mla-licenses --file=schema.sql --remote",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260101.0",
+    "typescript": "^5.5.0",
+    "wrangler": "^3.80.0"
+  },
+  "dependencies": {
+    "hono": "^4.6.0",
+    "jose": "^5.9.0"
+  }
+}

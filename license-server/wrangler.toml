@@ -1,0 +1,30 @@
+name = "mla-license-server"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ---- D1 bağlantısı ----
+# wrangler d1 create mla-licenses → database_id-ni bura yapışdır
+[[d1_databases]]
+binding = "DB"
+database_name = "mla-licenses"
+database_id = "REPLACE_WITH_REAL_DB_ID"
+
+# ---- KV cache (subscription status) ----
+# wrangler kv:namespace create CACHE → id-ni bura yapışdır
+[[kv_namespaces]]
+binding = "CACHE"
+id = "REPLACE_WITH_REAL_KV_ID"
+
+# ---- Secrets (wrangler secret put NAME) ----
+# JWT_PRIVATE_KEY     — RSA 2048 private key (PEM)
+# POLAR_WEBHOOK_SECRET — Polar.sh webhook HMAC secret
+# POLAR_API_KEY        — server-side API key (refund-lar üçün)
+
+[env.staging]
+name = "mla-license-server-staging"
+vars = { ENVIRONMENT = "staging" }
+
+[env.production]
+name = "mla-license-server-production"
+vars = { ENVIRONMENT = "production" }
