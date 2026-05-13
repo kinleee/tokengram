@@ -55,12 +55,108 @@ export function findHistoryFile(): string | null {
   return null;
 }
 
+interface SessionLogEntry {
+  ts: number;
+  type?: string;
+  files?: Record<string, number>;
+  actual_tokens?: number;
+  estimated_baseline_tokens?: number;
+  estimated_actual_tokens?: number;
+}
+
+interface PendingDelta {
+  searchCount: number;
+  blockCount: number;
+  grepCount: number;
+  bashCount: number;
+  warnCount: number;
+  fileCount: number;
+  searchBaseline: number;
+  searchActual: number;
+  blockBaseline: number;
+  grepBaseline: number;
+  grepActual: number;
+  bashBaseline: number;
+  bashActual: number;
+  warnBaseline: number;
+}
+
+function readSessionLog(historyPath: string): PendingDelta | null {
+  const sessionLogPath = path.join(
+    path.dirname(historyPath),
+    '.mla_session_log.jsonl',
+  );
+  let data: string;
+  try {
+    data = fs.readFileSync(sessionLogPath, 'utf-8');
+  } catch {
+    return null;
+  }
+  const uniqueFiles = new Map<string, number>();
+  const d: PendingDelta = {
+    searchCount: 0,
+    blockCount: 0,
+    grepCount: 0,
+    bashCount: 0,
+    warnCount: 0,
+    fileCount: 0,
+    searchBaseline: 0,
+    searchActual: 0,
+    blockBaseline: 0,
+    grepBaseline: 0,
+    grepActual: 0,
+    bashBaseline: 0,
+    bashActual: 0,
+    warnBaseline: 0,
+  };
+  let hasAny = false;
+  for (const line of data.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let e: SessionLogEntry;
+    try {
+      e = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    hasAny = true;
+    const t = e.type ?? 'search_code';
+    if (t === 'read_block') {
+      d.blockCount += 1;
+      d.blockBaseline += e.estimated_baseline_tokens ?? 0;
+    } else if (t === 'read_warn') {
+      d.warnCount += 1;
+      d.warnBaseline += e.estimated_baseline_tokens ?? 0;
+    } else if (t === 'grep_search') {
+      d.grepCount += 1;
+      d.grepBaseline += e.estimated_baseline_tokens ?? 0;
+      d.grepActual += e.estimated_actual_tokens ?? 0;
+    } else if (t === 'bash_inspect') {
+      d.bashCount += 1;
+      d.bashBaseline += e.estimated_baseline_tokens ?? 0;
+      d.bashActual += e.estimated_actual_tokens ?? 0;
+    } else {
+      d.searchCount += 1;
+      d.searchActual += e.actual_tokens ?? 0;
+      const files = e.files ?? {};
+      for (const [p, tok] of Object.entries(files)) {
+        const prev = uniqueFiles.get(p) ?? 0;
+        if (tok > prev) uniqueFiles.set(p, tok);
+      }
+    }
+  }
+  if (!hasAny) return null;
+  d.fileCount = uniqueFiles.size;
+  for (const v of uniqueFiles.values()) d.searchBaseline += v;
+  return d;
+}
+
 export function readSavings(historyPath: string): SavingsSummary | null {
   let data: string;
   try {
     data = fs.readFileSync(historyPath, 'utf-8');
   } catch {
-    return null;
+    data = '';
   }
   const records: SavingsRecord[] = [];
   for (const line of data.split('\n')) {
@@ -72,7 +168,8 @@ export function readSavings(historyPath: string): SavingsSummary | null {
       /* skip malformed */
     }
   }
-  if (records.length === 0) return null;
+  const pending = readSessionLog(historyPath);
+  if (records.length === 0 && !pending) return null;
 
   const cutoff = Date.now() / 1000 - 86400;
   const recent = records.filter((r) => r.ts >= cutoff);
@@ -124,33 +221,71 @@ export function readSavings(historyPath: string): SavingsSummary | null {
   // read_block-ların actual-ı 0-dır — actualR-də yalnız search + grep + bash töhfə var.
   const searchActual24h = Math.max(0, actualR - grepActual24h - bashActual24h);
 
-  const savedFromBlocks24h = recent.reduce(
+  const savedFromBlocksHistory = recent.reduce(
     (s, r) => s + (r.block_baseline_tokens ?? 0),
     0,
   );
-  const savedFromGreps24h = Math.max(0, grepBaseline24h - grepActual24h);
-  const savedFromBash24h = Math.max(0, bashBaseline24h - bashActual24h);
-  const savedFromSearch24h = Math.max(0, searchBaseline24h - searchActual24h);
+  const savedFromGrepsHistory = Math.max(0, grepBaseline24h - grepActual24h);
+  const savedFromBashHistory = Math.max(0, bashBaseline24h - bashActual24h);
+  const savedFromSearchHistory = Math.max(
+    0,
+    searchBaseline24h - searchActual24h,
+  );
+
+  // Pending delta — in-flight session_log entries. Hooks bunlara yazır,
+  // Stop hook isə history-yə dren edir. Bar promt zamanı livedir.
+  const p = pending ?? {
+    searchCount: 0,
+    blockCount: 0,
+    grepCount: 0,
+    bashCount: 0,
+    warnCount: 0,
+    fileCount: 0,
+    searchBaseline: 0,
+    searchActual: 0,
+    blockBaseline: 0,
+    grepBaseline: 0,
+    grepActual: 0,
+    bashBaseline: 0,
+    bashActual: 0,
+    warnBaseline: 0,
+  };
+  const pendingSavedBlocks = p.blockBaseline;
+  const pendingSavedGreps = Math.max(0, p.grepBaseline - p.grepActual);
+  const pendingSavedBash = Math.max(0, p.bashBaseline - p.bashActual);
+  const pendingSavedSearch = Math.max(0, p.searchBaseline - p.searchActual);
+  const pendingSaved =
+    pendingSavedBlocks +
+    pendingSavedGreps +
+    pendingSavedBash +
+    pendingSavedSearch;
+  const pendingBaseline =
+    p.blockBaseline + p.grepBaseline + p.bashBaseline + p.searchBaseline;
+  const pendingTask = pending ? 1 : 0;
+
+  const savedTokens24h = savedR + pendingSaved;
+  const baseline24h = baseR + pendingBaseline;
+  const savedPct24h = baseline24h > 0 ? (savedTokens24h / baseline24h) * 100 : 0;
 
   return {
-    totalTasks: records.length,
-    totalSearches,
-    totalBlocks,
-    totalGreps,
-    totalBashInspects,
-    totalWarns,
-    totalFiles,
-    savedTokens24h: savedR,
-    savedFromSearch24h,
-    savedFromBlocks24h,
-    savedFromGreps24h,
-    savedFromBash24h,
-    savedPct24h: pctR,
-    recent24hTasks: recent.length,
-    recent24hBlocks,
-    recent24hGreps,
-    recent24hBashInspects,
-    recent24hWarns,
-    recent24hFiles,
+    totalTasks: records.length + pendingTask,
+    totalSearches: totalSearches + p.searchCount,
+    totalBlocks: totalBlocks + p.blockCount,
+    totalGreps: totalGreps + p.grepCount,
+    totalBashInspects: totalBashInspects + p.bashCount,
+    totalWarns: totalWarns + p.warnCount,
+    totalFiles: totalFiles + p.fileCount,
+    savedTokens24h,
+    savedFromSearch24h: savedFromSearchHistory + pendingSavedSearch,
+    savedFromBlocks24h: savedFromBlocksHistory + pendingSavedBlocks,
+    savedFromGreps24h: savedFromGrepsHistory + pendingSavedGreps,
+    savedFromBash24h: savedFromBashHistory + pendingSavedBash,
+    savedPct24h,
+    recent24hTasks: recent.length + pendingTask,
+    recent24hBlocks: recent24hBlocks + p.blockCount,
+    recent24hGreps: recent24hGreps + p.grepCount,
+    recent24hBashInspects: recent24hBashInspects + p.bashCount,
+    recent24hWarns: recent24hWarns + p.warnCount,
+    recent24hFiles: recent24hFiles + p.fileCount,
   };
 }

@@ -4,7 +4,7 @@ import * as vscode from 'vscode';
 import { tr } from './i18n';
 import { findHistoryFile, readSavings } from './savingsReader';
 
-const REFRESH_MS = 30_000;
+const REFRESH_MS = 5_000;
 
 function readEnforcement(workspacePath: string): boolean {
   try {
@@ -40,13 +40,9 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       ? new vscode.ThemeColor('charts.green')
       : undefined;
 
-    const historyPath = findHistoryFile();
-    if (!historyPath) {
-      item.text = tr('bar.noData', { icon, state: stateLabel });
-      item.tooltip = tr('bar.tipNoData', { state: stateLabel });
-      item.color = color;
-      return;
-    }
+    const historyPath =
+      findHistoryFile() ??
+      path.join(workspacePath, '.mla_savings_history.jsonl');
 
     const summary = readSavings(historyPath);
     if (!summary) {
@@ -108,6 +104,15 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     historyWatcher.onDidCreate(refresh);
     historyWatcher.onDidDelete(refresh);
     context.subscriptions.push(historyWatcher);
+
+    // Session log dəyişəndə (hər PostToolUse hook fire) live update.
+    const sessionWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(folders[0], '.mla_session_log.jsonl'),
+    );
+    sessionWatcher.onDidChange(refresh);
+    sessionWatcher.onDidCreate(refresh);
+    sessionWatcher.onDidDelete(refresh);
+    context.subscriptions.push(sessionWatcher);
   }
 
   return new vscode.Disposable(() => {
