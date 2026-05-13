@@ -46,12 +46,15 @@ const EN: Messages = {
   'bar.tipStarting': 'Enforcement: {state}\nIndexing or no recent activity',
   'bar.tipFull':
     'Enforcement: {state}\n' +
-    'Last 24h: {tasks} tasks, {saved} tokens saved ({pct}%)\n' +
+    'Last 24h: {tasks} tasks, {saved} tokens saved ({pct}%) · {files} files\n' +
     '  • search_code: {search} tok\n' +
     '  • Grep: {grep} tok ({greps} greps)\n' +
+    '  • Bash inspect: {bash} tok ({bashes} inspects)\n' +
     '  • Read-block: {block} tok ({blocks} blocks)\n' +
+    '  • Read-warn: {warns} soft warnings (not in total)\n' +
     'Lifetime: {totalTasks} tasks, {totalSearches} searches, ' +
-    '{totalGreps} greps, {totalBlocks} blocks',
+    '{totalGreps} greps, {totalBashInspects} bash, {totalBlocks} blocks, ' +
+    '{totalWarns} warns, {totalFiles} files saved',
 };
 
 const AZ: Messages = {
@@ -91,12 +94,15 @@ const AZ: Messages = {
   'bar.tipStarting': 'Enforcement: {state}\nİndekslənir və ya son aktivlik yox',
   'bar.tipFull':
     'Enforcement: {state}\n' +
-    'Son 24 saat: {tasks} task, {saved} token qənaət ({pct}%)\n' +
+    'Son 24 saat: {tasks} task, {saved} token qənaət ({pct}%) · {files} fayl\n' +
     '  • search_code: {search} tok\n' +
     '  • Grep: {grep} tok ({greps} grep)\n' +
+    '  • Bash inspect: {bash} tok ({bashes} yoxlama)\n' +
     '  • Read-block: {block} tok ({blocks} block)\n' +
+    '  • Read-warn: {warns} soft xəbərdarlıq (cəmiyə daxil deyil)\n' +
     'Cəmi: {totalTasks} task, {totalSearches} search, ' +
-    '{totalGreps} grep, {totalBlocks} block',
+    '{totalGreps} grep, {totalBashInspects} bash, {totalBlocks} block, ' +
+    '{totalWarns} warn, {totalFiles} fayl qənaət',
 };
 
 const MESSAGES: Record<string, Messages> = { en: EN, az: AZ };

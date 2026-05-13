@@ -81,11 +81,15 @@ def main() -> int:
         SESSION_LOG.unlink(missing_ok=True)
         return 0
 
-    # Üç tip entry:
+    # Entry tipləri:
     # search_code:  {"query", "files": {...}, "actual_tokens"}
     # read_block:   {"type": "read_block", "file", "lines", "estimated_baseline_tokens"}
+    # read_warn:    {"type": "read_warn", "file", "lines", "estimated_baseline_tokens"}
+    #               — soft warning, BASELINE-a daxil olmur (Read faktiki ola bilər),
+    #                 yalnız count + audit üçün
     # grep_search:  {"type": "grep_search", "file", "lines",
     #                "estimated_baseline_tokens", "estimated_actual_tokens"}
+    # bash_inspect: eyni grep_search ilə
     unique_files = {}  # file_path -> token_count (max)
     total_actual = 0
     search_count = 0
@@ -97,11 +101,16 @@ def main() -> int:
     bash_count = 0
     bash_baseline = 0
     bash_actual = 0
+    warn_count = 0
+    warn_baseline = 0  # informasiya üçün, baseline-a daxil olmur
     for e in entries:
         entry_type = e.get("type", "search_code")
         if entry_type == "read_block":
             block_count += 1
             block_baseline += e.get("estimated_baseline_tokens", 0)
+        elif entry_type == "read_warn":
+            warn_count += 1
+            warn_baseline += e.get("estimated_baseline_tokens", 0)
         elif entry_type == "grep_search":
             grep_count += 1
             grep_baseline += e.get("estimated_baseline_tokens", 0)
@@ -120,9 +129,10 @@ def main() -> int:
     has_block = block_count > 0
     has_grep = grep_count > 0
     has_bash = bash_count > 0
+    has_warn = warn_count > 0
 
-    # Heç bir tipdə baseline yoxdursa skip et
-    if not (has_search or has_block or has_grep or has_bash):
+    # Heç bir tipdə aktivlik yoxdursa skip et
+    if not (has_search or has_block or has_grep or has_bash or has_warn):
         SESSION_LOG.unlink(missing_ok=True)
         return 0
 
@@ -171,6 +181,8 @@ def main() -> int:
             "bash_inspects": bash_count,
             "bash_baseline_tokens": bash_baseline,
             "bash_actual_tokens": bash_actual,
+            "read_warns": warn_count,
+            "warn_baseline_tokens": warn_baseline,
             "saving_tokens": saving,
             "saving_pct": round(pct, 2),
             "file_count": len(unique_files),

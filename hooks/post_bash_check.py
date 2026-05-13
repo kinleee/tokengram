@@ -22,7 +22,7 @@ SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 ENFORCEMENT_FLAG = PROJECT_ROOT / ".mla_enforcement.flag"
 
 sys.path.insert(0, str(PROJECT_ROOT))
-from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS
+from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS, estimate_tokens
 
 THRESHOLD_LINES = 50
 ESTIMATED_ACTUAL_RATIO = 0.20
@@ -134,13 +134,14 @@ def main() -> int:
         seen.add(str(file_path))
 
         try:
-            line_count = sum(1 for _ in file_path.open("rb"))
+            content = file_path.read_bytes()
         except OSError:
             continue
+        line_count = content.count(b"\n") + (1 if content and not content.endswith(b"\n") else 0)
         if line_count < THRESHOLD_LINES:
             continue
 
-        estimated_baseline = line_count * 10
+        estimated_baseline = estimate_tokens(content)
         estimated_actual = int(estimated_baseline * ESTIMATED_ACTUAL_RATIO)
 
         record = {

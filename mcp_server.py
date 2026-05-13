@@ -44,6 +44,7 @@ from smart_router import SmartRouter, count_tokens
 # Sessiya analytics — hər search_code çağırışı bura yazılır,
 # Stop hook bunu oxuyur və qənaət hesabatı göstərir.
 SESSION_LOG = Path(__file__).parent / ".mla_session_log.jsonl"
+ENFORCEMENT_FLAG = Path(__file__).parent / ".mla_enforcement.flag"
 
 # PostToolUse hook-u (queue_change.py) bu fayla redaktə olunmuş yolları yazır.
 # Fon işçisi (aşağıda) periodik olaraq dren edir və yenidən indeksləşdirir.
@@ -513,7 +514,19 @@ def _log_search(query: str, results, response_text: str) -> None:
     """Hər search_code çağırışını analytics üçün qeyd edir.
 
     Stop hook (savings_report.py) bunu oxuyaraq qənaət hesablayır.
+
+    NOT: Enforcement OFF olduqda log yazılmır — əks halda user Read-ləri də
+    edirsə (block yox), savings_history-də saxta inflasiya yaranır.
     """
+    try:
+        if (
+            not ENFORCEMENT_FLAG.exists()
+            or ENFORCEMENT_FLAG.read_text(encoding="utf-8").strip().lower() != "on"
+        ):
+            return
+    except OSError:
+        return
+
     try:
         # Bu çağırışın nəticəsində hansı unikal fayllar gəldi
         unique_files = {}

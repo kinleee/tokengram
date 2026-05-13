@@ -71,3 +71,27 @@ EXCLUDED_FILE_SUFFIXES = (
 # Tək fayl ölçü tavanı (bayt). 1 MB ~ 30K sətir — normal kod fayllarından çox
 # böyükdür. Bundan iri fayllar (data dump, vendor bundle) indeksdən kənar.
 MAX_FILE_SIZE_BYTES = 1_000_000
+
+# Token estimation helper — bütün hook-larda baseline hesablamaq üçün.
+# `lines × 10` heuristikasını əvəz edir (kobud, JSON/MD-də 2-3x səhvə düşür).
+#
+# `len(text) // CHARS_PER_TOKEN` daha dəqiqdir, çünki:
+#   - Düz mətn/markdown:  ~4 chars/token
+#   - Kod (Python/JS):     ~3-4 chars/token
+#   - Minified JSON:       ~2-3 chars/token (səhv tərəfdə qoyuruq, konservativ)
+# Real tiktoken-dən ~10-15% səhvlik, lakin tiktoken hər hook-da load etmək
+# 100-200ms cold start əlavə edərdi — hook tələbat-əleyhinə olar.
+CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(text) -> int:
+    """Mətn/bayt → təxmini token sayı. Heç vaxt 0 qaytarmır (≥1)."""
+    if text is None:
+        return 1
+    if isinstance(text, (bytes, bytearray)):
+        n = len(text)
+    elif isinstance(text, str):
+        n = len(text)
+    else:
+        n = len(str(text))
+    return max(1, n // CHARS_PER_TOKEN)

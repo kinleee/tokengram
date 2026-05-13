@@ -21,7 +21,7 @@ if sys.platform == "win32":
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
-from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS
+from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS, estimate_tokens
 from i18n import tr
 
 THRESHOLD_BLOCK = 50
@@ -63,21 +63,24 @@ def main():
         sys.exit(0)
 
     try:
-        line_count = sum(1 for _ in file_path.open("rb"))
+        content = file_path.read_bytes()
     except OSError:
         sys.exit(0)
 
+    line_count = content.count(b"\n") + (1 if content and not content.endswith(b"\n") else 0)
+    estimated_baseline = estimate_tokens(content)
+    session_log = project_root / ".mla_session_log.jsonl"
+
     if line_count >= THRESHOLD_BLOCK:
         # Block hadisəsini session_log-a yaz — savings_report təxmini qənaəti
-        # baseline-ə əlavə edəcək (Read-də ~10 tok/sətir, biz 0 işlətdik).
-        session_log = project_root / ".mla_session_log.jsonl"
+        # baseline-ə əlavə edəcək (biz 0 token istifadə etdik).
         try:
             record = {
                 "ts": time.time(),
                 "type": "read_block",
                 "file": str(file_path),
                 "lines": line_count,
-                "estimated_baseline_tokens": line_count * 10,
+                "estimated_baseline_tokens": estimated_baseline,
             }
             with open(session_log, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -88,12 +91,29 @@ def main():
         sys.exit(2)
 
     if line_count >= THRESHOLD_WARN:
+        # Soft warning — user (və ya AI) hələ də Read edə bilər, amma biz
+        # event-i log-a salırıq ki, savings_report "soft" kateqoriyasında
+        # tracking aparsın. Bu BASELINE-a əlavə olunmur (Read faktiki baş
+        # verə bilər), yalnız MLA-nın guidance işini sayır.
+        try:
+            record = {
+                "ts": time.time(),
+                "type": "read_warn",
+                "file": str(file_path),
+                "lines": line_count,
+                "estimated_baseline_tokens": estimated_baseline,
+            }
+            with open(session_log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
         print(
             tr(
                 "read_warn",
                 name=file_path.name,
                 lines=line_count,
-                est_tokens=line_count * 10,
+                est_tokens=estimated_baseline,
             ),
             file=sys.stderr,
         )

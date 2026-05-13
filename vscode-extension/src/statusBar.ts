@@ -69,14 +69,22 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       saved: summary.savedTokens24h.toLocaleString(),
       pct: summary.savedPct24h.toFixed(1),
       search: summary.savedFromSearch24h.toLocaleString(),
+      searches: summary.totalSearches, // template-də istifadə olunmur, hazır saxlayırıq
       grep: summary.savedFromGreps24h.toLocaleString(),
       greps: summary.recent24hGreps,
+      bash: summary.savedFromBash24h.toLocaleString(),
+      bashes: summary.recent24hBashInspects,
       block: summary.savedFromBlocks24h.toLocaleString(),
       blocks: summary.recent24hBlocks,
+      warns: summary.recent24hWarns,
+      files: summary.recent24hFiles,
       totalTasks: summary.totalTasks,
       totalSearches: summary.totalSearches,
       totalGreps: summary.totalGreps,
+      totalBashInspects: summary.totalBashInspects,
       totalBlocks: summary.totalBlocks,
+      totalWarns: summary.totalWarns,
+      totalFiles: summary.totalFiles,
     });
   };
 
