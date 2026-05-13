@@ -1,0 +1,11 @@
+   Compiling mla-search-rs v0.1.0 (C:\Users\ilkin.ha\Documents\MLA_AGENT\rust-prototype\mla-search-rs)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9m 25s
+     Running `target\debug\mla-search-rs.exe index C:\Users\ilkin.ha\Documents\MLA_AGENT\hooks --reset`
+Walking: C:\Users\ilkin.ha\Documents\MLA_AGENT\hooks
+Tapılan fayllar: 11
+Cədvəl sıfırlandı.
+  5/11 faylı, 21 chunk indekslənib
+  10/11 faylı, 34 chunk indekslənib
+  11/11 faylı, 35 chunk indekslənib
+
+✓ Bitdi: 11 fayl → 35 chunk, 14.2s

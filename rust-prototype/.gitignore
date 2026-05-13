@@ -1,0 +1,6 @@
+target/
+.fastembed_cache/
+*.lock
+!Cargo.lock
+.idea/
+.vscode/

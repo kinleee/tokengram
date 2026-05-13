@@ -1,0 +1,4 @@
+$c128f3af-4f80-4662-9ec0-376c6dc26772²"id ÿÿÿÿÿÿÿÿÿ*string8Zdefault+	file_path ÿÿÿÿÿÿÿÿÿ*string8Zdefault)content ÿÿÿÿÿÿÿÿÿ*string8Zdefault+
+start_line ÿÿÿÿÿÿÿÿÿ*int328Zdefault)end_line ÿÿÿÿÿÿÿÿÿ*int328Zdefault+	file_hash ÿÿÿÿÿÿÿÿÿ*string8Zdefault>	embedding ÿÿÿÿÿÿÿÿÿ*fixed_size_list:float:3848Zdefault"'
+lance.auto_cleanup.older_than14days"!
+lance.auto_cleanup.interval20
