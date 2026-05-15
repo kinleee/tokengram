@@ -87,15 +87,15 @@ interface PendingDelta {
   warnBaseline: number;
 }
 
-// Per-fayl baseline cap: bir default Read çağırışı qədər (2000 sətir × 10 tok).
-// 100k+ token generated fayllar (Cython .c) əks halda metrikanı şişirdir.
-// Stop hook savings_report.py-da eyni dəyər istifadə olunur.
-const MAX_BASELINE_PER_FILE = 20_000;
+// Per-event baseline cap = realistik chunked Read dəyəri (~1000 sətir × 10 tok).
+// Model: MLA-sız agent adətən nəhəng faylı tam oxumur, target-li chunked Read edir.
+// savings_report.py-da eyni dəyər istifadə olunur.
+const MAX_BASELINE_PER_EVENT = 10_000;
 
 function capProportional(rawBaseline: number, rawActual: number): [number, number] {
-  if (rawBaseline <= MAX_BASELINE_PER_FILE) return [rawBaseline, rawActual];
-  const scale = MAX_BASELINE_PER_FILE / rawBaseline;
-  return [MAX_BASELINE_PER_FILE, Math.round(rawActual * scale)];
+  if (rawBaseline <= MAX_BASELINE_PER_EVENT) return [rawBaseline, rawActual];
+  const scale = MAX_BASELINE_PER_EVENT / rawBaseline;
+  return [MAX_BASELINE_PER_EVENT, Math.round(rawActual * scale)];
 }
 
 function readSessionLog(historyPath: string): PendingDelta | null {
@@ -140,10 +140,10 @@ function readSessionLog(historyPath: string): PendingDelta | null {
     const t = e.type ?? 'search_code';
     if (t === 'read_block') {
       d.blockCount += 1;
-      d.blockBaseline += Math.min(e.estimated_baseline_tokens ?? 0, MAX_BASELINE_PER_FILE);
+      d.blockBaseline += Math.min(e.estimated_baseline_tokens ?? 0, MAX_BASELINE_PER_EVENT);
     } else if (t === 'read_warn') {
       d.warnCount += 1;
-      d.warnBaseline += Math.min(e.estimated_baseline_tokens ?? 0, MAX_BASELINE_PER_FILE);
+      d.warnBaseline += Math.min(e.estimated_baseline_tokens ?? 0, MAX_BASELINE_PER_EVENT);
     } else if (t === 'grep_search') {
       d.grepCount += 1;
       const [cb, ca] = capProportional(
@@ -164,16 +164,18 @@ function readSessionLog(historyPath: string): PendingDelta | null {
       d.searchCount += 1;
       d.searchActual += e.actual_tokens ?? 0;
       const files = e.files ?? {};
-      for (const [p, tok] of Object.entries(files)) {
-        const capped = Math.min(tok, MAX_BASELINE_PER_FILE);
-        const prev = uniqueFiles.get(p) ?? 0;
-        if (capped > prev) uniqueFiles.set(p, capped);
+      // search_code: yalnız TOP fayl-ı baseline-a hesab et (rank order qorunur).
+      // MLA-sız agent N fayl deyil, 1 chunked Read edərdi.
+      const entries = Object.entries(files);
+      if (entries.length > 0) {
+        const topTokens = entries[0][1] as number;
+        d.searchBaseline += Math.min(topTokens, MAX_BASELINE_PER_EVENT);
+        for (const [p] of entries) uniqueFiles.set(p, 0);
       }
     }
   }
   if (!hasAny) return null;
   d.fileCount = uniqueFiles.size;
-  for (const v of uniqueFiles.values()) d.searchBaseline += v;
   return d;
 }
 

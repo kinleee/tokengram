@@ -32,9 +32,11 @@ SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 SAVINGS_HISTORY = PROJECT_ROOT / ".mla_savings_history.jsonl"
 ENFORCEMENT_FLAG = PROJECT_ROOT / ".mla_enforcement.flag"
 
-# Per-fayl baseline cap: 2000 sətirlik bir default Read çağırışı (~20k token).
-# 100k+ token generated fayllar (Cython .c) əks halda metrikanı şişirdir.
-MAX_BASELINE_PER_FILE = 20_000
+# Per-event baseline cap = realistik "chunked Read" dəyəri (~1000 sətir × 10 tok).
+# Model: MLA-sız agent adətən nəhəng faylı tam oxumur, target-li chunked Read edir.
+# Daha böyük cap (20k = tam Read) "50% real reduction" empirikası ilə uyğun gəlmir.
+# search_code, grep, bash_inspect, read_block hamısı eyni cap-i istifadə edir.
+MAX_BASELINE_PER_EVENT = 10_000
 
 
 def _is_enforcement_on() -> bool:
@@ -94,7 +96,6 @@ def main() -> int:
     # grep_search:  {"type": "grep_search", "file", "lines",
     #                "estimated_baseline_tokens", "estimated_actual_tokens"}
     # bash_inspect: eyni grep_search ilə
-    unique_files = {}  # file_path -> token_count (max)
     total_actual = 0
     search_count = 0
     block_count = 0
@@ -107,19 +108,24 @@ def main() -> int:
     bash_actual = 0
     warn_count = 0
     warn_baseline = 0  # informasiya üçün, baseline-a daxil olmur
+    # search_code baseline-ı per-event yığırıq (unique_files əvəzinə)
+    # — yığım sonu hər event ayrıca cap-lanır, eyni fayl iki search-də gələrsə
+    # ikinci search "free saving" sayılmır, çünki MLA-sız agent də iki dəfə oxumazdı.
+    search_baseline = 0
+    unique_files_for_count = set()
     for e in entries:
         entry_type = e.get("type", "search_code")
         if entry_type == "read_block":
             block_count += 1
-            block_baseline += min(e.get("estimated_baseline_tokens", 0), MAX_BASELINE_PER_FILE)
+            block_baseline += min(e.get("estimated_baseline_tokens", 0), MAX_BASELINE_PER_EVENT)
         elif entry_type == "read_warn":
             warn_count += 1
-            warn_baseline += min(e.get("estimated_baseline_tokens", 0), MAX_BASELINE_PER_FILE)
+            warn_baseline += min(e.get("estimated_baseline_tokens", 0), MAX_BASELINE_PER_EVENT)
         elif entry_type == "grep_search":
             grep_count += 1
             raw_b = e.get("estimated_baseline_tokens", 0)
             raw_a = e.get("estimated_actual_tokens", 0)
-            capped_b = min(raw_b, MAX_BASELINE_PER_FILE)
+            capped_b = min(raw_b, MAX_BASELINE_PER_EVENT)
             # heuristic faiz qorunsun deyə actual da eyni nisbətdə kiçilsin
             capped_a = int(raw_a * capped_b / raw_b) if raw_b > 0 else 0
             grep_baseline += capped_b
@@ -128,18 +134,23 @@ def main() -> int:
             bash_count += 1
             raw_b = e.get("estimated_baseline_tokens", 0)
             raw_a = e.get("estimated_actual_tokens", 0)
-            capped_b = min(raw_b, MAX_BASELINE_PER_FILE)
+            capped_b = min(raw_b, MAX_BASELINE_PER_EVENT)
             capped_a = int(raw_a * capped_b / raw_b) if raw_b > 0 else 0
             bash_baseline += capped_b
             bash_actual += capped_a
         else:
             search_count += 1
-            for fp, tc in e.get("files", {}).items():
-                capped_tc = min(tc, MAX_BASELINE_PER_FILE)
-                unique_files[fp] = max(unique_files.get(fp, 0), capped_tc)
+            # Bu event üçün TOP fayl baseline-ı götür (rank order qorunur)
+            # və event-i cap-lə. Agent MLA-sız 1 chunked Read edərdi, N deyil.
+            files = e.get("files", {})
+            if files:
+                # Ranked: ilk fayl ən yaxşı match. Yalnız onu credit et.
+                top_tokens = next(iter(files.values()))
+                search_baseline += min(top_tokens, MAX_BASELINE_PER_EVENT)
+                unique_files_for_count.update(files.keys())
             total_actual += e.get("actual_tokens", 0)
 
-    has_search = bool(unique_files)
+    has_search = search_count > 0
     has_block = block_count > 0
     has_grep = grep_count > 0
     has_bash = bash_count > 0
@@ -150,7 +161,6 @@ def main() -> int:
         SESSION_LOG.unlink(missing_ok=True)
         return 0
 
-    search_baseline = sum(unique_files.values())
     baseline = search_baseline + block_baseline + grep_baseline + bash_baseline
     actual = total_actual + grep_actual + bash_actual  # blocks 0 actual
     saving = baseline - actual
@@ -199,7 +209,7 @@ def main() -> int:
             "warn_baseline_tokens": warn_baseline,
             "saving_tokens": saving,
             "saving_pct": round(pct, 2),
-            "file_count": len(unique_files),
+            "file_count": len(unique_files_for_count),
         }
         with open(SAVINGS_HISTORY, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
