@@ -32,6 +32,10 @@ SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 SAVINGS_HISTORY = PROJECT_ROOT / ".mla_savings_history.jsonl"
 ENFORCEMENT_FLAG = PROJECT_ROOT / ".mla_enforcement.flag"
 
+# Per-fayl baseline cap: 2000 sətirlik bir default Read çağırışı (~20k token).
+# 100k+ token generated fayllar (Cython .c) əks halda metrikanı şişirdir.
+MAX_BASELINE_PER_FILE = 20_000
+
 
 def _is_enforcement_on() -> bool:
     if not ENFORCEMENT_FLAG.exists():
@@ -107,22 +111,32 @@ def main() -> int:
         entry_type = e.get("type", "search_code")
         if entry_type == "read_block":
             block_count += 1
-            block_baseline += e.get("estimated_baseline_tokens", 0)
+            block_baseline += min(e.get("estimated_baseline_tokens", 0), MAX_BASELINE_PER_FILE)
         elif entry_type == "read_warn":
             warn_count += 1
-            warn_baseline += e.get("estimated_baseline_tokens", 0)
+            warn_baseline += min(e.get("estimated_baseline_tokens", 0), MAX_BASELINE_PER_FILE)
         elif entry_type == "grep_search":
             grep_count += 1
-            grep_baseline += e.get("estimated_baseline_tokens", 0)
-            grep_actual += e.get("estimated_actual_tokens", 0)
+            raw_b = e.get("estimated_baseline_tokens", 0)
+            raw_a = e.get("estimated_actual_tokens", 0)
+            capped_b = min(raw_b, MAX_BASELINE_PER_FILE)
+            # heuristic faiz qorunsun deyə actual da eyni nisbətdə kiçilsin
+            capped_a = int(raw_a * capped_b / raw_b) if raw_b > 0 else 0
+            grep_baseline += capped_b
+            grep_actual += capped_a
         elif entry_type == "bash_inspect":
             bash_count += 1
-            bash_baseline += e.get("estimated_baseline_tokens", 0)
-            bash_actual += e.get("estimated_actual_tokens", 0)
+            raw_b = e.get("estimated_baseline_tokens", 0)
+            raw_a = e.get("estimated_actual_tokens", 0)
+            capped_b = min(raw_b, MAX_BASELINE_PER_FILE)
+            capped_a = int(raw_a * capped_b / raw_b) if raw_b > 0 else 0
+            bash_baseline += capped_b
+            bash_actual += capped_a
         else:
             search_count += 1
             for fp, tc in e.get("files", {}).items():
-                unique_files[fp] = max(unique_files.get(fp, 0), tc)
+                capped_tc = min(tc, MAX_BASELINE_PER_FILE)
+                unique_files[fp] = max(unique_files.get(fp, 0), capped_tc)
             total_actual += e.get("actual_tokens", 0)
 
     has_search = bool(unique_files)

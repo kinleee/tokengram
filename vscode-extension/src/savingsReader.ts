@@ -43,6 +43,12 @@ export interface SavingsSummary {
   recent24hBashInspects: number;
   recent24hWarns: number;
   recent24hFiles: number;
+  // Bar UX: 24h aggregate kifayət deyil — kiçik turn-dəlişikliklər görünmür.
+  // Bunlar session_log-dan oxunur (Stop hook hələ flush etməyib):
+  pendingSavedTokens: number;     // bu turn-də indi səviyyəsində qənaət
+  pendingActivityCount: number;   // search + grep + bash + block + warn cəm
+  // Background worker queue (index re-build pending):
+  indexingPending: number;        // .mla_pending.txt-də fayl sayı
 }
 
 export function findHistoryFile(): string | null {
@@ -79,6 +85,17 @@ interface PendingDelta {
   bashBaseline: number;
   bashActual: number;
   warnBaseline: number;
+}
+
+// Per-fayl baseline cap: bir default Read çağırışı qədər (2000 sətir × 10 tok).
+// 100k+ token generated fayllar (Cython .c) əks halda metrikanı şişirdir.
+// Stop hook savings_report.py-da eyni dəyər istifadə olunur.
+const MAX_BASELINE_PER_FILE = 20_000;
+
+function capProportional(rawBaseline: number, rawActual: number): [number, number] {
+  if (rawBaseline <= MAX_BASELINE_PER_FILE) return [rawBaseline, rawActual];
+  const scale = MAX_BASELINE_PER_FILE / rawBaseline;
+  return [MAX_BASELINE_PER_FILE, Math.round(rawActual * scale)];
 }
 
 function readSessionLog(historyPath: string): PendingDelta | null {
@@ -123,25 +140,34 @@ function readSessionLog(historyPath: string): PendingDelta | null {
     const t = e.type ?? 'search_code';
     if (t === 'read_block') {
       d.blockCount += 1;
-      d.blockBaseline += e.estimated_baseline_tokens ?? 0;
+      d.blockBaseline += Math.min(e.estimated_baseline_tokens ?? 0, MAX_BASELINE_PER_FILE);
     } else if (t === 'read_warn') {
       d.warnCount += 1;
-      d.warnBaseline += e.estimated_baseline_tokens ?? 0;
+      d.warnBaseline += Math.min(e.estimated_baseline_tokens ?? 0, MAX_BASELINE_PER_FILE);
     } else if (t === 'grep_search') {
       d.grepCount += 1;
-      d.grepBaseline += e.estimated_baseline_tokens ?? 0;
-      d.grepActual += e.estimated_actual_tokens ?? 0;
+      const [cb, ca] = capProportional(
+        e.estimated_baseline_tokens ?? 0,
+        e.estimated_actual_tokens ?? 0,
+      );
+      d.grepBaseline += cb;
+      d.grepActual += ca;
     } else if (t === 'bash_inspect') {
       d.bashCount += 1;
-      d.bashBaseline += e.estimated_baseline_tokens ?? 0;
-      d.bashActual += e.estimated_actual_tokens ?? 0;
+      const [cb, ca] = capProportional(
+        e.estimated_baseline_tokens ?? 0,
+        e.estimated_actual_tokens ?? 0,
+      );
+      d.bashBaseline += cb;
+      d.bashActual += ca;
     } else {
       d.searchCount += 1;
       d.searchActual += e.actual_tokens ?? 0;
       const files = e.files ?? {};
       for (const [p, tok] of Object.entries(files)) {
+        const capped = Math.min(tok, MAX_BASELINE_PER_FILE);
         const prev = uniqueFiles.get(p) ?? 0;
-        if (tok > prev) uniqueFiles.set(p, tok);
+        if (capped > prev) uniqueFiles.set(p, capped);
       }
     }
   }
@@ -149,6 +175,20 @@ function readSessionLog(historyPath: string): PendingDelta | null {
   d.fileCount = uniqueFiles.size;
   for (const v of uniqueFiles.values()) d.searchBaseline += v;
   return d;
+}
+
+function readIndexingPending(historyPath: string): number {
+  // Background worker drain etməyən fayllar — re-embed gözləyirlər.
+  const pendingPath = path.join(
+    path.dirname(historyPath),
+    '.mla_pending.txt',
+  );
+  try {
+    const data = fs.readFileSync(pendingPath, 'utf-8');
+    return data.split('\n').filter((l) => l.trim()).length;
+  } catch {
+    return 0;
+  }
 }
 
 export function readSavings(historyPath: string): SavingsSummary | null {
@@ -169,7 +209,9 @@ export function readSavings(historyPath: string): SavingsSummary | null {
     }
   }
   const pending = readSessionLog(historyPath);
-  if (records.length === 0 && !pending) return null;
+  const indexingPending = readIndexingPending(historyPath);
+  // Boş state-də də summary qaytar — bar "0.0k · 0%" göstərsin,
+  // "başlayır..." state-i user-ə sonsuz yüklənmə kimi görünür.
 
   const cutoff = Date.now() / 1000 - 86400;
   const recent = records.filter((r) => r.ts >= cutoff);
@@ -287,5 +329,9 @@ export function readSavings(historyPath: string): SavingsSummary | null {
     recent24hBashInspects: recent24hBashInspects + p.bashCount,
     recent24hWarns: recent24hWarns + p.warnCount,
     recent24hFiles: recent24hFiles + p.fileCount,
+    pendingSavedTokens: pendingSaved,
+    pendingActivityCount:
+      p.searchCount + p.blockCount + p.grepCount + p.bashCount + p.warnCount,
+    indexingPending,
   };
 }
