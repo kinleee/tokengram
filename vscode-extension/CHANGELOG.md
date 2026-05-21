@@ -2,6 +2,11 @@
 
 All notable changes to the Tokengram VS Code extension will be documented here.
 
+## [0.1.24] — 2026-05-21
+
+### Fixed
+- **The "ChromaDB re-index" button on the status-bar menu now shows a real determinate progress bar with stage labels** instead of the prior static "may take a minute" notification + indeterminate spinner. The wheel's `--reindex` CLI was already emitting `[1/3]` / `[2/3]` / `[3/3]` stage banners (added in 0.1.23 / wheel 0.1.8), but the extension was buffering the entire run via `execFile` and only writing the captured log to the output channel after the process exited. The button now spawns the CLI with `child_process.spawn`, streams stderr line by line, and routes each stage marker into `withProgress({ location: Notification })` — start 5%, `[1/3]` 25%, `[2/3]` 50% with elapsed-time slow-fill to 85% during the HuggingFace model download phase, `[3/3]` 90%, "Hazır" → 100%.
+
 ## [0.1.23] — 2026-05-21
 
 ### Changed

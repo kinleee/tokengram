@@ -534,15 +534,18 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
             title: tr('menu.reindexTitle'),
             cancellable: false,
           },
-          async () => {
-            const { stderr } = await execFile(
+          async (progress) => {
+            const captured: string[] = [];
+            await streamingReindex(
               server.command,
               reindexArgs,
               serverCwd,
               serverEnv,
+              progress,
+              captured,
             );
             channel.clear();
-            channel.appendLine(stderr);
+            channel.appendLine(captured.join('\n'));
           },
         );
         vscode.window.showInformationMessage(tr('menu.reindexDone'));
@@ -679,4 +682,135 @@ export function registerMenuCommand(
       );
     }
   });
+}
+
+// Streaming reindex runner — spawns the wheel's `--reindex` CLI and routes its
+// `[N/3]` stage banners into vscode.window.withProgress so the notification
+// shows real progress instead of a static "may take a minute" message with an
+// indeterminate spinner.
+//
+// Stage map (matches the banners printed by mcp_server._cli_reindex):
+//   start        →  5%   "Starting Tokengram..."
+//   [1/3] scan   → 25%   "Files being scanned"
+//   [2/3] model  → 50%, slow-fill to 85% over ~45s for first-run HF download
+//   [3/3] index  → 90%   "N chunks being indexed"
+//   ✓ Hazır       → 100% (success)
+function streamingReindex(
+  bin: string,
+  args: string[],
+  cwd: string,
+  extraEnv: Record<string, string>,
+  progress: vscode.Progress<{ message?: string; increment?: number }>,
+  captured: string[],
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = cp.spawn(bin, args, {
+      cwd,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: cwd, ...extraEnv },
+    });
+
+    let value = 0;
+    const jumpTo = (target: number, message?: string) => {
+      const clamped = Math.max(0, Math.min(100, target));
+      if (clamped <= value) {
+        if (message !== undefined) progress.report({ message });
+        return;
+      }
+      const inc = clamped - value;
+      value = clamped;
+      progress.report({ increment: inc, message });
+    };
+
+    let modelFillTimer: NodeJS.Timeout | null = null;
+    const stopModelFill = () => {
+      if (modelFillTimer) {
+        clearInterval(modelFillTimer);
+        modelFillTimer = null;
+      }
+    };
+    const startModelFill = () => {
+      stopModelFill();
+      const startedAt = Date.now();
+      const cap = 85;
+      const expectedMs = 45_000; // first-run HF model download; cached is ~2s
+      const start = value;
+      modelFillTimer = setInterval(() => {
+        const elapsed = Date.now() - startedAt;
+        const frac = Math.min(1, elapsed / expectedMs);
+        const projected = start + (cap - start) * frac;
+        if (projected > value) {
+          const inc = projected - value;
+          value = projected;
+          progress.report({
+            increment: inc,
+            message: `Embedding model loading — ${Math.floor(elapsed / 1000)}s elapsed`,
+          });
+        }
+        if (frac >= 1) stopModelFill();
+      }, 600);
+    };
+
+    jumpTo(5, 'Starting Tokengram...');
+
+    let buf = '';
+    const onChunk = (data: Buffer | string) => {
+      buf += data.toString();
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trimEnd();
+        if (!trimmed) continue;
+        captured.push(trimmed);
+
+        const stage = trimmed.match(/\[(\d)\/3\]\s*(.*)$/);
+        if (stage) {
+          const [, n, tail] = stage;
+          if (n === '1') {
+            stopModelFill();
+            jumpTo(25, `[1/3] ${cleanTail(tail) || 'Scanning files'}`);
+          } else if (n === '2') {
+            jumpTo(50, `[2/3] ${cleanTail(tail) || 'Loading embedding model'}`);
+            startModelFill();
+          } else if (n === '3') {
+            stopModelFill();
+            jumpTo(90, `[3/3] ${cleanTail(tail) || 'Indexing chunks'}`);
+          }
+          continue;
+        }
+
+        if (/^\s*✓\s*Haz[ıi]r/i.test(trimmed) || /Hazır:.*indeksl/i.test(trimmed)) {
+          stopModelFill();
+          jumpTo(100, 'Done');
+        }
+      }
+    };
+
+    child.stdout.on('data', onChunk);
+    child.stderr.on('data', onChunk);
+    child.on('error', (err) => {
+      stopModelFill();
+      reject(err);
+    });
+    child.on('close', (code) => {
+      stopModelFill();
+      if (buf.trim()) captured.push(buf.trim());
+      if (code === 0) {
+        jumpTo(100);
+        resolve();
+      } else {
+        reject(
+          new Error(`reindex exited with code ${code}\n${captured.slice(-20).join('\n')}`),
+        );
+      }
+    });
+  });
+}
+
+// Strip emoji + leading icons so the progress message stays compact on Windows
+// notifications where emoji may render as boxes.
+function cleanTail(s: string): string {
+  return s
+    .replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]+\s*/u, '')
+    .replace(/:\s*.*$/, '')
+    .trim();
 }
