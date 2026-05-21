@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Savings history-i sıfırla. Köhnəsi backup-a köçürülür."""
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
 
 
 def main():
-    history = Path(__file__).resolve().parent.parent / ".mla_savings_history.jsonl"
+    project_root = Path(
+        os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    ).resolve()
+    history = project_root / ".mla_savings_history.jsonl"
 
     if not history.exists() or history.stat().st_size == 0:
         history.touch()

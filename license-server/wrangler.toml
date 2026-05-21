@@ -8,13 +8,13 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "mla-licenses"
-database_id = "REPLACE_WITH_REAL_DB_ID"
+database_id = "a678bb46-1080-46f8-90f2-d8af986f53b7"
 
 # ---- KV cache (subscription status) ----
 # wrangler kv:namespace create CACHE → id-ni bura yapışdır
 [[kv_namespaces]]
 binding = "CACHE"
-id = "REPLACE_WITH_REAL_KV_ID"
+id = "2480a43e70324afea3f10d0cd8438d8f"
 
 # ---- Secrets (wrangler secret put NAME) ----
 # JWT_PRIVATE_KEY     — RSA 2048 private key (PEM)
@@ -25,6 +25,24 @@ id = "REPLACE_WITH_REAL_KV_ID"
 name = "mla-license-server-staging"
 vars = { ENVIRONMENT = "staging" }
 
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "mla-licenses"
+database_id = "a678bb46-1080-46f8-90f2-d8af986f53b7"
+
+[[env.staging.kv_namespaces]]
+binding = "CACHE"
+id = "2480a43e70324afea3f10d0cd8438d8f"
+
 [env.production]
 name = "mla-license-server-production"
 vars = { ENVIRONMENT = "production" }
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "mla-licenses"
+database_id = "a678bb46-1080-46f8-90f2-d8af986f53b7"
+
+[[env.production.kv_namespaces]]
+binding = "CACHE"
+id = "2480a43e70324afea3f10d0cd8438d8f"

@@ -35,11 +35,7 @@ pub fn walk(root: impl AsRef<Path>) -> Vec<FoundFile> {
         .git_exclude(true)
         .standard_filters(true);
 
-    for d in EXTRA_EXCLUDE_DIRS {
-        // ignore crate-i override ilə əlavə pattern qəbul edir
-        builder.add_custom_ignore_filename(".mla_ignore");
-        let _ = d; // istinad saxlamaq üçün
-    }
+    builder.add_custom_ignore_filename(".mla_ignore");
 
     let supported: std::collections::HashSet<&str> = SUPPORTED_EXT.iter().copied().collect();
 

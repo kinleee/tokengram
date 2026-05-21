@@ -5,8 +5,10 @@ type Env = {
   DB: D1Database;
   CACHE: KVNamespace;
   JWT_PRIVATE_KEY: string;
+  JWT_PUBLIC_KEY: string;
   POLAR_WEBHOOK_SECRET: string;
   POLAR_API_KEY: string;
+  ADMIN_TOKEN: string;
   ENVIRONMENT: string;
 };
 
@@ -26,7 +28,53 @@ const POLAR_STATUS_MAP: Record<string, string> = {
   unpaid: 'past_due',
 };
 
-app.get('/', (c) => c.text('MLA License Server — OK'));
+app.get('/', (c) => c.text('Tokengram License Server — OK'));
+
+// ============================================================
+// GET /pubkey
+// JWT verify üçün public key — setup wizard onu yükləyir.
+// ============================================================
+app.get('/pubkey', (c) => {
+  if (!c.env.JWT_PUBLIC_KEY) {
+    return c.text('JWT_PUBLIC_KEY not configured', 500);
+  }
+  return c.text(c.env.JWT_PUBLIC_KEY, 200, { 'content-type': 'application/x-pem-file' });
+});
+
+// ============================================================
+// POST /check-key
+// Setup wizard üçün lightweight key validation — yalnız "key etibarlıdırmı?"
+// Fingerprint binding etmir, JWT verməz. Real activation MCP server-də olur.
+// ============================================================
+app.post('/check-key', async (c) => {
+  const body = await c.req.json<{ license_key?: string }>().catch(() => ({} as { license_key?: string }));
+  const key = (body.license_key ?? '').trim();
+  if (!key) return c.json({ valid: false, reason: 'missing_key' }, 400);
+
+  const row = await c.env.DB.prepare(
+    `SELECT l.revoked, u.email, s.status, s.current_period_end
+     FROM licenses l
+     JOIN users u ON u.id = l.user_id
+     LEFT JOIN subscriptions s ON s.user_id = l.user_id
+       AND s.status IN ('active', 'trialing')
+       AND s.current_period_end > ?
+     WHERE l.key = ?
+     ORDER BY s.current_period_end DESC LIMIT 1`,
+  )
+    .bind(Math.floor(Date.now() / 1000), key)
+    .first<{ revoked: number; email: string; status: string | null; current_period_end: number | null }>();
+
+  if (!row) return c.json({ valid: false, reason: 'not_found' }, 404);
+  if (row.revoked) return c.json({ valid: false, reason: 'revoked' }, 401);
+  if (!row.status) return c.json({ valid: false, reason: 'no_active_subscription' }, 402);
+
+  return c.json({
+    valid: true,
+    email: row.email,
+    status: row.status,
+    expires_at: row.current_period_end,
+  });
+});
 
 // ============================================================
 // POST /activate
@@ -419,6 +467,170 @@ app.post('/deactivate', async (c) => {
     .run();
 
   return c.json({ status: 'deactivated' });
+});
+
+// ============================================================
+// ADMIN ENDPOINTS
+// X-Admin-Token header tələb edir. Local admin UI bunlardan istifadə edir.
+// ============================================================
+function requireAdmin(c: any): Response | null {
+  const expected = c.env.ADMIN_TOKEN;
+  if (!expected) {
+    return c.json({ error: 'admin_not_configured' }, 503);
+  }
+  const got = c.req.header('X-Admin-Token');
+  if (!got || !timingSafeEqual(got, expected)) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+  return null;
+}
+
+// POST /admin/keys — yeni user + license + sub yarad
+// body: { email, duration_days?, plan?, note? } → { license_key, user_id, expires_at, email }
+app.post('/admin/keys', async (c) => {
+  const fail = requireAdmin(c);
+  if (fail) return fail;
+
+  type CreateBody = { email?: string; duration_days?: number; plan?: string; note?: string };
+  const body = await c.req.json<CreateBody>().catch(() => ({} as CreateBody));
+
+  const email = (body.email ?? '').trim().toLowerCase();
+  const durationDays = Math.max(1, Math.min(3650, body.duration_days ?? 365));
+  const plan = body.plan ?? 'alpha';
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return c.json({ error: 'invalid_email' }, 400);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const periodEnd = now + durationDays * 86400;
+  const userId = await ensureUser(c.env, email, undefined, now);
+  const licenseKey = generateLicenseKey();
+  const subId = 'sub_' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+  const fakePolar = 'fake_polar_' + subId.slice(4);
+
+  await c.env.DB.prepare(
+    'INSERT INTO licenses (key, user_id, created_at) VALUES (?, ?, ?)',
+  ).bind(licenseKey, userId, now).run();
+
+  await c.env.DB.prepare(
+    `INSERT INTO subscriptions
+       (id, user_id, polar_subscription_id, status, current_period_end, plan, created_at, updated_at)
+     VALUES (?, ?, ?, 'active', ?, ?, ?, ?)`,
+  ).bind(subId, userId, fakePolar, periodEnd, plan, now, now).run();
+
+  return c.json({
+    license_key: licenseKey,
+    user_id: userId,
+    email,
+    expires_at: periodEnd,
+    plan,
+  });
+});
+
+// GET /admin/keys — bütün user + key + sub join
+app.get('/admin/keys', async (c) => {
+  const fail = requireAdmin(c);
+  if (fail) return fail;
+
+  const { results } = await c.env.DB.prepare(
+    `SELECT u.email,
+            l.key            AS license_key,
+            l.revoked,
+            l.machine_fingerprint,
+            l.activated_at,
+            l.created_at     AS license_created_at,
+            s.status         AS sub_status,
+            s.current_period_end,
+            s.plan
+     FROM licenses l
+     JOIN users u ON u.id = l.user_id
+     LEFT JOIN subscriptions s ON s.user_id = l.user_id
+     ORDER BY l.created_at DESC`,
+  ).all();
+
+  const now = Math.floor(Date.now() / 1000);
+  const rows = (results as any[]).map((r) => ({
+    email: r.email,
+    license_key: r.license_key,
+    plan: r.plan,
+    revoked: !!r.revoked,
+    sub_status: r.sub_status,
+    expires_at: r.current_period_end,
+    expired: r.current_period_end ? r.current_period_end <= now : true,
+    machine_bound: !!r.machine_fingerprint,
+    machine_fingerprint: r.machine_fingerprint
+      ? String(r.machine_fingerprint).slice(0, 12) + '…'
+      : null,
+    activated_at: r.activated_at,
+    created_at: r.license_created_at,
+  }));
+
+  return c.json({ count: rows.length, keys: rows });
+});
+
+// PATCH /admin/keys/:key — body: { action: "deactivate"|"activate"|"extend"|"unbind", days? }
+app.patch('/admin/keys/:key', async (c) => {
+  const fail = requireAdmin(c);
+  if (fail) return fail;
+
+  const key = c.req.param('key');
+  type PatchBody = { action?: string; days?: number };
+  const body = await c.req.json<PatchBody>().catch(() => ({} as PatchBody));
+  const action = body.action;
+
+  const lic = await c.env.DB.prepare(
+    'SELECT user_id FROM licenses WHERE key = ?',
+  ).bind(key).first<{ user_id: string }>();
+  if (!lic) return c.json({ error: 'not_found' }, 404);
+
+  const now = Math.floor(Date.now() / 1000);
+
+  switch (action) {
+    case 'deactivate':
+      await c.env.DB.prepare('UPDATE licenses SET revoked = 1 WHERE key = ?').bind(key).run();
+      return c.json({ status: 'deactivated' });
+
+    case 'activate':
+      await c.env.DB.prepare('UPDATE licenses SET revoked = 0 WHERE key = ?').bind(key).run();
+      await c.env.DB.prepare(
+        `UPDATE subscriptions SET status = 'active', updated_at = ?
+         WHERE user_id = ? AND status = 'cancelled'`,
+      ).bind(now, lic.user_id).run();
+      return c.json({ status: 'activated' });
+
+    case 'extend': {
+      const days = Math.max(1, Math.min(3650, body.days ?? 30));
+      const result = await c.env.DB.prepare(
+        `UPDATE subscriptions
+         SET current_period_end = MAX(current_period_end, ?) + ?,
+             status = 'active',
+             updated_at = ?
+         WHERE user_id = ?`,
+      ).bind(now, days * 86400, now, lic.user_id).run();
+      return c.json({ status: 'extended', changed: result.meta.changes });
+    }
+
+    case 'unbind':
+      await c.env.DB.prepare(
+        'UPDATE licenses SET machine_fingerprint = NULL, activated_at = NULL WHERE key = ?',
+      ).bind(key).run();
+      return c.json({ status: 'unbound' });
+
+    default:
+      return c.json({ error: 'invalid_action', allowed: ['deactivate', 'activate', 'extend', 'unbind'] }, 400);
+  }
+});
+
+// DELETE /admin/keys/:key — yalnız hard cleanup; adi flow deactivate istifadə etsin
+app.delete('/admin/keys/:key', async (c) => {
+  const fail = requireAdmin(c);
+  if (fail) return fail;
+  const key = c.req.param('key');
+  const lic = await c.env.DB.prepare('SELECT user_id FROM licenses WHERE key = ?').bind(key).first<{ user_id: string }>();
+  if (!lic) return c.json({ error: 'not_found' }, 404);
+  await c.env.DB.prepare('DELETE FROM licenses WHERE key = ?').bind(key).run();
+  return c.json({ status: 'deleted' });
 });
 
 export default app;

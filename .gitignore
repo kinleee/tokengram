@@ -1,5 +1,7 @@
 # ChromaDB verilənlər bazası
 chroma_db/
+# Backup snapshots of broken/migrated DBs
+chroma_db.broken-*/
 
 # API açarları
 .env
@@ -12,6 +14,14 @@ __pycache__/
 dist/
 build/
 .eggs/
+
+# Cython build artefaktları (öz biznes modullarımız .pyd-ə kompil olunur)
+*.c
+*.pyd
+*.so
+dist_compiled/
+nuitka_build/
+nuitka_build.log
 
 # Virtual mühit
 venv/
@@ -57,3 +67,29 @@ _tmp_*.md
 
 # Claude Code lokal/şəxsi tənzimləmələr (settings.json paylaşılır)
 .claude/settings.local.json
+
+# PyPI wheel build artifacts — tokengram/ is populated by build_pypi.py
+# from compiled .pyd + hooks + messages. Only __init__.py and __main__.py
+# (the shim) are tracked.
+tokengram/*.pyd
+tokengram/*.so
+tokengram/server.py
+tokengram/hooks/*.py
+!tokengram/hooks/__init__.py
+tokengram/messages/
+
+# Cython MSVC compilation intermediates (regenerated every build)
+build_tmp/
+*.obj
+*.exp
+*.lib
+
+# .pyd backups left behind when Windows file-locking forces a rename-swap
+*.pyd.bak
+*.pyd.lockedbak
+*.pyd.lock2
+
+# VSIX builds (rebuildable via `vsce package`; release artifacts go to GitHub
+# Releases or the Marketplace, not the repo)
+vscode-extension/*.vsix
+_install_simulate/

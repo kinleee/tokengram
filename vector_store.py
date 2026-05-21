@@ -23,6 +23,19 @@ import config
 logger = logging.getLogger(__name__)
 
 
+def _canonical_path(p) -> str:
+    """Yolu kanonik formaya gətir: absolute + forward-slash.
+
+    Windows-da `c:\\x` vs `C:\\x` vs `c:/x` üçün eyni nəticə qaytarır,
+    beləliklə ChromaDB where-filter, HashStore və `get_stats` dedup düz işləyir.
+    """
+    try:
+        return Path(p).resolve(strict=False).as_posix()
+    except (OSError, ValueError):
+        # Path resolve mümkün deyilsə, ən azı slash normalize et
+        return str(p).replace("\\", "/")
+
+
 # ============================================
 # CUSTOM EMBEDDİNG FUNKSİYASI
 # ============================================
@@ -135,16 +148,16 @@ class HashStore:
     
     def get(self, file_path: str) -> Optional[str]:
         """Faylın saxlanılmış hash-ini qaytarır."""
-        return self.hashes.get(str(file_path))
-    
+        return self.hashes.get(_canonical_path(file_path))
+
     def update(self, file_path: str, file_hash: str):
         """Faylın hash-ini yenilə və diskə yaz."""
-        self.hashes[str(file_path)] = file_hash
+        self.hashes[_canonical_path(file_path)] = file_hash
         self._save()
-    
+
     def remove(self, file_path: str):
         """Faylın hash-ini sil."""
-        self.hashes.pop(str(file_path), None)
+        self.hashes.pop(_canonical_path(file_path), None)
         self._save()
     
     def clear(self):
@@ -246,6 +259,10 @@ class ChromaVectorStore:
             
             for chunk in batch:
                 try:
+                    # Defensive: chunk metadata-sındakı file_path-i normallaşdır
+                    fp = chunk.metadata.get("file_path")
+                    if fp:
+                        chunk.metadata["file_path"] = _canonical_path(fp)
                     chunk_id = chunk.unique_id
                     ids.append(chunk_id)
                     documents.append(chunk.full_content)
@@ -275,60 +292,82 @@ class ChromaVectorStore:
     
     def index_file(self, file_path: str, chunks: List[CodeChunk]) -> bool:
         """Tək bir faylı indeksləyir (incremental indexing üçün).
-        
+
         Hash yoxlaması ilə: fayl dəyişməyibsə, keçilir.
         Dəyişibsə: köhnə chunk-ları silir, yenilərini əlavə edir.
-        
+
         Args:
             file_path: Faylın yolu
             chunks: Bu fayldan yaranan chunk-lar
-            
+
         Returns:
             True — fayl indeksləndi, False — dəyişiklik yoxdur
         """
+        canonical = _canonical_path(file_path)
+
         # Hash yoxla
         new_hash = HashStore.compute_hash(file_path)
-        old_hash = self.hash_store.get(file_path)
-        
+        old_hash = self.hash_store.get(canonical)
+
         if new_hash and new_hash == old_hash:
-            logger.debug(f"⏭️  Dəyişiklik yoxdur, keçildi: {file_path}")
+            logger.debug(f"⏭️  Dəyişiklik yoxdur, keçildi: {canonical}")
             return False
-        
-        # Köhnə chunk-ları sil
+
+        # Chunk metadata-larında file_path-i kanonik formaya gətir
+        # (Windows-da casing/slash fərqi səbəbindən stale duplicate olmasın)
+        for ch in chunks:
+            ch.metadata["file_path"] = canonical
+
+        # Köhnə chunk-ları sil — həm kanonik, həm də mümkün stale variantları
         try:
-            existing = self.collection.get(
-                where={"file_path": str(file_path)}
-            )
-            if existing and existing["ids"]:
-                self.collection.delete(ids=existing["ids"])
-                logger.debug(f"🗑️  {len(existing['ids'])} köhnə chunk silindi: {file_path}")
+            stale_variants = {
+                canonical,
+                str(file_path),
+                str(Path(file_path)),
+            }
+            ids_to_delete: List[str] = []
+            for variant in stale_variants:
+                existing = self.collection.get(where={"file_path": variant})
+                if existing and existing.get("ids"):
+                    ids_to_delete.extend(existing["ids"])
+            if ids_to_delete:
+                self.collection.delete(ids=list(set(ids_to_delete)))
+                logger.debug(f"🗑️  {len(set(ids_to_delete))} köhnə chunk silindi: {canonical}")
         except Exception as e:
             logger.warning(f"Köhnə chunk-ları silmə xətası: {e}")
-        
+
         # Yeni chunk-ları əlavə et
         self.index_documents(chunks)
-        
+
         # Hash-i yenilə
         if new_hash:
-            self.hash_store.update(file_path, new_hash)
-        
-        logger.info(f"♻️  Yenidən indeksləndi: {file_path}")
+            self.hash_store.update(canonical, new_hash)
+
+        logger.info(f"♻️  Yenidən indeksləndi: {canonical}")
         return True
-    
+
     def delete_file(self, file_path: str):
         """Bir faylın bütün chunk-larını bazadan silir.
-        
+
         Args:
             file_path: Silinəcək faylın yolu
         """
+        canonical = _canonical_path(file_path)
         try:
-            existing = self.collection.get(
-                where={"file_path": str(file_path)}
-            )
-            if existing and existing["ids"]:
-                self.collection.delete(ids=existing["ids"])
-                self.hash_store.remove(file_path)
-                logger.info(f"🗑️  Silindi: {file_path} ({len(existing['ids'])} chunk)")
+            stale_variants = {
+                canonical,
+                str(file_path),
+                str(Path(file_path)),
+            }
+            ids_to_delete: List[str] = []
+            for variant in stale_variants:
+                existing = self.collection.get(where={"file_path": variant})
+                if existing and existing.get("ids"):
+                    ids_to_delete.extend(existing["ids"])
+            if ids_to_delete:
+                self.collection.delete(ids=list(set(ids_to_delete)))
+                self.hash_store.remove(canonical)
+                logger.info(f"🗑️  Silindi: {canonical} ({len(set(ids_to_delete))} chunk)")
         except Exception as e:
             logger.error(f"Fayl silmə xətası: {e}")
     

@@ -3,7 +3,9 @@
 # ============================================
 
 # Vektor Bazası
-chromadb>=0.6.0
+# Pinned: chromadb 0.6 → 1.5 binary format migration corrupted user DBs in alpha.
+# Bump deliberately, with a backup step in the upgrade path.
+chromadb==1.5.8
 
 # LLM API-lar
 anthropic>=0.42.0
@@ -32,3 +34,9 @@ tiktoken>=0.8.0
 
 # MCP server (Claude Code inteqrasiyası üçün)
 mcp>=1.0.0
+
+# License client (JWT verify, machine fingerprint, server activation)
+pyjwt[crypto]>=2.8.0
+cryptography>=41.0.0
+requests>=2.31.0
+py-machineid>=0.6.0

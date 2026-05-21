@@ -5,7 +5,7 @@ use arrow_array::types::Float32Type;
 use arrow_array::{FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 
-pub const EMBED_DIM: i32 = 384;
+pub const EMBED_DIM: i32 = 1024;
 pub const TABLE: &str = "chunks";
 
 pub fn schema() -> Arc<Schema> {

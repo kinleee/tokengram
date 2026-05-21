@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """MLA Read-enforcement state-i .mla_enforcement.flag fayl ilə dəyişir."""
+import os
 import sys
 from pathlib import Path
 
@@ -10,7 +11,8 @@ def main():
         sys.exit(1)
 
     state = sys.argv[1].lower()
-    flag = Path(__file__).resolve().parent.parent / ".mla_enforcement.flag"
+    project_root = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
+    flag = project_root / ".mla_enforcement.flag"
     flag.write_text(state, encoding="utf-8")
     print(f"MLA enforcement: {state.upper()}")
 

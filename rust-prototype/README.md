@@ -1,4 +1,16 @@
-# MLA Agent — Rust Prototype
+# Tokengram — Rust Prototype (DEFERRED)
+
+> **⚠️ Status: DONDURULMUŞDUR (2026-05-13)**
+>
+> Bu prototip launch öncəsi anti-tamper hədəfi üçün başlandı, lakin Python implementasiyası ilə feature parity üçün **40-80 saat əlavə iş** lazımdır (24 məsələ: constants drift, BM25/reranker/SmartRouter yoxluğu, session_log gap, schema migration ağrısı).
+>
+> **Cari path: Nuitka ilə Python → native binary kompilyasiyası.** Eyni anti-tamper effektini sıfır feature regression ilə verir.
+>
+> Sun-cost qorumaq və gələcəkdə (məs. müəyyən hot path-i Rust-da yenidən yazmaq) revisit etmək üçün kod silinmir. Aktiv development bu qovluqda dayandırılmışdır.
+>
+> Tarix: [söhbət konteksindən](../) — 2026-05-13.
+
+---
 
 Bu qovluq Python implementasiyasının Rust-a köçürmə prototipidir. Məqsəd: launch öncəsi kritik məntiqi opaque native binary-yə çevirmək.
 

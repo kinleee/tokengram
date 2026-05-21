@@ -50,10 +50,26 @@ EXCLUDED_DIRS = {
 EXCLUDED_FILE_PATTERNS = (
     # MLA internal state
     ".mla_pending", ".mla_session_log", ".file_hashes",
+    # Test prompt / fixture noise — keyword spam BM25-i aldadır,
+    # konseptual sorğularda real koddan üstün gəlir.
+    "TEST_PROMPT", "test_prompt",
+    "PROMPT_", "prompts.",
+    "FIXTURE_", "fixture_",
     # Package manager lock faylları
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "Cargo.lock", "go.sum", "composer.lock", "Gemfile.lock",
     "poetry.lock", "uv.lock", "bun.lockb",
+    # Secret / credential fayllar — chromadb-yə düşməməlidir.
+    # Tokengram "local · private" iddia edir, lakin chroma_db-yə əli çatan
+    # hər kəs (backup, paylaşılan disk) secret-ləri görə bilər.
+    # `name.startswith(pattern)` ilə yoxlanır.
+    ".env",                 # .env, .env.local, .env.production, ...
+    "secrets.",             # secrets.json, secrets.yaml
+    "credentials.",         # credentials.json, credentials.yaml
+    "credential.",
+    "service-account",      # service-account.json, service-account-*.json
+    "firebase-adminsdk",    # firebase-adminsdk-*.json
+    "google-services.json",
 )
 
 # Fayl adının suffix-i bunlardan biri ilə bitirsə skip — minified bundle-lar,

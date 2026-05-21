@@ -1,0 +1,17 @@
+[Unit]
+Description=Tokengram self-hosted license + admin server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/tokengram-admin
+EnvironmentFile=-/home/ubuntu/tokengram-admin/.env
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:/var/log/tokengram-admin.log
+StandardError=append:/var/log/tokengram-admin.log
+
+[Install]
+WantedBy=multi-user.target

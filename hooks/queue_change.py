@@ -21,15 +21,18 @@ Stdin-dən gələn JSON formatı:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
-# Layihə kökü = bu skriptin valideyninin valideyni
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Layihə kökü Claude Code-dan gəlir; install layout-da hook ~/.tokengram/-dədir.
+PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
 QUEUE_FILE = PROJECT_ROOT / ".mla_pending.txt"
 
-# Mərkəzi siyahılardan import — `mla_constants.py` tək mənbədir.
-sys.path.insert(0, str(PROJECT_ROOT))
+# Mərkəzi siyahılar — install layout-unda mla_constants hook-un yanındadır.
+_INSTALL_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_INSTALL_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mla_constants import (
     SUPPORTED_EXTENSIONS,
     EXCLUDED_DIRS,

@@ -1,37 +1,32 @@
 {
   "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/hooks/arch_doc.py\""
-          },
-          {
-            "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/hooks/savings_report.py\""
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "Read",
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/hooks/pre_read_check.py\""
+            "command": "\"C:\\Users\\ilkin.ha\\.tokengram\\venv\\Scripts\\python.exe\" \"C:\\Users\\ilkin.ha\\.tokengram\\hooks\\pre_read_check.py\""
           }
         ]
       }
     ],
     "PostToolUse": [
       {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\ilkin.ha\\.tokengram\\venv\\Scripts\\python.exe\" \"C:\\Users\\ilkin.ha\\.tokengram\\hooks\\queue_change.py\""
+          }
+        ]
+      },
+      {
         "matcher": "Grep",
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/hooks/post_grep_check.py\""
+            "command": "\"C:\\Users\\ilkin.ha\\.tokengram\\venv\\Scripts\\python.exe\" \"C:\\Users\\ilkin.ha\\.tokengram\\hooks\\post_grep_check.py\""
           }
         ]
       },
@@ -40,7 +35,21 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/hooks/post_bash_check.py\""
+            "command": "\"C:\\Users\\ilkin.ha\\.tokengram\\venv\\Scripts\\python.exe\" \"C:\\Users\\ilkin.ha\\.tokengram\\hooks\\post_bash_check.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\ilkin.ha\\.tokengram\\venv\\Scripts\\python.exe\" \"C:\\Users\\ilkin.ha\\.tokengram\\hooks\\savings_report.py\""
+          },
+          {
+            "type": "command",
+            "command": "\"C:\\Users\\ilkin.ha\\.tokengram\\venv\\Scripts\\python.exe\" \"C:\\Users\\ilkin.ha\\.tokengram\\hooks\\flush_queue.py\""
           }
         ]
       }

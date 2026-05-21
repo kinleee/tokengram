@@ -11,6 +11,7 @@ istifadəçiyə göstərir, sonra log-u təmizləyir.
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -23,14 +24,16 @@ if sys.platform == "win32":
     except (AttributeError, OSError):
         pass
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_INSTALL_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_INSTALL_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from i18n import tr
+from license_gate import enforcement_active
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 # Per-task savings tarixçəsi — Claude/Claude Code yenidən oxuya bilsin deyə.
 SAVINGS_HISTORY = PROJECT_ROOT / ".mla_savings_history.jsonl"
-ENFORCEMENT_FLAG = PROJECT_ROOT / ".mla_enforcement.flag"
 
 # Per-event baseline cap = realistik "chunked Read" dəyəri (~1000 sətir × 10 tok).
 # Model: MLA-sız agent adətən nəhəng faylı tam oxumur, target-li chunked Read edir.
@@ -38,14 +41,6 @@ ENFORCEMENT_FLAG = PROJECT_ROOT / ".mla_enforcement.flag"
 # search_code, grep, bash_inspect, read_block hamısı eyni cap-i istifadə edir.
 MAX_BASELINE_PER_EVENT = 10_000
 
-
-def _is_enforcement_on() -> bool:
-    if not ENFORCEMENT_FLAG.exists():
-        return False
-    try:
-        return ENFORCEMENT_FLAG.read_text(encoding="utf-8").strip().lower() == "on"
-    except OSError:
-        return False
 
 
 def main() -> int:
@@ -56,7 +51,7 @@ def main() -> int:
         pass
 
     # MLA OFF → history yazma, mövcud session_log-u sil (data yığma)
-    if not _is_enforcement_on():
+    if not enforcement_active(PROJECT_ROOT):
         try:
             SESSION_LOG.unlink(missing_ok=True)
         except OSError:
@@ -108,6 +103,15 @@ def main() -> int:
     bash_actual = 0
     warn_count = 0
     warn_baseline = 0  # informasiya üçün, baseline-a daxil olmur
+    # Yeni real-spend bucket-ləri — bar-ın "real %" hesablaması üçün
+    read_pass_count = 0
+    read_pass_tokens = 0
+    bash_output_count = 0
+    bash_output_tokens = 0
+    # Chunked Read events — həm baseline (saved), həm spent (real_spent) verir.
+    chunked_count = 0
+    chunked_baseline = 0
+    chunked_spent = 0
     # search_code baseline-ı per-event yığırıq (unique_files əvəzinə)
     # — yığım sonu hər event ayrıca cap-lanır, eyni fayl iki search-də gələrsə
     # ikinci search "free saving" sayılmır, çünki MLA-sız agent də iki dəfə oxumazdı.
@@ -138,6 +142,20 @@ def main() -> int:
             capped_a = int(raw_a * capped_b / raw_b) if raw_b > 0 else 0
             bash_baseline += capped_b
             bash_actual += capped_a
+        elif entry_type == "read_pass":
+            read_pass_count += 1
+            read_pass_tokens += int(e.get("estimated_tokens", 0))
+        elif entry_type == "bash_output":
+            bash_output_count += 1
+            bash_output_tokens += int(e.get("estimated_tokens", 0))
+        elif entry_type == "read_chunked":
+            chunked_count += 1
+            raw_b = e.get("estimated_baseline_tokens", 0)
+            raw_s = e.get("estimated_spent_tokens", 0)
+            capped_b = min(raw_b, MAX_BASELINE_PER_EVENT)
+            capped_s = int(raw_s * capped_b / raw_b) if raw_b > 0 else 0
+            chunked_baseline += capped_b
+            chunked_spent += capped_s
         else:
             search_count += 1
             # Bu event üçün TOP fayl baseline-ı götür (rank order qorunur)
@@ -155,16 +173,36 @@ def main() -> int:
     has_grep = grep_count > 0
     has_bash = bash_count > 0
     has_warn = warn_count > 0
+    has_read_pass = read_pass_count > 0
+    has_bash_output = bash_output_count > 0
+    has_chunked = chunked_count > 0
 
-    # Heç bir tipdə aktivlik yoxdursa skip et
-    if not (has_search or has_block or has_grep or has_bash or has_warn):
+    if not (has_search or has_block or has_grep or has_bash or has_warn
+            or has_read_pass or has_bash_output or has_chunked):
         SESSION_LOG.unlink(missing_ok=True)
         return 0
 
-    baseline = search_baseline + block_baseline + grep_baseline + bash_baseline
-    actual = total_actual + grep_actual + bash_actual  # blocks 0 actual
+    baseline = (
+        search_baseline + block_baseline + grep_baseline
+        + bash_baseline + chunked_baseline
+    )
+    actual = total_actual + grep_actual + bash_actual + chunked_spent  # blocks 0 actual
     saving = baseline - actual
-    pct = (saving / baseline * 100) if baseline > 0 else 0.0
+
+    # Real-spend = MLA-nın gördüyü actual + bypass/silent/warn read-lər +
+    # bash output-u (npm/vsce/ls və s. uzun stdout). bash_actual artıq
+    # actual-da-dır (bash_inspect heuristik), bash_output-u onun YERİNƏ deyil
+    # ƏLAVƏ olaraq sayırıq — çünki bash_inspect-də fayl content-i göstərmir,
+    # inspect heuristic 20% × baseline idi, real isə tam fayl ola bilərdi.
+    # Real istifadə üçün bash_output ölçülmüş dəyərdir; bash_actual müvəqqəti
+    # double-count-dur, gələcəkdə bash_inspect-i tamamilə sökmək olar.
+    untracked_spent = read_pass_tokens + bash_output_tokens
+    total_spent = actual + untracked_spent
+    # "Real %" — sessiya boyu MLA-nın diversiya etdiyi token-lərin TOTAL sessiya
+    # spend-ə (saved + actual + untracked) nisbəti. Edit-heavy refactor-da
+    # bu rəqəm 5-15% civarındadır; Q&A-da 60-80%.
+    real_total = saving + total_spent
+    pct = (saving / real_total * 100) if real_total > 0 else 0.0
 
     # Aktivlik xülasəsi (lokalizəli)
     parts = []
@@ -178,8 +216,12 @@ def main() -> int:
     if block_count:
         key = "activity_blocks_plural" if block_count > 1 else "activity_blocks"
         parts.append(tr(key, n=block_count))
+    if chunked_count:
+        parts.append(f"{chunked_count} chunked Read")
     activity = ", ".join(parts) if parts else tr("activity_none")
 
+    # `baseline` field — `actual + saved` (köhnə semantika qoruyur).
+    # `total` field — real session denominator-ı (saved + actual + untracked).
     msg = tr(
         "savings_summary",
         activity=activity,
@@ -189,7 +231,6 @@ def main() -> int:
     )
     sys.stderr.write(msg + "\n")
 
-    # Tarixçəni arşivlə — sonradan cumulative qənaət hesabatı üçün.
     try:
         record = {
             "ts": time.time(),
@@ -207,6 +248,17 @@ def main() -> int:
             "bash_actual_tokens": bash_actual,
             "read_warns": warn_count,
             "warn_baseline_tokens": warn_baseline,
+            # Yeni field-lər (savingsReader.ts bunları opsional sayır)
+            "read_passes": read_pass_count,
+            "read_pass_tokens": read_pass_tokens,
+            "bash_outputs": bash_output_count,
+            "bash_output_tokens": bash_output_tokens,
+            "read_chunked": chunked_count,
+            "chunked_baseline_tokens": chunked_baseline,
+            "chunked_spent_tokens": chunked_spent,
+            "untracked_spent_tokens": untracked_spent,
+            "total_spent_tokens": total_spent,
+            "real_total_tokens": real_total,
             "saving_tokens": saving,
             "saving_pct": round(pct, 2),
             "file_count": len(unique_files_for_count),

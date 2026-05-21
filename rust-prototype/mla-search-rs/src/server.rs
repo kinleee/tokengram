@@ -13,14 +13,18 @@ use crate::chunker;
 use crate::db;
 use crate::walker;
 
-const QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+// E5 ailəsi (multilingual-e5-large) hər iki tərəfdə prefix tələb edir:
+//  - search query → "query: ..."
+//  - indexed passage → "passage: ..."
+// Eyni prefiks olmasa retrieval keyfiyyəti ciddi düşür.
+const QUERY_PREFIX: &str = "query: ";
+const PASSAGE_PREFIX: &str = "passage: ";
 
 /// Reusable handle — embedding modeli və DB bağlantısını cache-də saxlayır.
 /// MCP server-də bir dəfə yaradılır, hər tool call üçün təkrar istifadə olunur.
 pub struct Server {
     model: Mutex<TextEmbedding>,
     db: lancedb::Connection,
-    db_path: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -49,19 +53,14 @@ impl Server {
     pub async fn new(db_path: impl Into<String>) -> Result<Self> {
         let db_path = db_path.into();
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false),
+            InitOptions::new(EmbeddingModel::MultilingualE5Large).with_show_download_progress(false),
         )
         .context("embedding model init")?;
         let db = db::open(&db_path).await?;
         Ok(Self {
             model: Mutex::new(model),
             db,
-            db_path,
         })
-    }
-
-    pub fn db_path(&self) -> &str {
-        &self.db_path
     }
 
     pub async fn index_directory(&self, root: impl AsRef<Path>, reset: bool) -> Result<IndexResult> {
@@ -95,9 +94,12 @@ impl Server {
                 .to_string_lossy()
                 .to_string();
 
-            let contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+            let contents: Vec<String> = chunks
+                .iter()
+                .map(|c| format!("{PASSAGE_PREFIX}{}", c.content))
+                .collect();
             let embeddings = {
-                let mut m = self.model.lock().await;
+                let m = self.model.lock().await;
                 m.embed(contents, None)?
             };
 
@@ -138,7 +140,7 @@ impl Server {
     pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>> {
         let prefixed = format!("{QUERY_PREFIX}{query}");
         let q_emb: Vec<f32> = {
-            let mut m = self.model.lock().await;
+            let m = self.model.lock().await;
             let mut out = m.embed(vec![prefixed], None)?;
             out.remove(0)
         };

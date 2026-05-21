@@ -1,0 +1,16 @@
+{
+  "_comment": "Cython hybrid distribution — bizim biznes modullarımız .pyd-də (compiled), third-party deps Python paketləridir. mcp_server modulu .pyd-dən import olunur, -m flag ilə run edilir.",
+  "mcpServers": {
+    "mla-agent": {
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "ANONYMIZED_TELEMETRY": "False"
+      }
+    }
+  }
+}

@@ -49,9 +49,6 @@ impl LicenseConfig {
         }
     }
 
-    pub fn is_enforced(&self) -> bool {
-        self.license_key.is_some()
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,9 +156,7 @@ fn save_cache(path: &PathBuf, cache: &CachedToken) -> Result<()> {
     Ok(())
 }
 
-pub struct LicenseGuard {
-    pub claims: Claims,
-}
+pub struct LicenseGuard;
 
 /// Lisenziya yoxlamasını başdan-sona aparır:
 /// 1. Dev mode? (no key) → None qaytar
@@ -195,8 +190,8 @@ pub async fn ensure_license(config: &LicenseConfig) -> Result<Option<LicenseGuar
         if cached.fingerprint == fingerprint
             && cached.expires_at > now + REFRESH_THRESHOLD_SECONDS
         {
-            if let Ok(claims) = verify_token(&cached.token, pubkey) {
-                return Ok(Some(LicenseGuard { claims }));
+            if verify_token(&cached.token, pubkey).is_ok() {
+                return Ok(Some(LicenseGuard));
             }
         }
     }
@@ -225,7 +220,7 @@ pub async fn ensure_license(config: &LicenseConfig) -> Result<Option<LicenseGuar
     };
     save_cache(&config.cache_path, &cached).ok();
 
-    Ok(Some(LicenseGuard { claims }))
+    Ok(Some(LicenseGuard))
 }
 
 #[cfg(test)]
@@ -248,6 +243,6 @@ mod tests {
             public_key_pem: None,
             cache_path: PathBuf::from(".test_token"),
         };
-        assert!(!config.is_enforced());
+        assert!(config.license_key.is_none());
     }
 }

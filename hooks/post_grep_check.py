@@ -7,28 +7,24 @@ Grep = "Read-ə alternativ" hesab olunur:
   actual   ≈ 15% baseline  — Grep matched lines + context (heuristik)
 """
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
-ENFORCEMENT_FLAG = PROJECT_ROOT / ".mla_enforcement.flag"
+_INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
-sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(_INSTALL_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS, estimate_tokens
+from license_gate import enforcement_active
+from project_root import find_project_root
+
+PROJECT_ROOT = find_project_root()
+SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 
 THRESHOLD_LINES = 30
 ESTIMATED_ACTUAL_RATIO = 0.15
-
-
-def _is_enforcement_on() -> bool:
-    if not ENFORCEMENT_FLAG.exists():
-        return False
-    try:
-        return ENFORCEMENT_FLAG.read_text(encoding="utf-8").strip().lower() == "on"
-    except OSError:
-        return False
 
 
 def main() -> int:
@@ -37,7 +33,7 @@ def main() -> int:
     except (json.JSONDecodeError, OSError):
         return 0
 
-    if not _is_enforcement_on():
+    if not enforcement_active(PROJECT_ROOT):
         return 0
 
     if payload.get("tool_name") != "Grep":

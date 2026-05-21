@@ -1,21 +1,23 @@
-# MLA Agent — Hybrid RAG Code Search for AI Assistants
+# Tokengram — Hybrid RAG Memory Layer for AI Assistants
 
 > Azərbaycanca versiya: [README.az.md](README.az.md)
 
 Local MCP server that lets Claude Code (and other MCP-capable AI assistants)
 search your project via hybrid RAG instead of `Read`-ing whole files.
-**Measured token savings: ~70%** on a typical Python project.
+On search/Read-heavy workflows we measure **up to ~70% fewer input tokens**;
+savings drop on edit-heavy refactors (Edit, raw `Bash` output, and
+system-prompt overhead are not routed through Tokengram).
 
 **Progressive RAM:** 93 MB (BM25-only) → 700 MB (semantic) → 900 MB (+ reranker).
 
 ## What it is
 
 When you ask Claude Code a question about your code, the assistant normally
-reads whole files into its context window — 5–10K input tokens per query. MLA
-Agent pre-vectorizes your project and returns only the **3–5 most relevant
+reads whole files into its context window — 5–10K input tokens per query. Tokengram
+pre-vectorizes your project and returns only the **3–5 most relevant
 chunks** when Claude asks. So:
 
-- ⚡ **~70% fewer input tokens** → cheaper API calls
+- ⚡ **Up to ~70% fewer input tokens on search/Read-heavy work** → cheaper API calls
 - 🔒 **Local-only** — your code never leaves the machine (local embeddings,
   local search)
 - ♻️ **Auto re-index** — saved files are picked up by the MCP server
@@ -83,7 +85,7 @@ Each project needs its own index.
 python main.py index /path/to/my-project --fresh
 ```
 
-> **Note:** `chroma_db/` currently lives inside the MLA Agent folder, so only
+> **Note:** `chroma_db/` currently lives inside the Tokengram folder, so only
 > one project can be indexed at a time. Multi-project support is on the
 > roadmap.
 
@@ -229,7 +231,7 @@ is re-indexed twice.
 ## FAQ
 
 ### Do I need an API key?
-**No.** When you use MLA via the MCP server inside Claude Code, all
+**No.** When you use Tokengram via the MCP server inside Claude Code, all
 reasoning happens in Claude. An API key is only needed for the standalone
 CLI command `python main.py ask`.
 
@@ -284,4 +286,4 @@ mla-agent/
 
 ## License
 
-Internal use, restricted distribution. Feedback: ilkin.ha@erp-intel.com
+Commercial. See [vscode-extension/LICENSE.txt](vscode-extension/LICENSE.txt). Feedback: n.ilkin.humbatov@gmail.com

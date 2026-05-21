@@ -41,6 +41,15 @@ from search_engine import HybridSearchEngine
 from document_loader import _CHUNKER_MAP, _fallback_chunk, load_directory
 from smart_router import SmartRouter, count_tokens
 
+# License gate — MLA_LICENSE_KEY varsa hər tool çağırışında JWT verify edir.
+# Dev mode (key yoxdur) → enforcement off, lokal development üçün.
+import license as _license
+
+# Conversation memory — keçmiş söhbətləri ChromaDB-də indekslədir,
+# semantic axtarış ilə geri qaytarır. Reload-da kontekst yenidən
+# yüklənməsinə alternativ.
+import conversation_indexer as _convo
+
 # Sessiya analytics — hər search_code çağırışı bura yazılır,
 # Stop hook bunu oxuyur və qənaət hesabatı göstərir.
 SESSION_LOG = Path(__file__).parent / ".mla_session_log.jsonl"
@@ -446,6 +455,23 @@ def _stop_builtin_watcher() -> None:
 
 
 # ============================================
+# LICENSE GATE
+# ============================================
+# Hər MCP tool ensure_license_cached() çağırır. Dev mode-da (key yoxdur) None
+# qaytarır, tool davam edir. Etibarlı lisenziya varsa guard qaytarır, davam edir.
+# Etibarsız token / fingerprint mismatch / network xətası → LicenseError, tool
+# istifadəçiyə anlaşılan mesaj qaytarır (MCP exception protokolunda mətn cavab).
+
+def _check_license() -> Optional[str]:
+    """Returns None əgər tool davam edə bilərsə, error mesajı əgər block olmalıdır."""
+    try:
+        _license.ensure_license_cached()
+        return None
+    except _license.LicenseError as e:
+        return f"[mla] Lisenziya xətası: {e}. Yoxla: MLA_LICENSE_KEY, MLA_LICENSE_SERVER_URL, MLA_LICENSE_PUBKEY."
+
+
+# ============================================
 # ALƏTLƏR (TOOLS)
 # ============================================
 
@@ -472,6 +498,8 @@ def search_code(
                         Maksimum sıralanma keyfiyyəti.
         file_type: Filtr: ".py", ".sol", ".sql", ".md" və ya None
     """
+    if (err := _check_license()) is not None:
+        return err
     engine = _get_engine()
 
     if mode == "fast":
@@ -559,6 +587,8 @@ def index_directory(path: str, fresh: bool = False) -> str:
         path: İndekslənəcək qovluğun mütləq yolu
         fresh: True olarsa, mövcud baza əvvəl sıfırlanır
     """
+    if (err := _check_license()) is not None:
+        return err
     directory = Path(path).resolve()
     if not directory.exists():
         return f"Xəta: Qovluq tapılmadı: {directory}"
@@ -593,6 +623,8 @@ def index_file(path: str) -> str:
     Args:
         path: Faylın mütləq yolu
     """
+    if (err := _check_license()) is not None:
+        return err
     p = Path(path)
     if not p.exists():
         return f"Xəta: Fayl tapılmadı: {p}"
@@ -632,6 +664,8 @@ def index_file(path: str) -> str:
 @mcp.tool()
 def get_stats() -> str:
     """Vektor bazası statistikasını qaytarır."""
+    if (err := _check_license()) is not None:
+        return err
     store = _get_store()
     stats = store.get_stats()
     lines = ["Baza statistikası:"]
@@ -641,12 +675,63 @@ def get_stats() -> str:
 
 
 @mcp.tool()
+def license_status() -> str:
+    """Cari lisenziya vəziyyəti — extension status bar üçün.
+
+    Heç vaxt block etmir, sadəcə vəziyyəti qaytarır. JSON format:
+        {status: "active"|"dev_mode"|"error", days_left, expires_at, ...}
+    """
+    return json.dumps(_license.license_status(), ensure_ascii=False)
+
+
+@mcp.tool()
+def search_conversation(query: str, top_k: int = 5) -> str:
+    """Keçmiş söhbətlərdə semantic axtarış — reload-dan əvvəlki qərar/kontekst tapmaq üçün.
+
+    Bu alət `~/.claude/projects/.../*.jsonl` fayllarındakı keçmiş user/assistant
+    turn-lərini indekslədir. Reload-dan sonra və ya uzun sessiyada əvvəlki
+    müzakirələri yenidən söhbət tarixçəsinə yükləmədən tapmaq olar.
+
+    İstifadə nümunələri:
+    - "Niyə Rust-dan vaz keçdik?" → o qərarın səbəbi tapılır
+    - "Polar.sh inteqrasiya planı necə idi?" → əlaqəli müzakirələr
+    - "License server URL-i hansı?" → keçmiş infrastruktur qərarları
+
+    Args:
+        query: Azərbaycan və ya İngilis dilində axtarış sualı
+        top_k: Qaytarılacaq turn sayı (default 5)
+
+    Returns:
+        JSON list: hər biri {timestamp, session_id, snippet, distance}.
+    """
+    if (err := _check_license()) is not None:
+        return err
+    results = _convo.search_conversations(query, top_k=top_k)
+    return json.dumps(results, ensure_ascii=False)
+
+
+@mcp.tool()
+def reindex_conversations() -> str:
+    """Söhbət tarixçəsini yenidən indekslə (yeni sessiyalar dahil).
+
+    Adətən search_conversation çağırışından əvvəl bir dəfə yetər;
+    yeni sessiyalar əlavə olduqda manuel çağırmaq olar.
+    """
+    if (err := _check_license()) is not None:
+        return err
+    stats = _convo.index_conversations(verbose=False)
+    return json.dumps(stats, ensure_ascii=False)
+
+
+@mcp.tool()
 def route_project(path: str) -> str:
     """Layihə ölçüsünə əsaslanan rejim tövsiyəsi.
 
     Args:
         path: Qiymətləndiriləcək qovluğun mütləq yolu
     """
+    if (err := _check_license()) is not None:
+        return err
     router = SmartRouter(path)
     return (
         f"{router.summary()}\n"
@@ -656,10 +741,100 @@ def route_project(path: str) -> str:
 
 
 # ============================================
+# CLI ONE-SHOT MODE
+# ============================================
+# VS Code extension reindex düyməsi MCP stdio-ya qoşula bilmir — buna görə
+# bu modul `--reindex <path> [--fresh]` argv ilə tək-vuruşluq da işləyə bilir.
+# Daxili index pipeline-i çağırır, server qaldırmır.
+
+def _cli_reindex(argv: list) -> int:
+    """One-shot reindex CLI. Returns process exit code."""
+    import sys as _sys
+    import logging as _logging
+    import warnings as _warnings
+    import os as _os
+
+    # UX: user-in gözləmə hissi yaranmaması üçün 3rd-party noise-u sus.
+    # httpx HEAD log-ları və huggingface_hub unauthenticated warning-i
+    # CLI rejimində user-ə heç nə öyrətmir, yalnız "donub?" sualını doğurur.
+    _os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    _os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+    _os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    for _noisy in ("httpx", "urllib3", "filelock", "sentence_transformers",
+                   "chromadb", "chromadb.telemetry"):
+        _logging.getLogger(_noisy).setLevel(_logging.WARNING)
+    # huggingface_hub uses child loggers (e.g. .utils._http) with their own
+    # level — silence the whole subtree, not just the parent.
+    for _hf in ("huggingface_hub", "huggingface_hub.utils._http",
+                "huggingface_hub.utils", "huggingface_hub.repocard",
+                "transformers", "py.warnings"):
+        _logging.getLogger(_hf).setLevel(_logging.ERROR)
+    # warnings.warn() side of the same HF message — match from start.
+    _warnings.filterwarnings("ignore", message="You are sending unauthenticated.*")
+    _warnings.filterwarnings("ignore", category=UserWarning,
+                             module="huggingface_hub.*")
+
+    if len(argv) < 1:
+        print("USAGE: --reindex <path> [--fresh]", file=_sys.stderr)
+        return 2
+    target = argv[0]
+    fresh = "--fresh" in argv[1:]
+
+    directory = Path(target).resolve()
+    if not directory.exists() or not directory.is_dir():
+        print(f"[tokengram] xəta: qovluq tapılmadı: {directory}", file=_sys.stderr)
+        return 1
+
+    print(
+        f"\n[1/3] 📁 Fayllar skan edilir: {directory}",
+        file=_sys.stderr, flush=True,
+    )
+    chunks = load_directory(str(directory))
+    if not chunks:
+        print(
+            "[tokengram] xəbərdarlıq: heç bir indeksə uyğun fayl tapılmadı",
+            file=_sys.stderr,
+        )
+        return 0
+    print(f"      ✓ {len(chunks)} chunk hazırlandı", file=_sys.stderr, flush=True)
+
+    print(
+        "\n[2/3] 🧠 Embedding modeli hazırlanır "
+        "(ilk dəfə internetdən yüklənir, ~30sn–1dq, sonrakı çağırışlar saniyələr)...",
+        file=_sys.stderr, flush=True,
+    )
+
+    with _index_lock:
+        store = _get_store()
+        if fresh:
+            store.clear_collection()
+
+        print(
+            f"\n[3/3] 🔢 {len(chunks)} chunk indekslənir...",
+            file=_sys.stderr, flush=True,
+        )
+        stats = store.index_documents(chunks)
+
+    indexed = stats.get("indexed", 0)
+    errors = stats.get("errors", 0)
+    tail = f" ({errors} xəta)" if errors else ""
+    print(
+        f"\n✓ Hazır: {indexed} chunk indekslendi{tail}",
+        file=_sys.stderr, flush=True,
+    )
+    return 0
+
+
+# ============================================
 # ƏSAS GİRİŞ
 # ============================================
 
 if __name__ == "__main__":
+    import sys as _sys
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--reindex":
+        _sys.exit(_cli_reindex(_sys.argv[2:]))
+
     logger.info("MLA Agent MCP server başladı (stdio)")
     _start_background_worker()
     _start_builtin_watcher()

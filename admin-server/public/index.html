@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tokengram — Admin</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #181a21;
+    --border: #2a2d36;
+    --text: #e4e6ea;
+    --muted: #8a8f9a;
+    --accent: #7aa2f7;
+    --ok: #9ece6a;
+    --warn: #e0af68;
+    --err: #f7768e;
+    --row-hover: #1e2129;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--text);
+    margin: 0; padding: 24px;
+  }
+  h1 { margin: 0 0 4px 0; font-size: 1.6em; }
+  .sub { color: var(--muted); margin-bottom: 24px; font-size: 0.9em; }
+  .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  .topbar .spacer { flex: 1; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 18px; margin-bottom: 20px;
+  }
+  .panel h2 { margin: 0 0 14px 0; font-size: 1.05em; font-weight: 600; }
+  form.create {
+    display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 10px; align-items: end;
+  }
+  label { display: block; font-size: 0.8em; color: var(--muted); margin-bottom: 4px; }
+  input, select {
+    background: #0d0f14; color: var(--text); border: 1px solid var(--border);
+    padding: 8px 10px; border-radius: 5px; width: 100%; font-size: 0.95em;
+  }
+  input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  button {
+    background: var(--accent); color: #0f1115; border: 0;
+    padding: 9px 16px; border-radius: 5px; font-weight: 600; cursor: pointer;
+    font-size: 0.9em;
+  }
+  button:hover { filter: brightness(1.1); }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.ghost:hover { background: var(--row-hover); }
+  button.danger { background: var(--err); color: #fff; }
+  button.warn { background: var(--warn); color: #0f1115; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
+  th { text-align: left; padding: 10px 8px; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 500; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.05em; }
+  td { padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:hover td { background: var(--row-hover); }
+  .key { font-family: ui-monospace, "Cascadia Code", monospace; font-size: 0.85em; }
+  .status-active { color: var(--ok); }
+  .status-revoked { color: var(--err); }
+  .status-expired { color: var(--warn); }
+  .status-cancelled { color: var(--muted); }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .actions button { padding: 5px 10px; font-size: 0.8em; }
+  .toast {
+    position: fixed; bottom: 24px; right: 24px;
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 12px 18px; border-radius: 6px; max-width: 400px;
+    transition: opacity 0.3s; opacity: 0;
+    z-index: 1000;
+  }
+  .toast.show { opacity: 1; }
+  .toast.ok { border-color: var(--ok); }
+  .toast.err { border-color: var(--err); }
+  .new-key {
+    background: #1d2616; border: 1px solid var(--ok); padding: 14px;
+    border-radius: 6px; margin-top: 14px; font-family: ui-monospace, monospace;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .new-key .k { color: var(--ok); flex: 1; word-break: break-all; }
+  .truncated { color: var(--muted); cursor: help; }
+  .empty { text-align: center; padding: 40px; color: var(--muted); }
+
+  /* login overlay */
+  .login-wrap {
+    position: fixed; inset: 0; background: var(--bg);
+    display: flex; align-items: center; justify-content: center; z-index: 999;
+  }
+  .login-card {
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 28px; border-radius: 10px; min-width: 340px; max-width: 380px;
+  }
+  .login-card h1 { font-size: 1.2em; margin: 0 0 18px 0; }
+  .login-card label { display: block; margin-bottom: 12px; }
+  .login-card label span { display: block; font-size: 0.8em; color: var(--muted); margin-bottom: 4px; }
+  .login-card button { width: 100%; margin-top: 6px; }
+  .login-err { color: var(--err); font-size: 0.85em; margin-top: 10px; min-height: 1em; }
+</style>
+</head>
+<body>
+
+<!-- LOGIN OVERLAY -->
+<div class="login-wrap" id="loginWrap" hidden>
+  <div class="login-card">
+    <h1>🔑 Tokengram Admin — Daxil ol</h1>
+    <form id="loginForm">
+      <label><span>Email</span><input type="email" id="loginEmail" autocomplete="username" required></label>
+      <label><span>Şifrə</span><input type="password" id="loginPass" autocomplete="current-password" required></label>
+      <button type="submit">Giriş</button>
+      <div class="login-err" id="loginErr"></div>
+    </form>
+  </div>
+</div>
+
+<!-- ADMIN -->
+<div id="adminWrap" hidden>
+  <div class="topbar">
+    <div>
+      <h1>🔑 Tokengram — License Admin</h1>
+      <div class="sub">Server: <code id="serverTag"></code> · <span id="whoami"></span></div>
+    </div>
+    <div class="spacer"></div>
+    <button class="ghost" id="logoutBtn">Çıxış</button>
+  </div>
+
+  <div class="panel">
+    <h2>Create new key</h2>
+    <form class="create" id="createForm">
+      <div>
+        <label>Email</label>
+        <input type="email" id="email" placeholder="tester@example.com" required>
+      </div>
+      <div>
+        <label>Duration (days)</label>
+        <input type="number" id="duration" value="365" min="1" max="3650">
+      </div>
+      <div>
+        <label>Plan</label>
+        <select id="plan">
+          <option value="alpha">alpha</option>
+          <option value="pro_monthly">pro_monthly</option>
+          <option value="pro_yearly">pro_yearly</option>
+          <option value="lifetime">lifetime</option>
+        </select>
+      </div>
+      <button type="submit">Generate</button>
+    </form>
+    <div id="newKey"></div>
+  </div>
+
+  <div class="panel">
+    <h2>All keys (<span id="count">…</span>)</h2>
+    <div id="tableWrap"><div class="empty">Loading…</div></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const fmtDate = (ts) => ts ? new Date(ts * 1000).toISOString().slice(0, 10) : '—';
+
+function toast(msg, kind) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show ' + (kind || 'ok');
+  setTimeout(() => { el.className = 'toast ' + (kind || 'ok'); }, 3500);
+}
+
+async function api(path, opts) {
+  opts = opts || {};
+  opts.credentials = 'same-origin';
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (res.status === 401) {
+    showLogin();
+    throw new Error('unauthorized');
+  }
+  if (!res.ok) throw new Error(data.error || data.detail || ('HTTP ' + res.status));
+  return data;
+}
+
+function statusLabel(row) {
+  if (row.revoked) return ['REVOKED', 'status-revoked'];
+  if (row.expired) return ['EXPIRED', 'status-expired'];
+  if (row.sub_status === 'cancelled') return ['CANCELLED', 'status-cancelled'];
+  if (row.sub_status === 'active' || row.sub_status === 'trialing') return ['ACTIVE', 'status-active'];
+  return [row.sub_status || 'unknown', 'status-cancelled'];
+}
+
+async function loadTable() {
+  const wrap = document.getElementById('tableWrap');
+  try {
+    const data = await api('/admin/keys');
+    document.getElementById('count').textContent = data.count;
+    if (!data.keys.length) {
+      wrap.innerHTML = '<div class="empty">No keys yet. Create one above.</div>';
+      return;
+    }
+    let html = '<table><thead><tr>'
+      + '<th>Email</th><th>Key</th><th>Plan</th><th>Status</th><th>Expires</th><th>Machine</th><th>Actions</th>'
+      + '</tr></thead><tbody>';
+    for (const r of data.keys) {
+      const [label, cls] = statusLabel(r);
+      const machine = r.machine_bound
+        ? `<span class="truncated" title="${r.machine_fingerprint || ''}">bound</span>`
+        : '<span class="truncated">—</span>';
+      const canDeactivate = !r.revoked;
+      const canActivate = r.revoked;
+      html += `<tr>
+        <td>${escapeHtml(r.email)}</td>
+        <td class="key">${r.license_key.slice(0, 16)}…<button class="ghost" style="margin-left:6px;padding:2px 8px;font-size:0.75em" onclick="copyKey('${r.license_key}')">copy</button></td>
+        <td>${escapeHtml(r.plan || '—')}</td>
+        <td class="${cls}">${label}</td>
+        <td>${fmtDate(r.expires_at)}</td>
+        <td>${machine}</td>
+        <td class="actions">
+          ${canDeactivate ? `<button class="warn" onclick="act('${r.license_key}','deactivate')">deactivate</button>` : ''}
+          ${canActivate ? `<button onclick="act('${r.license_key}','activate')">activate</button>` : ''}
+          <button class="ghost" onclick="extend('${r.license_key}')">+30d</button>
+          ${r.machine_bound ? `<button class="ghost" onclick="act('${r.license_key}','unbind')">unbind</button>` : ''}
+        </td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  } catch (e) {
+    if (e.message !== 'unauthorized') {
+      wrap.innerHTML = '<div class="empty" style="color:var(--err)">Error: ' + e.message + '</div>';
+    }
+  }
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function act(key, action) {
+  if (action === 'deactivate' && !confirm('Bu license-i deaktiv et? İstifadəçi növbəti istifadədə blok olunacaq.')) return;
+  try {
+    await api('/admin/keys/' + encodeURIComponent(key), {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    toast(action + ' OK', 'ok');
+    loadTable();
+  } catch (e) { if (e.message !== 'unauthorized') toast(e.message, 'err'); }
+}
+
+async function extend(key) {
+  const days = parseInt(prompt('Neçə gün uzatmaq?', '30'), 10);
+  if (!days || days < 1) return;
+  try {
+    await api('/admin/keys/' + encodeURIComponent(key), {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'extend', days }),
+    });
+    toast('Extended by ' + days + ' days', 'ok');
+    loadTable();
+  } catch (e) { if (e.message !== 'unauthorized') toast(e.message, 'err'); }
+}
+
+function copyKey(k) {
+  navigator.clipboard.writeText(k).then(() => toast('Copied: ' + k.slice(0, 24) + '…', 'ok'));
+}
+
+document.getElementById('createForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const email = document.getElementById('email').value.trim();
+  const duration = parseInt(document.getElementById('duration').value, 10);
+  const plan = document.getElementById('plan').value;
+  try {
+    const data = await api('/admin/keys', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, duration_days: duration, plan }),
+    });
+    const expires = fmtDate(data.expires_at);
+    const lk = data.license_key || data.key;
+    document.getElementById('newKey').innerHTML = `
+      <div class="new-key">
+        <div>
+          <div style="color:var(--muted);font-size:0.8em">Generated for <b>${escapeHtml(data.email)}</b> · valid until ${expires}</div>
+          <div class="k">${escapeHtml(lk)}</div>
+        </div>
+        <button onclick="copyKey('${lk}')">Copy</button>
+      </div>`;
+    document.getElementById('email').value = '';
+    loadTable();
+  } catch (e) { if (e.message !== 'unauthorized') toast(e.message, 'err'); }
+});
+
+// ---- login / logout ----
+function showLogin() {
+  document.getElementById('loginWrap').hidden = false;
+  document.getElementById('adminWrap').hidden = true;
+}
+function showAdmin(email) {
+  document.getElementById('loginWrap').hidden = true;
+  document.getElementById('adminWrap').hidden = false;
+  document.getElementById('whoami').textContent = email;
+  document.getElementById('serverTag').textContent = location.host;
+  loadTable();
+}
+
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPass').value;
+  const errEl = document.getElementById('loginErr');
+  errEl.textContent = '';
+  try {
+    const r = await fetch('/admin/login', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      errEl.textContent = data.error === 'invalid_credentials' ? 'Email və ya şifrə yanlışdır.' : ('Xəta: ' + (data.error || r.status));
+      return;
+    }
+    showAdmin(data.email);
+  } catch (e) {
+    errEl.textContent = 'Şəbəkə xətası: ' + e.message;
+  }
+});
+
+document.getElementById('logoutBtn').addEventListener('click', async () => {
+  await fetch('/admin/logout', { method: 'POST', credentials: 'same-origin' });
+  location.reload();
+});
+
+// initial session check
+(async () => {
+  try {
+    const r = await fetch('/admin/me', { credentials: 'same-origin' });
+    if (r.ok) {
+      const data = await r.json();
+      showAdmin(data.email);
+    } else {
+      showLogin();
+    }
+  } catch {
+    showLogin();
+  }
+})();
+
+setInterval(() => {
+  if (!document.getElementById('adminWrap').hidden) loadTable();
+}, 30000);
+</script>
+
+</body>
+</html>

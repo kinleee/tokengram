@@ -1,4 +1,4 @@
-# MLA License Server
+# Tokengram License Server
 
 Cloudflare Workers + D1 üzərində qurulmuş, Polar.sh ödənişlərini qəbul edən və JWT lisenziya token-ləri buraxan minimal license server.
 

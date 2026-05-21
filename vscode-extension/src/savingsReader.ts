@@ -18,6 +18,16 @@ interface SavingsRecord {
   bash_baseline_tokens?: number;
   bash_actual_tokens?: number;
   warn_baseline_tokens?: number;
+  // Real-spend buckets (yeni — 2026-05-15; köhnə qeydlər undefined verə bilər)
+  read_passes?: number;
+  read_pass_tokens?: number;
+  bash_outputs?: number;
+  bash_output_tokens?: number;
+  // Chunked Read (yeni — 2026-05-18): hər limit-bounded Read həm saved, həm spent verir
+  read_chunked?: number;
+  chunked_baseline_tokens?: number;
+  chunked_spent_tokens?: number;
+  untracked_spent_tokens?: number;
   saving_tokens: number;
   saving_pct: number;
   file_count: number;
@@ -49,13 +59,60 @@ export interface SavingsSummary {
   pendingActivityCount: number;   // search + grep + bash + block + warn cəm
   // Background worker queue (index re-build pending):
   indexingPending: number;        // .mla_pending.txt-də fayl sayı
+  // Health signals — bar bu state-ləri user-ə görünən etmək üçün istifadə edir:
+  historyEmpty: boolean;          // .mla_savings_history.jsonl 0 byte
+  historyMtimeAgeSec: number;     // history-nin son dəyişikliyindən keçən saniyə
+  queueStuckAgeSec: number;       // .mla_pending.processing yaşı (0 = yox)
+}
+
+// VS Code workspace bəzən Claude Code project_root-undan kiçikdir (məsələn user
+// mono-repo-nun bir subfolder-ini açır). Hooks `$CLAUDE_PROJECT_DIR` kökündə yazır.
+// Biz iki dəfə yuxarı qalxırıq:
+//   1) Data faylı (.mla_savings_history.jsonl) — ən etibarlı işarə, real qeydlər orda.
+//   2) Konfigurasiya faylı (.claude/settings.json / .mcp.json) — hooks
+//      konfiqurasiyalı olduğu kök; bar oraya yazmaq üçün hələ ən düzgün vaxtdır.
+// Yalnız `.mla_enforcement.flag` çox yerdə ola bilər, son seçim kimi istifadə edirik.
+export function findProjectRoot(startDir: string): string {
+  const exists = (dir: string, ...parts: string[]) =>
+    fs.existsSync(path.join(dir, ...parts));
+
+  // Empty history file = stale Stop-hook artifact in a subfolder. Skip it so
+  // walk-up keeps climbing to the real root (where the populated history lives).
+  const nonemptyHistory = (dir: string): boolean => {
+    const h = path.join(dir, '.mla_savings_history.jsonl');
+    try {
+      return fs.existsSync(h) && fs.statSync(h).size > 0;
+    } catch {
+      return false;
+    }
+  };
+
+  const walkUp = (predicate: (dir: string) => boolean): string | null => {
+    let dir = startDir;
+    for (let i = 0; i < 8; i++) {
+      if (predicate(dir)) return dir;
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return null;
+  };
+
+  return (
+    walkUp(nonemptyHistory) ??
+    walkUp((d) => exists(d, '.claude', 'settings.json')) ??
+    walkUp((d) => exists(d, '.mcp.json')) ??
+    walkUp((d) => exists(d, '.mla_enforcement.flag')) ??
+    startDir
+  );
 }
 
 export function findHistoryFile(): string | null {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders) return null;
   for (const folder of folders) {
-    const p = path.join(folder.uri.fsPath, '.mla_savings_history.jsonl');
+    const root = findProjectRoot(folder.uri.fsPath);
+    const p = path.join(root, '.mla_savings_history.jsonl');
     if (fs.existsSync(p)) return p;
   }
   return null;
@@ -68,6 +125,8 @@ interface SessionLogEntry {
   actual_tokens?: number;
   estimated_baseline_tokens?: number;
   estimated_actual_tokens?: number;
+  estimated_spent_tokens?: number;  // read_chunked event-ləri üçün
+  estimated_tokens?: number;  // read_pass / bash_output event-ləri üçün
 }
 
 interface PendingDelta {
@@ -76,6 +135,7 @@ interface PendingDelta {
   grepCount: number;
   bashCount: number;
   warnCount: number;
+  chunkedCount: number;
   fileCount: number;
   searchBaseline: number;
   searchActual: number;
@@ -85,6 +145,11 @@ interface PendingDelta {
   bashBaseline: number;
   bashActual: number;
   warnBaseline: number;
+  chunkedBaseline: number;
+  chunkedSpent: number;
+  // Untracked real-spend
+  readPassTokens: number;
+  bashOutputTokens: number;
 }
 
 // Per-event baseline cap = realistik chunked Read dəyəri (~1000 sətir × 10 tok).
@@ -116,6 +181,7 @@ function readSessionLog(historyPath: string): PendingDelta | null {
     grepCount: 0,
     bashCount: 0,
     warnCount: 0,
+    chunkedCount: 0,
     fileCount: 0,
     searchBaseline: 0,
     searchActual: 0,
@@ -125,6 +191,10 @@ function readSessionLog(historyPath: string): PendingDelta | null {
     bashBaseline: 0,
     bashActual: 0,
     warnBaseline: 0,
+    chunkedBaseline: 0,
+    chunkedSpent: 0,
+    readPassTokens: 0,
+    bashOutputTokens: 0,
   };
   let hasAny = false;
   for (const line of data.split('\n')) {
@@ -160,6 +230,18 @@ function readSessionLog(historyPath: string): PendingDelta | null {
       );
       d.bashBaseline += cb;
       d.bashActual += ca;
+    } else if (t === 'read_pass') {
+      d.readPassTokens += e.estimated_tokens ?? 0;
+    } else if (t === 'bash_output') {
+      d.bashOutputTokens += e.estimated_tokens ?? 0;
+    } else if (t === 'read_chunked') {
+      d.chunkedCount += 1;
+      const [cb, cs] = capProportional(
+        e.estimated_baseline_tokens ?? 0,
+        e.estimated_spent_tokens ?? 0,
+      );
+      d.chunkedBaseline += cb;
+      d.chunkedSpent += cs;
     } else {
       d.searchCount += 1;
       d.searchActual += e.actual_tokens ?? 0;
@@ -179,17 +261,57 @@ function readSessionLog(historyPath: string): PendingDelta | null {
   return d;
 }
 
-function readIndexingPending(historyPath: string): number {
-  // Background worker drain etməyən fayllar — re-embed gözləyirlər.
-  const pendingPath = path.join(
-    path.dirname(historyPath),
-    '.mla_pending.txt',
-  );
+function countQueueLines(filePath: string): number {
   try {
-    const data = fs.readFileSync(pendingPath, 'utf-8');
+    const data = fs.readFileSync(filePath, 'utf-8');
     return data.split('\n').filter((l) => l.trim()).length;
   } catch {
     return 0;
+  }
+}
+
+function readIndexingPending(historyPath: string): number {
+  // Background worker drain etməyən fayllar — re-embed gözləyirlər.
+  // Həm .pending.txt (növbədə), həm də .processing (drain mid-flight) sayılır
+  // ki worker stuck olduqda da real "ilişib qalan" sayı düzgün görünsün.
+  const dir = path.dirname(historyPath);
+  return (
+    countQueueLines(path.join(dir, '.mla_pending.txt')) +
+    countQueueLines(path.join(dir, '.mla_pending.processing'))
+  );
+}
+
+// `.mla_pending.processing` mövcud və **boş deyilsə**, MCP background worker
+// queue-nu drain edir. Worker crash etsə, fayl qalır — yaşı 30 dəq+ olarsa
+// stuck. Boş `.processing` (orphan marker) stuck sayılmır — drainer üçün
+// sonrakı dövrdə avtomatik təmizlənən artıqdır.
+function readQueueStuckAge(historyPath: string): number {
+  const processingPath = path.join(
+    path.dirname(historyPath),
+    '.mla_pending.processing',
+  );
+  try {
+    const st = fs.statSync(processingPath);
+    if (st.size === 0) return 0;
+    if (countQueueLines(processingPath) === 0) return 0;
+    return Math.max(0, Math.floor((Date.now() - st.mtimeMs) / 1000));
+  } catch {
+    return 0;
+  }
+}
+
+function readHistoryStats(historyPath: string): {
+  empty: boolean;
+  mtimeAgeSec: number;
+} {
+  try {
+    const st = fs.statSync(historyPath);
+    return {
+      empty: st.size === 0,
+      mtimeAgeSec: Math.max(0, Math.floor((Date.now() - st.mtimeMs) / 1000)),
+    };
+  } catch {
+    return { empty: true, mtimeAgeSec: Number.MAX_SAFE_INTEGER };
   }
 }
 
@@ -212,6 +334,8 @@ export function readSavings(historyPath: string): SavingsSummary | null {
   }
   const pending = readSessionLog(historyPath);
   const indexingPending = readIndexingPending(historyPath);
+  const queueStuckAgeSec = readQueueStuckAge(historyPath);
+  const historyStats = readHistoryStats(historyPath);
   // Boş state-də də summary qaytar — bar "0.0k · 0%" göstərsin,
   // "başlayır..." state-i user-ə sonsuz yüklənmə kimi görünür.
 
@@ -220,7 +344,16 @@ export function readSavings(historyPath: string): SavingsSummary | null {
   const actualR = recent.reduce((s, r) => s + r.actual_tokens, 0);
   const baseR = recent.reduce((s, r) => s + r.baseline_tokens, 0);
   const savedR = baseR - actualR;
-  const pctR = baseR > 0 ? (savedR / baseR) * 100 : 0;
+  // Yeni real-spend bucket-ləri history-dən topla. Köhnə record-larda
+  // (yeni hook-lardan əvvəl) bunlar undefined-dir, default 0.
+  const readPassTokens24h = recent.reduce(
+    (s, r) => s + (r.read_pass_tokens ?? 0),
+    0,
+  );
+  const bashOutputTokens24h = recent.reduce(
+    (s, r) => s + (r.bash_output_tokens ?? 0),
+    0,
+  );
 
   const totalSearches = records.reduce((s, r) => s + r.searches, 0);
   const totalBlocks = records.reduce((s, r) => s + (r.blocks ?? 0), 0);
@@ -284,6 +417,7 @@ export function readSavings(historyPath: string): SavingsSummary | null {
     grepCount: 0,
     bashCount: 0,
     warnCount: 0,
+    chunkedCount: 0,
     fileCount: 0,
     searchBaseline: 0,
     searchActual: 0,
@@ -293,23 +427,55 @@ export function readSavings(historyPath: string): SavingsSummary | null {
     bashBaseline: 0,
     bashActual: 0,
     warnBaseline: 0,
+    chunkedBaseline: 0,
+    chunkedSpent: 0,
+    readPassTokens: 0,
+    bashOutputTokens: 0,
   };
   const pendingSavedBlocks = p.blockBaseline;
   const pendingSavedGreps = Math.max(0, p.grepBaseline - p.grepActual);
   const pendingSavedBash = Math.max(0, p.bashBaseline - p.bashActual);
   const pendingSavedSearch = Math.max(0, p.searchBaseline - p.searchActual);
+  const pendingSavedChunked = Math.max(0, p.chunkedBaseline - p.chunkedSpent);
   const pendingSaved =
     pendingSavedBlocks +
     pendingSavedGreps +
     pendingSavedBash +
-    pendingSavedSearch;
+    pendingSavedSearch +
+    pendingSavedChunked;
   const pendingBaseline =
-    p.blockBaseline + p.grepBaseline + p.bashBaseline + p.searchBaseline;
+    p.blockBaseline + p.grepBaseline + p.bashBaseline + p.searchBaseline +
+    p.chunkedBaseline;
   const pendingTask = pending ? 1 : 0;
 
   const savedTokens24h = savedR + pendingSaved;
   const baseline24h = baseR + pendingBaseline;
-  const savedPct24h = baseline24h > 0 ? (savedTokens24h / baseline24h) * 100 : 0;
+  // Real session pct — saved / (saved + bütün real spend). Köhnə düstur
+  // saved / baseline idi, amma baseline yalnız MLA-nın gördüyü ops üçündü.
+  // İndi Edit-heavy / Bash-heavy refactor-da bypass və bash_output sayılır,
+  // % rəqəmi real session reduction-u göstərir.
+  const realSpent24h =
+    actualR +
+    readPassTokens24h +
+    bashOutputTokens24h +
+    p.searchActual +
+    p.grepActual +
+    p.bashActual +
+    p.chunkedSpent +
+    p.readPassTokens +
+    p.bashOutputTokens;
+  const realTotal24h = savedTokens24h + realSpent24h;
+  // Low-sample guard: just after VS Code reload only "saved" events have
+  // been recorded yet (chunked-Read / Edit / Bash actuals haven't fired),
+  // so the naive ratio reads 100% even when no real work has happened.
+  // Sentinel -1 signals "not enough data" — the status bar renders "—".
+  const LOW_SAMPLE_THRESHOLD = 200;
+  const savedPct24h =
+    realSpent24h < LOW_SAMPLE_THRESHOLD
+      ? -1
+      : realTotal24h > 0
+        ? (savedTokens24h / realTotal24h) * 100
+        : 0;
 
   return {
     totalTasks: records.length + pendingTask,
@@ -335,5 +501,8 @@ export function readSavings(historyPath: string): SavingsSummary | null {
     pendingActivityCount:
       p.searchCount + p.blockCount + p.grepCount + p.bashCount + p.warnCount,
     indexingPending,
+    historyEmpty: historyStats.empty,
+    historyMtimeAgeSec: historyStats.mtimeAgeSec,
+    queueStuckAgeSec,
   };
 }

@@ -4,11 +4,15 @@
 Extension `.mla_savings_history.jsonl` faylını FileSystemWatcher ilə izləyir.
 Bu skript mtime-ı yeniləyir, ekstension dərhal refresh çağırır.
 """
+import os
 from pathlib import Path
 
 
 def main():
-    history = Path(__file__).resolve().parent.parent / ".mla_savings_history.jsonl"
+    project_root = Path(
+        os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    ).resolve()
+    history = project_root / ".mla_savings_history.jsonl"
     history.touch(exist_ok=True)
     print("Status bar refresh triggered")
 

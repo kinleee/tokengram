@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tokengram"
+version = "0.1.8"
+description = "Token-saving memory layer for AI coding assistants — local hybrid RAG (BM25 + semantic + reranker) over your project, exposed via MCP."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "LicenseRef-Proprietary-Tokengram"
+license-files = ["LICENSE.txt"]
+authors = [{ name = "Ilkin Humbatov", email = "n.ilkin.humbatov@gmail.com" }]
+keywords = ["claude", "mcp", "rag", "ai", "code-search", "embeddings"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    # Pinned to ==1.5.8: chromadb 0.6 → 1.5 binary-format migration corrupted user DBs in alpha.
+    # Any bump must ship with a backup/migration step.
+    "chromadb==1.5.8",
+    "anthropic>=0.42.0",
+    "openai>=1.60.0",
+    "sentence-transformers>=3.3.0",
+    "einops>=0.8.0",
+    "langchain-text-splitters>=0.3.0",
+    "rank-bm25>=0.2.2",
+    "watchdog>=6.0.0",
+    "python-dotenv>=1.0.0",
+    "tiktoken>=0.8.0",
+    "mcp>=1.0.0",
+    "pyjwt[crypto]>=2.8.0",
+    "cryptography>=41.0.0",
+    "requests>=2.31.0",
+    "py-machineid>=0.6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/kinleee"
+
+[project.scripts]
+tokengram = "tokengram.__main__:main"
+
+[tool.setuptools]
+packages = ["tokengram", "tokengram.hooks"]
+
+[tool.setuptools.package-data]
+tokengram = ["*.pyd", "*.so", "messages/*.json", "py.typed"]

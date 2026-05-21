@@ -6,30 +6,33 @@
 
 ## 1. Ad qərarı
 
-### Mövcud: "MLA Agent"
+### Yekun ad: **Tokengram** *(2026-05-15-də təsdiqləndi)*
+
+"Tokengram" neyroelmində **beyində fiziki yaddaş izi** mənasını verir — söhbətlərin və kod kontekstinin yaddaş izini saxlayan bu məhsulun hərfi tərifidir.
 
 **Pluslar:**
-- Layihə adı kimi qurulub
-- "Memory Layer Agent" və ya "Mid-Layer Agent" — abbreviation çevikdir
-- USPTO/GitHub/marketplace-də unikallıq yoxlanılmalıdır (Phase 1)
+- Tək sözlü, dilə yatımlı, ingilis+Azərbaycan dilində eyni oxunur
+- Tech-leaning developer auditoriyasına uyğun (neyroelm + AI kəsişməsi)
+- Marketplace + GitHub-da rəqabətsizdir (yoxlanılmalıdır — Phase 1)
+- Akronim deyil — özlüyündə brand, "what does X mean?" sualını izah etmək asandır
+- SEO baxımından "tokengram code memory" terminləri rəqabətsiz
 
-**Minuslar:**
-- "MLA" tanınan bir şey deyil (Modern Language Association akronimı var, amma sahə tam fərqlidir)
-- Marketing-də "what does MLA mean?" sualına cavab vermək lazım gələcək
-- "Agent" sözü 2026-da çox işlədilən "AI agent" kontekstinə qarışır
+**Minuslar / risklər:**
+- Scientology-də istifadə olunan termin var, amma developer market-də qarışmaz
+- USPTO-da yoxlamaq lazımdır (Phase 1)
 
-### Alternativlər (əgər ad dəyişəcəksə)
+**Tarixçə:** Köhnə adı "MLA Agent" idi ("Memory Layer Agent" / "Mid-Layer Agent" çevik akronimi). 2026-05-15-də brand-vibe + telləfüz + SEO baxımından Tokengram-a keçildi. Köhnə texniki ID-lər (env: `MLA_LICENSE_*`, command: `mla.menu`, MCP: `mla-agent`, fayllar: `.mla_arch.md`, `.mla_savings_history.jsonl`) ayrı miqrasiya işidir — instaledilmiş istifadəçilərin config-i sınmasın deyə hələlik saxlanılır.
 
-| Ad | Üstünlük | Risk |
-|---|---|---|
-| **CodeMLA** | "Code" prefiks aydındır | Marketplace-də konflikt yoxla |
-| **ContextSaver** | Funksiyanı birbaşa təsvir edir | Generic |
-| **SmartContext** | Asand axtarılır | Generic, çox ümumi |
-| **MemoryLayer** | "Memory" + "Layer" söhbətə uyğundur | Uzun |
-| **ChunkPilot** | Yumoristik, yadda qalan | "Pilot" Anthropic-ə yaxın? |
-| **TokenSaver** | Aydın dəyər təklifi | Anthropic gəlirinə dəlalət edir |
+### Bir də nəzərdən keçirilmiş alternativlər
 
-**Tövsiyə:** Hələlik **MLA Agent** qalsın — layihə kodunda hər yerdə bu addır, dəyişiklik effort/risk gətirir. Yalnız Phase 1 trademark axtarışı konflikt tapsa, alternativlərə qayıt.
+| Ad | Niyə seçilmədi |
+|---|---|
+| **Mneme** | Yunan ilahəsi adı; gözəl, amma telləfüz tutorial-ı lazım idi |
+| **Ember** | Ember.js framework-u ilə qarışıq |
+| **Crux** | Çox qısa, məna birbaşa deyildi |
+| **Codex** | OpenAI Codex model adı ilə konflikt |
+| **Recall** | Microsoft Recall (Windows 11 feature) ilə birbaşa konflikt |
+| **Atlas** | Çox işlədilmiş ad, fərqlənmək çətindir |
 
 ### İcazə verilmir (Anthropic ilə qarışan adlar)
 

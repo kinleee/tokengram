@@ -1,15 +1,43 @@
 {
-  "name": "mla-agent",
-  "displayName": "MLA Agent",
-  "description": "Token-saving RAG code search for AI coding assistants",
-  "version": "0.1.0",
-  "publisher": "erp-intel",
+  "name": "tokengram",
+  "displayName": "Tokengram",
+  "description": "Token-saving memory layer for Claude Code — hybrid RAG search over your project (local; up to 70% on search/Read-heavy tasks, less on edit-heavy refactors).",
+  "version": "0.1.23",
+  "publisher": "tokengram",
+  "license": "SEE LICENSE IN LICENSE.txt",
+  "icon": "icon.png",
+  "homepage": "https://github.com/kinleee",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kinleee/tokengram.git"
+  },
+  "bugs": {
+    "email": "n.ilkin.humbatov@gmail.com"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
+    "Machine Learning",
+    "Programming Languages",
     "Other"
   ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "rag",
+    "ai",
+    "memory",
+    "token-savings",
+    "code-search",
+    "embeddings",
+    "anthropic"
+  ],
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
+  },
   "main": "./dist/extension.js",
   "activationEvents": [
     "onStartupFinished"
@@ -17,21 +45,55 @@
   "contributes": {
     "commands": [
       {
-        "command": "mla.menu",
-        "title": "MLA: Open menu",
-        "category": "MLA Agent"
+        "command": "tokengram.menu",
+        "title": "Tokengram: Open menu",
+        "category": "Tokengram"
+      },
+      {
+        "command": "tokengram.setup",
+        "title": "Tokengram: Run setup wizard",
+        "category": "Tokengram"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Tokengram",
+      "properties": {
+        "tokengram.autoInstallHooks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically write .claude/settings.json on workspace open without prompting."
+        },
+        "tokengram.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Override Python interpreter (leave empty to auto-detect)."
+        },
+        "tokengram.licenseServerUrl": {
+          "type": "string",
+          "default": "http://54.163.13.24:3000",
+          "description": "License-server endpoint."
+        },
+        "tokengram.devRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Tokengram source tree (folder containing main.py). Used by the Re-index button until a production CLI ships in the wheel."
+        }
+      }
+    }
   },
   "scripts": {
-    "vscode:prepublish": "npm run build",
+    "vscode:prepublish": "npm run build:prod",
     "build": "node esbuild.config.js",
+    "build:prod": "node esbuild.config.js --prod",
     "watch": "node esbuild.config.js --watch",
-    "compile-check": "tsc --noEmit"
+    "compile-check": "tsc --noEmit",
+    "package": "vsce package",
+    "publish": "vsce publish"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.20.0",
     "typescript": "^5.3.0"
   }

@@ -1,5 +1,5 @@
 {
-  "read_block": "MLA enforcement: '{name}' {lines} sətir, indeksləməyə uyğundur.\n   Əvvəl: mcp__mla-agent__search_code mode=fast query=\"...\"\n   Boş cavab gəlirsə: /MlaReindex (yeni extension chroma_db-də olmaya bilər).\n   Bypass: /MlaOff (sonra /MlaOn ilə geri qaytar).",
+  "read_block": "Tokengram enforcement: '{name}' {lines} sətir, indeksləməyə uyğundur.\n   Əvvəl: mcp__mla-agent__search_code mode=fast query=\"...\"\n   Boş cavab gəlirsə: /MlaReindex (yeni extension chroma_db-də olmaya bilər).\n   Bypass: /MlaOff (sonra /MlaOn ilə geri qaytar).",
   "read_warn": "TIP: '{name}' {lines} sətir oxunur. search_code mode=fast adətən eyni cavabı 200-500 token ilə verir, Read-də isə ~{est_tokens} token gedir. (Block deyil, məsləhət.)",
 
   "savings_summary": "[mla-agent] Bu task: {activity}, {actual:,} tok istifadə (baseline: {baseline:,} tok) → {pct:.1f}% qənaət",
@@ -12,7 +12,7 @@
   "activity_none": "0 hadisə",
 
   "arch_missing": "Arch doc hələ yaradılmayıb. Bir-iki search_code çağırışından sonra Stop hook bu faylı doldurar.",
-  "arch_title": "MLA Auto-Generated Architecture",
+  "arch_title": "Tokengram Auto-Generated Architecture",
   "arch_meta_last_updated": "Son yenilənmə",
   "arch_meta_files": "Tapılmış fayllar",
   "arch_meta_total_searches": "Cəmi `search_code` çağırışı",

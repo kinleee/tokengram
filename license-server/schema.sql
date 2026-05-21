@@ -1,4 +1,4 @@
--- MLA License Server — D1 sxema
+-- Tokengram License Server — D1 sxema
 -- wrangler d1 execute mla-licenses --file=schema.sql
 
 CREATE TABLE IF NOT EXISTS users (

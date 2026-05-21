@@ -5,6 +5,7 @@
 State `.mla_arch_state.json`-da saxlanır, hər run-da render olunur.
 """
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -17,25 +18,18 @@ if sys.platform == "win32":
     except (AttributeError, OSError):
         pass
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_INSTALL_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_INSTALL_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from i18n import tr
+from license_gate import enforcement_active
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 ARCH_STATE = PROJECT_ROOT / ".mla_arch_state.json"
 ARCH_DOC = PROJECT_ROOT / ".mla_arch.md"
-ENFORCEMENT_FLAG = PROJECT_ROOT / ".mla_enforcement.flag"
 
 MAX_RECENT_SEARCHES = 20
-
-
-def _is_enforcement_on() -> bool:
-    if not ENFORCEMENT_FLAG.exists():
-        return False
-    try:
-        return ENFORCEMENT_FLAG.read_text(encoding="utf-8").strip().lower() == "on"
-    except OSError:
-        return False
 
 
 def _normalize_path(raw: str) -> str:
@@ -132,7 +126,7 @@ def main() -> int:
         pass
 
     # MLA OFF → arch doc-u yeniləmə, heç nə etmə
-    if not _is_enforcement_on():
+    if not enforcement_active(PROJECT_ROOT):
         return 0
 
     if not SESSION_LOG.exists():

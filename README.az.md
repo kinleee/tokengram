@@ -1,14 +1,16 @@
-# MLA Agent — Hybrid RAG Kod Axtarış Sistemi
+# Tokengram — Hybrid RAG Yaddaş Qatı
 
 Claude Code üçün lokal kod axtarış MCP server-i.
-**Token qənaəti:** Real ölçülmüş **~70%** (orta Python layihəsində).
+**Token qənaəti:** Axtarış/Read-heavy iş axınlarında **~70%-ə qədər** input
+token azalır; Edit-heavy refactor-larda qənaət daha azdır (Edit, xam `Bash`
+output, sistem-prompt overhead Tokengram-dan keçmir).
 **Progressive RAM:** 93 MB (BM25-only) → 700 MB (semantic) → 900 MB (+ reranker).
 
 ## Nədir bu?
 
-İş yoldaşına Claude Code-da kod haqqında sual verəndə Claude faylları `Read` ilə tam oxuyur — hər sorğuda 5-10K input token gedir. MLA Agent layihəni əvvəlcədən vektorlaşdırır və Claude soruşduqda yalnız **uyğun ~3-5 chunk** qaytarır. Yəni:
+İş yoldaşına Claude Code-da kod haqqında sual verəndə Claude faylları `Read` ilə tam oxuyur — hər sorğuda 5-10K input token gedir. Tokengram layihəni əvvəlcədən vektorlaşdırır və Claude soruşduqda yalnız **uyğun ~3-5 chunk** qaytarır. Yəni:
 
-- ⚡ **70% daha az input token** → daha ucuz API çağırışları
+- ⚡ **Axtarış-heavy işlərdə 70%-ə qədər az input token** → daha ucuz API çağırışları
 - 🔒 **Lokal-only** — kodun heç bir yerə getmir (lokal embedding + lokal axtarış)
 - ♻️ **Avtomatik re-index** — sən fayl save edəndə MCP avtomatik yeniləyir
 - 🎯 **Hybrid search** — semantic (meaning) + BM25 (keyword) + cross-encoder reranker
@@ -71,7 +73,7 @@ Hər layihə üçün ayrı indeksləmə lazımdır.
 python main.py index /path/to/my-project --fresh
 ```
 
-> **Diqqət:** Hal-hazırda `chroma_db/` MLA Agent qovluğunda saxlanılır. Yəni eyni anda yalnız bir layihə indekslənmiş ola bilər. Multi-project dəstəyi gələn versiyadadır.
+> **Diqqət:** Hal-hazırda `chroma_db/` Tokengram qovluğunda saxlanılır. Yəni eyni anda yalnız bir layihə indekslənmiş ola bilər. Multi-project dəstəyi gələn versiyadadır.
 
 ---
 
@@ -185,4 +187,4 @@ mla-agent/
 
 ## Lisenziya
 
-Daxili istifadə üçün, məhdud paylaşma. Feedback üçün: ilkin.ha@erp-intel.com
+Kommersiya. Bax: [vscode-extension/LICENSE.txt](vscode-extension/LICENSE.txt). Feedback: n.ilkin.humbatov@gmail.com

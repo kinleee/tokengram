@@ -1,0 +1,18 @@
+{
+  "name": "tokengram-admin-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tokengram license + admin server (self-hosted, replaces Cloudflare Worker)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "migrate": "node migrate.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.0",
+    "express-session": "^1.18.0",
+    "jose": "^5.9.0"
+  }
+}

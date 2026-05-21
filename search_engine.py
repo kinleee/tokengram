@@ -106,7 +106,16 @@ class Reranker:
             logger.error(f"❌ Reranker yüklənə bilmədi: {e}")
     
     def rerank(self, query, candidates, top_k=None):
-        """Namizədləri yenidən sıralayır. Returns (results, confidence)."""
+        """Namizədləri yenidən sıralayır. Returns (results, confidence).
+
+        Cross-encoder raw logit-lər qaytarır (təxminən -10..+10). Bu, mənfi
+        ədədlər göstərib istifadəçini qarışdırırdı. Sigmoid ilə [0,1]-ə
+        çeviririk və sonrakı threshold müqayisəsini bu məkana keçiririk —
+        həm `LOW_CONFIDENCE` etiketi məntiqli olur, həm də skor müsbət
+        və oxunaqlı qalır.
+        """
+        import math
+
         top_k = top_k or config.TOP_K_RESULTS
         if not candidates:
             return [], "NO_RESULTS"
@@ -115,12 +124,17 @@ class Reranker:
             return candidates[:top_k], "NO_RERANKER"
         try:
             pairs = [[query, c.content] for c in candidates]
-            scores = self.model.predict(pairs)
-            for candidate, score in zip(candidates, scores):
-                candidate.score = float(score)
+            raw_scores = self.model.predict(pairs)
+            for candidate, raw in zip(candidates, raw_scores):
+                # Sigmoid: -inf -> 0, 0 -> 0.5, +inf -> 1
+                candidate.score = 1.0 / (1.0 + math.exp(-float(raw)))
             ranked = sorted(candidates, key=lambda x: x.score, reverse=True)
-            best_score = ranked[0].score if ranked else 0
-            confidence = "LOW_CONFIDENCE" if best_score < config.CONFIDENCE_THRESHOLD else "HIGH_CONFIDENCE"
+            best_score = ranked[0].score if ranked else 0.0
+            confidence = (
+                "LOW_CONFIDENCE"
+                if best_score < config.CONFIDENCE_THRESHOLD
+                else "HIGH_CONFIDENCE"
+            )
             for i, result in enumerate(ranked[:top_k]):
                 result.rank = i + 1
             return ranked[:top_k], confidence
