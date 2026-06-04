@@ -83,11 +83,12 @@ Açar `%USERPROFILE%\.mla\license_key.txt` faylına yazılır.
 İlk activation üçün license server URL və public key lazımdır. İndilik bunları manual qoş:
 
 ```powershell
-# License server URL
-echo "https://license.mla-agent.workers.dev" > $env:USERPROFILE\.mla\server_url.txt
+# QEYD: artıq installer bunları avtomatik edir — əl ilə lazım deyil.
+# Köhnə workers.dev RETIRED; canlı server: https://tokengram.click
+echo "https://tokengram.click" > $env:USERPROFILE\.tokengram\server_url.txt
 
-# Public key (sənə təqdim ediləcək PEM fayl)
-Copy-Item mla_pubkey.pem $env:USERPROFILE\.mla\pubkey.pem
+# Public key — açar saxlananda extension /pubkey-dən avtomatik endirir.
+# Manual lazım olsa: Invoke-WebRequest https://tokengram.click/pubkey -OutFile $env:USERPROFILE\.tokengram\pubkey.pem
 ```
 
 ### 7. Claude Code-u yenidən başlat

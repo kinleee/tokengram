@@ -1,0 +1,14 @@
+# Tokengram license server — TLS termination on :443, proxied to the app on :3000.
+# Caddy auto-provisions (and renews) a Let's Encrypt cert for the domain.
+#
+# Prereqs (one-time, done in your accounts — see README.md):
+#   1. DNS A record:  tokengram.click  ->  54.163.13.24   (remove Namecheap parking)
+#   2. EC2 security group inbound: TCP 80 AND TCP 443 open to 0.0.0.0/0
+#      (80 is required for the ACME HTTP-01 cert challenge)
+#
+# Deploy:  sudo bash setup-caddy.sh        (installs Caddy + writes this file + starts it)
+
+tokengram.click {
+	encode gzip
+	reverse_proxy localhost:3000
+}

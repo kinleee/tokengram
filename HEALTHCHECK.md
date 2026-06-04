@@ -85,8 +85,8 @@
 |---|---------|------|--------|
 | G1 | `hooks/license_gate.py` mövcuddur və enforcement_active() istifadə olunur | grep | – |
 | G2 | Açar yoxdursa hooks silent allow (no traceback) | `python hooks/pre_read_check.py` boş key ilə | – |
-| G3 | License server URL aktiv: `https://mla-license-server-production.n-ilkin-humbatov.workers.dev` | curl /health | – |
-| G4 | Cloudflare D1 schema mövcuddur (license-server/schema.sql) | – | – |
+| G3 | License server URL aktiv: `https://tokengram.click` (Caddy→EC2:3000; köhnə workers.dev RETIRED) | `curl https://tokengram.click/pubkey` | – |
+| G4 | License DB mövcuddur (EC2 `admin-server`, better-sqlite3: `data/tokengram.db`) | – | – |
 | G5 | Açar formatı: `tk_` prefiksli (memory: engram_rename Tier 3 — hələ MLA prefiksi qala bilər) | – | – |
 | G6 | Toggle MLA "ON" yalnız valid key varsa qoşula bilir | Memory: `feedback_license_gates_on` | – |
 

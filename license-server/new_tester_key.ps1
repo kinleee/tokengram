@@ -1,10 +1,15 @@
-# MLA Agent — yeni alpha tester üçün license key yaradır.
+# Tokengram — yeni tester ucun license key yaradir (CANLI server: tokengram.click).
 #
-# İstifadə:
+# Istifade:
 #   .\new_tester_key.ps1 -Email "tester@example.com"
 #   .\new_tester_key.ps1 -Email "x@y.com" -DurationDays 90 -Note "Acme Inc dev"
 #
-# Bu skript license-server/ qovluğundan icra edilməlidir.
+# Admin giris: -AdminEmail/-AdminPassword param, ve ya env
+# TOKENGRAM_ADMIN_EMAIL / TOKENGRAM_ADMIN_PASSWORD, yoxsa sorusulacaq.
+#
+# QEYD: acarlar CANLI serverin DB-sinde yaradilir (https://tokengram.click ->
+# admin-server, better-sqlite3). Kohne `wrangler d1` / Cloudflare-worker yolu
+# ARTIQ ISLEMIR — o DB-ni production oxumur, orada yaradilan acar validate olmur.
 
 [CmdletBinding()]
 param(
@@ -12,94 +17,86 @@ param(
     [string]$Email,
 
     [string]$Plan = "alpha",
-
     [int]$DurationDays = 365,
+    [string]$Note = "",
 
-    [string]$Note = ""
+    [string]$Server = "https://tokengram.click",
+    [string]$AdminEmail = $env:TOKENGRAM_ADMIN_EMAIL,
+    [string]$AdminPassword = $env:TOKENGRAM_ADMIN_PASSWORD
 )
 
 $ErrorActionPreference = "Stop"
-
-# Skript-i hardan cagirilmasindan asili olmayaraq license-server/ qovlugunda isle
-# (wrangler.toml burdadir, lokal node_modules/wrangler v3 Node 20-de isleyir;
-# kenar qovluqdan npx avtomatik v4-u fetch edir, Node 22 isteyir)
-Set-Location $PSScriptRoot
 
 if ($Email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
     Write-Host "ERROR: '$Email' duzgun email formatinda deyil." -ForegroundColor Red
     exit 1
 }
 
-function New-Id($prefix) {
-    return "$prefix$([guid]::NewGuid().ToString('N').Substring(0, 16))"
+$Server = $Server.TrimEnd('/')
+if (-not $AdminEmail)    { $AdminEmail = Read-Host "Admin email" }
+if (-not $AdminPassword) {
+    $sec = Read-Host "Admin password" -AsSecureString
+    $AdminPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
 }
 
-function Invoke-D1 {
-    param([string]$Sql)
-    $output = npx wrangler d1 execute mla-licenses --remote --command $Sql 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "`nD1 sorgu xetasi:" -ForegroundColor Red
-        $output | Select-Object -Last 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
-        exit 1
-    }
+Write-Host "`n=== Yeni tester key (server: $Server) ===" -ForegroundColor Cyan
+Write-Host "Email: $Email   Plan: $Plan   Muddet: $DurationDays gun`n"
+
+# 1) Admin login -> session cookie
+try {
+    $null = Invoke-RestMethod -Uri "$Server/admin/login" -Method POST `
+        -Body (@{ email = $AdminEmail; password = $AdminPassword } | ConvertTo-Json) `
+        -ContentType 'application/json' -SessionVariable sess -TimeoutSec 15
+} catch {
+    Write-Host "Admin login alinmadi: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "AdminEmail/AdminPassword-u yoxla ($Server/admin/login)." -ForegroundColor Red
+    exit 1
 }
 
-$licenseKey = New-Id "mla_live_"
-$userId     = New-Id "usr_"
-$subId      = New-Id "sub_"
-$polarFake  = "fake_polar_" + $subId.Substring(4)
-$periodSec  = $DurationDays * 86400
+# 2) Acari yarat
+try {
+    $r = Invoke-RestMethod -Uri "$Server/admin/keys" -Method POST `
+        -Body (@{ email = $Email; plan = $Plan; duration_days = $DurationDays; note = $Note } | ConvertTo-Json) `
+        -ContentType 'application/json' -WebSession $sess -TimeoutSec 15
+} catch {
+    Write-Host "Key yaradilmadi: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
 
-Write-Host "`n=== Yeni tester yaradilir ===" -ForegroundColor Cyan
-Write-Host "Email:    $Email"
-Write-Host "Plan:     $Plan ($DurationDays gun)"
-Write-Host ""
+$licenseKey = $r.key
+if (-not $licenseKey) {
+    Write-Host "Server key qaytarmadi: $($r | ConvertTo-Json -Compress)" -ForegroundColor Red
+    exit 1
+}
 
-Write-Host "1/3  User..." -ForegroundColor Yellow
-Invoke-D1 "INSERT INTO users (id, email, created_at) VALUES ('$userId', '$Email', strftime('%s','now'));"
-
-Write-Host "2/3  License..." -ForegroundColor Yellow
-Invoke-D1 "INSERT INTO licenses (key, user_id, created_at) VALUES ('$licenseKey', '$userId', strftime('%s','now'));"
-
-Write-Host "3/3  Subscription..." -ForegroundColor Yellow
-Invoke-D1 "INSERT INTO subscriptions (id, user_id, polar_subscription_id, status, current_period_end, plan, created_at, updated_at) VALUES ('$subId', '$userId', '$polarFake', 'active', strftime('%s','now')+$periodSec, '$Plan', strftime('%s','now'), strftime('%s','now'));"
-
-# Audit log
+# Lokal audit log (rahatliq ucun)
 $auditLine = "$(Get-Date -Format 'yyyy-MM-dd HH:mm') | $Email | $licenseKey | $Plan | $DurationDays gun | $Note"
 Add-Content -Path "$PSScriptRoot\tester_audit.log" -Value $auditLine
 
 $expiryDate = (Get-Date).AddDays($DurationDays).ToString('yyyy-MM-dd')
 
 Write-Host "`n=== HAZIRDIR ===" -ForegroundColor Green
-Write-Host ""
-Write-Host "TESTER KEY: " -NoNewline
-Write-Host $licenseKey -ForegroundColor Green
-Write-Host "Etibarli:   $expiryDate-e qeder ($DurationDays gun)"
-Write-Host ""
+Write-Host "TESTER KEY: " -NoNewline; Write-Host $licenseKey -ForegroundColor Green
+Write-Host "Etibarli:   $expiryDate-e qeder ($DurationDays gun)`n"
 Write-Host "--- Testere gonderilen mesaj ---" -ForegroundColor Cyan
+
 @"
 
-MLA Agent alpha — qurasdirma
+Tokengram alpha — qurasdirma
 
-Telebler:
-  - Windows 10/11
-  - Python 3.12 (python --version yoxla)
-  - VSCode 1.85+
-  - Claude Code (npm install -g @anthropic-ai/claude-code)
+Telebler: Windows 10/11, VSCode 1.85+, Claude Code.
+(Python LAZIM DEYIL — installer Python 3.12-ni ozu getirir.)
 
 Senin license key:
   $licenseKey
 
-Qurasdirma (5 deq):
-  1. mla-agent-0.1.0-alpha-win64-py312.zip fayli ac (mes. C:\mla-alpha).
-  2. PowerShell ac (Shift + sag klik -> Open PowerShell window here).
-  3. Icra et:
-
-     Set-ExecutionPolicy -Scope Process Bypass -Force
-     .\install.ps1 -ProjectPath C:\path\to\your\project -LicenseKey $licenseKey -PublicKeyPath .\mla_pubkey.pem
-
+Qurasdirma:
+  1. tokengram VSIX-i ac: Extensions paneli -> "..." menyu -> Install from VSIX...
+     (ve ya:  code --install-extension tokengram-<version>.vsix )
+  2. VSCode-u reload et. Ilk qurulum ~300 MB endirir (status bar-da faiz gorunur).
+  3. Status bar-daki Tokengram widgetine bas -> "Enter license key" -> bu key-i yapisdir.
   4. Claude Code-u yeniden baslat.
-  5. VSCode status bar-da 'MLA' widget gorunecek.
 
 "@ | Write-Host -ForegroundColor White
 

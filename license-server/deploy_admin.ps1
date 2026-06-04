@@ -1,5 +1,9 @@
 # Tokengram Admin — one-time deploy script.
 #
+# ⚠️ KÖHNƏLİB (2026-06-04): bu skript Cloudflare WORKER-i deploy edir. Cari prod
+# server EC2-dədir (admin-server + Caddy → https://tokengram.click). Worker RETIRED;
+# yeni açar üçün license-server/new_tester_key.ps1 işlət (EC2 admin API).
+#
 # Bunu işlət:
 #   .\deploy_admin.ps1
 #

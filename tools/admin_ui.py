@@ -1,6 +1,11 @@
 """
 Tokengram Admin UI — local web tool for managing license keys.
 
+⚠️ DEPRECATED (2026-06-04): this talks to the old Cloudflare Worker (ADMIN_TOKEN
+auth). Production is now the EC2 admin-server behind https://tokengram.click, which
+uses session login (/admin/login) — not ADMIN_TOKEN. To issue keys, use
+license-server/new_tester_key.ps1 or the admin-server's own web panel.
+
 Run:
     python tools/admin_ui.py
 
@@ -8,8 +13,8 @@ Opens http://127.0.0.1:8765 in your browser.
 
 Config: ~/.tokengram/admin_config.json
     {
-      "server_url": "https://mla-license-server-production.....workers.dev",
-      "admin_token": "<token set via wrangler secret put ADMIN_TOKEN>"
+      "server_url": "https://tokengram.click",
+      "admin_token": "<deprecated — EC2 admin-server uses /admin/login, not ADMIN_TOKEN>"
     }
 """
 from __future__ import annotations

@@ -1,5 +1,11 @@
 # Tokengram — Sənin tərəfinin quraşdırma bələdçisi
 
+> ⚠️ **KÖHNƏLİB (2026-06-04).** Bu bələdçi köhnə axını təsvir edir: Cloudflare Worker
+> license server + zip/`install.ps1` paylanması. **Cari reallıq:** license server EC2-də
+> (`admin-server`), qarşısında Caddy ilə `https://tokengram.click` (bax `license-server/edge/`),
+> paylanma isə **VSIX** ilədir (installer Python 3.12-ni özü gətirir). Açar yaratmaq:
+> `license-server/new_tester_key.ps1`. Aşağıdakı worker/zip addımları artıq tətbiq olunmur.
+
 Bu sənəd **ancaq sənin etməli olduqların** üçündür. Kolleqalara verəcəyin paket onsuz da hazırdır (`dist/mla-agent-0.1.0-alpha-win64-py312.zip` + `install.ps1`).
 
 Lakin paket işləməsi üçün **3 şey lazımdır**:

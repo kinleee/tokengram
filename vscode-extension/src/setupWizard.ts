@@ -6,11 +6,42 @@ import * as vscode from 'vscode';
 
 const TOKENGRAM_HOME = path.join(os.homedir(), '.tokengram');
 const VENV_DIR = path.join(TOKENGRAM_HOME, 'venv');
-const MIN_PYTHON = [3, 12] as const;
+// Wheel cp312-only; cp313 hələ yoxdur, ona görə EXACT 3.12 tələbi.
+const REQUIRED_PYTHON = [3, 12] as const;
+
+// Canonical license-server URL. Pinned into ~/.tokengram/server_url.txt on every
+// activation so a stale leftover (old parked domain / Cloudflare worker / raw IP)
+// can never override it and resurrect the "network_error:AbortError" license toast.
+const LICENSE_SERVER_URL = 'https://tokengram.click';
+
+// Self-heal: rewrite server_url.txt only when it's missing or a KNOWN-stale value
+// (the old workers.dev worker or the raw EC2 IP). A deliberate custom HTTPS URL is
+// left untouched. Runs on activation; never throws.
+export function pinServerUrl(): void {
+  try {
+    const f = path.join(TOKENGRAM_HOME, 'server_url.txt');
+    const cur = fs.existsSync(f) ? fs.readFileSync(f, 'utf-8').trim() : '';
+    const stale = cur === '' || /workers\.dev|54\.163\.13\.24/i.test(cur);
+    if (stale && cur !== LICENSE_SERVER_URL) {
+      fs.mkdirSync(TOKENGRAM_HOME, { recursive: true });
+      fs.writeFileSync(f, LICENSE_SERVER_URL, 'utf-8');
+    }
+  } catch {
+    /* best effort — must never block activation */
+  }
+}
 
 interface PythonInfo {
   path: string;
   version: [number, number, number];
+}
+
+// Track an in-progress install so the status-bar menu can show "please wait"
+// instead of the misleading "not installed yet — open wizard" modal that used
+// to fire when a tester clicked the bar during the first-time download.
+let installInFlight = false;
+export function isInstalling(): boolean {
+  return installInFlight;
 }
 
 // Silent auto-install on activation. No webview. License key is collected
@@ -44,25 +75,10 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
     // fall through — installer with --upgrade swaps the wheel in-place
   }
 
-  const py = await detectPython(context);
-  if (!py) {
-    // Only cooldown the Python-missing prompt: showing it on every restart is annoying.
-    // The install path itself is not cooldowned.
-    const last = context.globalState.get<number>('tokengram.pythonPromptCooldown') ?? 0;
-    if (Date.now() - last < 10 * 60 * 1000) return;
-    await context.globalState.update('tokengram.pythonPromptCooldown', Date.now());
-    const dl = 'Download Python 3.12';
-    const action = await vscode.window.showWarningMessage(
-      'Tokengram needs Python 3.12 or newer. Install it, then reload VS Code.',
-      dl,
-    );
-    if (action === dl) {
-      void vscode.env.openExternal(vscode.Uri.parse('https://www.python.org/downloads/'));
-    }
-    return;
-  }
-
+  // uv özü Python 3.12-ni provision edir — artıq sistemdə 3.12 axtarmırıq.
+  // "Python 3.12 yoxdur" problemi bununla aradan qalxır (testerlərdə əsas fail).
   const isUpgrade = venvHasTokengram();
+  installInFlight = true;
   try {
     await vscode.window.withProgress(
       {
@@ -83,7 +99,11 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
           tracker.jumpTo(7, 'MCP server stopped — starting upgrade...');
         }
 
-        tracker.jumpTo(isUpgrade ? 10 : 1, 'Launching installer...');
+        // uv-ni təmin et (yoxdursa bir dəfə endir + cache). uv sonra Python
+        // 3.12-ni provision edəcək — user-də heç bir Python olmasa belə.
+        tracker.jumpTo(isUpgrade ? 8 : 1, 'Preparing runtime (uv)...');
+        const uvPath = await ensureUv((m) => progress.report({ message: m }));
+        tracker.jumpTo(isUpgrade ? 10 : 3, 'Launching installer...');
 
         // Pip's dependency download is the dominant wait. We can't read pip's
         // real percentage, but we can fill the bar against an elapsed-time
@@ -100,15 +120,46 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
           }
         };
 
-        await runInstaller(context, py.path, (line) => {
+        // Real download/install progress: installer.py streams `[DL] <done> <target>`
+        // byte counts (venv growth on disk) while uv installs deps. These drive the
+        // bar for real; the time component below only gives early motion during the
+        // network window when venv is still ~flat.
+        let depsDone = 0;
+        let depsTarget = 0;
+        const startDeps = (durationMs: number) => {
+          stopFill();
+          const startVal = tracker.current(); // ~34 after the stage-4 jump
+          const band = 88 - startVal;
+          const startedAt = Date.now();
+          const timer = setInterval(() => {
+            const timePct = Math.min((Date.now() - startedAt) / durationMs, 1);
+            const diskPct = depsTarget > 0 ? Math.min(depsDone / depsTarget, 0.99) : 0;
+            // Whichever is further along wins; cap < 100% so we never claim done early.
+            const pct = Math.min(Math.max(timePct, diskPct), 0.99);
+            tracker.jumpTo(
+              startVal + pct * band,
+              `[4/5] Installing dependencies — ${Math.round(pct * 100)}%`,
+            );
+          }, 700);
+          fill.stop = () => clearInterval(timer);
+        };
+
+        await runInstaller(context, uvPath, (line) => {
           const stageMatch = line.match(/^\[(\d)\/5\]\s*(.*)$/);
           if (stageMatch) {
             const n = stageMatch[1];
             const tail = stageMatch[2];
-            handleStageLine(n, tail, tracker, stopFill, (target, durationMs) => {
-              stopFill();
-              fill.stop = tracker.fillSlowlyTo(target, durationMs);
-            });
+            handleStageLine(n, tail, tracker, stopFill, startDeps);
+            return;
+          }
+
+          // Real byte progress from installer.py's monitor thread. Must be
+          // handled before the noise filter below (which drops lines while the
+          // deps timer is running).
+          const dlMatch = line.match(/^\[DL\]\s+(\d+)\s+(\d+)/);
+          if (dlMatch) {
+            depsDone = Number(dlMatch[1]);
+            depsTarget = Number(dlMatch[2]);
             return;
           }
 
@@ -120,9 +171,9 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
 
           // Raw pip noise:
           //   - Skip "Requirement already satisfied" deluge from update mode.
-          //   - During slow-fill, the timer owns the message (elapsed time);
-          //     drop pip chatter so it doesn't flicker over the timer text.
-          //     Always let errors through.
+          //   - While the deps timer is running it owns the message (the live
+          //     "Installing dependencies — NN%"); drop pip/uv chatter so it
+          //     doesn't flicker over it. Always let errors through.
           if (/Requirement already satisfied/.test(line)) return;
           const isError = /(error[: ]|ERROR|Failed|failed:)/.test(line);
           if (fill.stop && !isError) return;
@@ -145,17 +196,37 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
       vscode.window.showInformationMessage('Tokengram updated. Restart Claude Code to pick up the new version.');
       return;
     }
-    const setLic = 'Enter license key';
-    const action = await vscode.window.showInformationMessage(
-      'Tokengram installed. Click the status bar (bottom-right) or use the button to add your license key.',
-      setLic,
-    );
-    if (action === setLic) {
-      void vscode.commands.executeCommand('tokengram.menu');
-    }
+    // Open the license input directly — testers were previously clicking the
+    // status bar mid-install and getting a misleading "not installed yet" modal.
+    // Skipping the intermediate confirmation removes one click and one chance
+    // to misroute.
+    void vscode.commands.executeCommand('tokengram.setLicenseKey');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    vscode.window.showErrorMessage(`Tokengram install failed: ${msg.split('\n')[0]}`);
+    // Mirror the reindex flow: the first line is usually a generic wrapper
+    // ("installer exited with code N"); the real cause is the last non-empty
+    // line of the captured pip/venv output. Show that in the toast and dump
+    // the full transcript into a dedicated channel for follow-up.
+    const lines = msg.split('\n').map((l) => l.trim()).filter(Boolean);
+    const summary =
+      lines
+        .slice()
+        .reverse()
+        .find((l) => !/^installer exited with code/i.test(l)) ?? lines[0] ?? msg;
+    const channel = vscode.window.createOutputChannel('Tokengram Install');
+    channel.appendLine(msg);
+    const logPath = path.join(os.homedir(), '.tokengram', 'install.log');
+    if (fs.existsSync(logPath)) {
+      channel.appendLine('');
+      channel.appendLine(`Full persistent transcript: ${logPath}`);
+      channel.appendLine('(send this file to support to pinpoint the cause)');
+    }
+    channel.show(true);
+    vscode.window.showErrorMessage(
+      `Tokengram install failed: ${summary} (full log: ~/.tokengram/install.log)`,
+    );
+  } finally {
+    installInFlight = false;
   }
 }
 
@@ -164,7 +235,6 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
 interface ProgressTracker {
   current(): number;
   jumpTo(target: number, message?: string): void;
-  fillSlowlyTo(target: number, durationMs: number): () => void;
 }
 
 function makeProgressTracker(
@@ -183,40 +253,7 @@ function makeProgressTracker(
       value = clamped;
       progress.report({ increment: inc, message });
     },
-    fillSlowlyTo(target, durationMs) {
-      const start = value;
-      const cap = Math.min(target, 100);
-      const startedAt = Date.now();
-      const tickMs = 600;
-      const timer = setInterval(() => {
-        const elapsed = Date.now() - startedAt;
-        const frac = Math.min(1, elapsed / durationMs);
-        const projected = start + (cap - start) * frac;
-        if (projected > value) {
-          const inc = projected - value;
-          value = projected;
-          progress.report({
-            increment: inc,
-            message: `Downloading dependencies — ${formatElapsed(elapsed)} elapsed`,
-          });
-        } else if (elapsed % 3000 < tickMs) {
-          // Time-based heartbeat when capped: keep elapsed visible.
-          progress.report({
-            message: `Downloading dependencies — ${formatElapsed(elapsed)} elapsed`,
-          });
-        }
-        if (frac >= 1) clearInterval(timer);
-      }, tickMs);
-      return () => clearInterval(timer);
-    },
   };
-}
-
-function formatElapsed(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
 // Map installer.py's `[N/5]` markers to concrete progress %-targets. Stage 4
@@ -227,7 +264,7 @@ function handleStageLine(
   tail: string,
   tracker: ProgressTracker,
   stopFill: () => void,
-  startFill: (target: number, durationMs: number) => void,
+  startDeps: (durationMs: number) => void,
 ): void {
   switch (n) {
     case '1':
@@ -250,10 +287,10 @@ function handleStageLine(
         stopFill();
         tracker.jumpTo(32, '[4/5] Installing tokengram wheel');
       } else if (/Resolving and downloading/i.test(tail)) {
-        // The big one. Slow-fill from current value up to 88% over the
-        // expected duration. expectedDepsMs is set by the caller.
-        tracker.jumpTo(34, '[4/5] Downloading dependencies...');
-        startFill(88, getExpectedDepsMs());
+        // The big one. Drive the bar 34→88% from real on-disk byte growth
+        // (installer.py's `[DL]` lines), with a time fallback for early motion.
+        tracker.jumpTo(34, '[4/5] Installing dependencies — 0%');
+        startDeps(getExpectedDepsMs());
       } else {
         // Unknown sub-step under stage 4 — nudge progress so something moves.
         tracker.jumpTo(Math.min(tracker.current() + 1, 88), `[4/5] ${tail}`);
@@ -360,18 +397,25 @@ async function detectPython(context: vscode.ExtensionContext): Promise<PythonInf
   const override = vscode.workspace.getConfiguration('tokengram').get<string>('pythonPath');
   const candidates: string[] = [];
   if (override) candidates.push(override);
+  // Yalnız 3.12 axtarırıq. `py -3.13` və ya plain `python` (3.13 ola bilər)
+  // namizədləri çıxardıq — wheel cp312-only-dir, 3.13 venv-də install fail edir
+  // (`Package 'tokengram' requires a different Python: 3.13.x not in '<3.13,>=3.12'`).
   if (process.platform === 'win32') {
-    candidates.push('py -3.12', 'py -3.13', 'python', 'python3');
+    candidates.push('py -3.12');
   } else {
-    candidates.push('python3.12', 'python3.13', 'python3', 'python');
+    candidates.push('python3.12');
   }
   for (const cmd of candidates) {
     const info = await tryPython(cmd);
-    if (info && satisfies(info.version, MIN_PYTHON)) {
+    if (info && exactPython(info.version, REQUIRED_PYTHON)) {
       return info;
     }
   }
   return null;
+}
+
+function exactPython(actual: [number, number, number], required: readonly [number, number]): boolean {
+  return actual[0] === required[0] && actual[1] === required[1];
 }
 
 function tryPython(cmd: string): Promise<PythonInfo | null> {
@@ -393,14 +437,110 @@ function tryPython(cmd: string): Promise<PythonInfo | null> {
 }
 
 function satisfies(actual: [number, number, number], min: readonly [number, number]): boolean {
+  // legacy helper, retained for any callers; current code uses exactPython()
   if (actual[0] > min[0]) return true;
   if (actual[0] < min[0]) return false;
   return actual[1] >= min[1];
 }
 
+const UV_EXE = path.join(TOKENGRAM_HOME, 'uv.exe');
+const UV_URL =
+  'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip';
+
+// uv-ni təmin et: ~/.tokengram/uv.exe varsa onu qaytar, yoxdursa bir dəfə endir
+// (retry-lı) + Expand-Archive ilə çıxar + cache et. uv tək binary-dir (Python
+// tələb etmir) və sonra Python 3.12-ni özü provision edir.
+async function ensureUv(onMsg: (m: string) => void): Promise<string> {
+  if (fs.existsSync(UV_EXE)) return UV_EXE;
+  fs.mkdirSync(TOKENGRAM_HOME, { recursive: true });
+  const zipPath = path.join(TOKENGRAM_HOME, 'uv-download.zip');
+  onMsg('Downloading uv (one-time, ~24 MB)...');
+
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(UV_URL, { redirect: 'follow' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Stream the body so we can show a REAL byte percentage instead of a
+      // silent ~24 MB stall. Content-Length is present on GitHub releases.
+      const total = Number(res.headers.get('content-length')) || 0;
+      const totalMb = total > 0 ? (total / 1_000_000).toFixed(1) : '?';
+      const chunks: Buffer[] = [];
+      let received = 0;
+      let lastReport = 0;
+      if (res.body) {
+        const reader = res.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(Buffer.from(value));
+          received += value.length;
+          const now = Date.now();
+          if (now - lastReport > 150) {
+            lastReport = now;
+            const mb = (received / 1_000_000).toFixed(1);
+            onMsg(
+              total > 0
+                ? `Downloading runtime (uv) — ${mb} / ${totalMb} MB · ${Math.round((received / total) * 100)}%`
+                : `Downloading runtime (uv) — ${mb} MB`,
+            );
+          }
+        }
+        fs.writeFileSync(zipPath, Buffer.concat(chunks));
+      } else {
+        // No streamable body (shouldn't happen on Node fetch) — fall back.
+        fs.writeFileSync(zipPath, Buffer.from(await res.arrayBuffer()));
+      }
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      onMsg(`uv download failed (attempt ${attempt}/3), retrying...`);
+    }
+  }
+  if (lastErr) {
+    throw new Error(
+      `Could not download uv from ${UV_URL}: ` +
+        `${lastErr instanceof Error ? lastErr.message : String(lastErr)}. ` +
+        'Check your internet connection / proxy, then retry install.',
+    );
+  }
+
+  onMsg('Extracting uv...');
+  await new Promise<void>((resolve, reject) => {
+    const ps = cp.spawn(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${TOKENGRAM_HOME}' -Force`,
+      ],
+      { shell: false },
+    );
+    let err = '';
+    ps.stderr.on('data', (d) => (err += d.toString()));
+    ps.on('error', reject);
+    ps.on('close', (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(`Expand-Archive failed (${code}): ${err.trim()}`)),
+    );
+  });
+  try {
+    fs.unlinkSync(zipPath);
+  } catch {
+    /* ignore cleanup failure */
+  }
+  if (!fs.existsSync(UV_EXE)) {
+    throw new Error('uv.exe not found after extracting the uv archive.');
+  }
+  return UV_EXE;
+}
+
 async function runInstaller(
   context: vscode.ExtensionContext,
-  pythonPath: string,
+  uvPath: string,
   onLine: (line: string) => void,
 ): Promise<void> {
   const installerScript = path.join(context.extensionPath, 'resources', 'installer.py');
@@ -412,21 +552,54 @@ async function runInstaller(
     // a fresh install never depends on PyPI availability or version sync.
     // Falls back to PyPI only when no bundled wheel is present.
     const resourcesDir = path.join(context.extensionPath, 'resources');
+    // readdirSync sırası FS-asılıdır; alphabetic "0.1.10" < "0.1.9" (ASCII).
+    // Bütün wheel-ləri tap, semver ilə descending sort, ən yenisini seç.
     const wheels = fs.existsSync(resourcesDir)
-      ? fs.readdirSync(resourcesDir).filter((f) => f.endsWith('.whl'))
+      ? fs.readdirSync(resourcesDir).filter((f) => f.startsWith('tokengram-') && f.endsWith('.whl'))
       : [];
-    const args = ['--tokengram-home', TOKENGRAM_HOME];
+    const wheelVersion = (name: string): string => {
+      const m = name.match(/^tokengram-(\d+\.\d+\.\d+)/);
+      return m?.[1] ?? '0.0.0';
+    };
+    wheels.sort((a, b) => compareSemver(wheelVersion(b), wheelVersion(a)));
+    // `uv run --python 3.12` installer.py-ni uv-nin provision etdiyi 3.12 ilə
+    // işə salır (sistemdə 3.12 yoxdursa avtomatik endirir). --no-project/--no-config
+    // cwd-dəki yad pyproject.toml/uv.toml-un götürülməsinin qarşısını alır.
+    const args = [
+      'run',
+      '--python',
+      '3.12',
+      '--no-project',
+      '--no-config',
+      installerScript,
+      '--uv',
+      uvPath,
+      '--tokengram-home',
+      TOKENGRAM_HOME,
+    ];
     if (wheels.length > 0) {
       args.push('--source', path.join(resourcesDir, wheels[0]));
     }
-    const child = cp.spawn(pythonPath, [installerScript, ...args], {
+    const child = cp.spawn(uvPath, args, {
       shell: false,
+      cwd: TOKENGRAM_HOME,
+      // installer.py Azərbaycan hərfli log yazır; pipe-da default cp1252
+      // UnicodeEncodeError verir. UTF-8 məcbur et (installer özü də reconfigure edir).
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
     });
     const buffer = { stdout: '', stderr: '' };
+    // Keep every line we've seen so the catch handler can surface the real
+    // failure cause — without this, a non-zero exit was reported as just
+    // "installer exited with code 1" with the actual pip/venv error lost.
+    const captured: string[] = [];
     const flush = (key: 'stdout' | 'stderr') => {
       const lines = buffer[key].split('\n');
       buffer[key] = lines.pop() ?? '';
-      for (const l of lines) if (l) onLine(l);
+      for (const l of lines)
+        if (l) {
+          captured.push(l);
+          onLine(l);
+        }
     };
     child.stdout.on('data', (d) => {
       buffer.stdout += d.toString();
@@ -437,9 +610,24 @@ async function runInstaller(
       flush('stderr');
     });
     child.on('close', (code) => {
-      if (buffer.stdout) onLine(buffer.stdout);
-      if (buffer.stderr) onLine(buffer.stderr);
-      code === 0 ? resolve() : reject(new Error(`installer exited with code ${code}`));
+      if (buffer.stdout) {
+        captured.push(buffer.stdout);
+        onLine(buffer.stdout);
+      }
+      if (buffer.stderr) {
+        captured.push(buffer.stderr);
+        onLine(buffer.stderr);
+      }
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `installer exited with code ${code}\n` +
+              captured.slice(-30).join('\n'),
+          ),
+        );
+      }
     });
   });
 }
@@ -526,6 +714,11 @@ export function writeWorkspaceHooks(): boolean {
     env: {
       PYTHONUNBUFFERED: '1',
       PYTHONIOENCODING: 'utf-8',
+      // sentence-transformers/HF online check işçi thread-i hang edir (queue_stuck).
+      // Offline məcburi olmasa indexing dayanır — bu üç var mütləqdir.
+      HF_HUB_OFFLINE: '1',
+      TRANSFORMERS_OFFLINE: '1',
+      ANONYMIZED_TELEMETRY: 'False',
     },
   };
   // Merge with any existing .mcp.json so we don't clobber other MCP servers the

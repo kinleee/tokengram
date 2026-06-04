@@ -12,7 +12,7 @@ param(
     [string]$ProjectPath = "",
     [switch]$SkipDeps,
     [string]$LicenseKey = "",
-    [string]$LicenseServerUrl = "https://mla-license-server-production.n-ilkin-humbatov.workers.dev",
+    [string]$LicenseServerUrl = "https://tokengram.click",
     [string]$PublicKeyPath = ""
 )
 

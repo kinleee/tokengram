@@ -2,11 +2,11 @@
   "name": "tokengram",
   "displayName": "Tokengram",
   "description": "Token-saving memory layer for Claude Code — hybrid RAG search over your project (local; up to 70% on search/Read-heavy tasks, less on edit-heavy refactors).",
-  "version": "0.1.24",
+  "version": "0.1.36",
   "publisher": "tokengram",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "icon.png",
-  "homepage": "https://github.com/kinleee",
+  "homepage": "https://github.com/kinleee/tokengram",
   "repository": {
     "type": "git",
     "url": "https://github.com/kinleee/tokengram.git"
@@ -70,7 +70,7 @@
         },
         "tokengram.licenseServerUrl": {
           "type": "string",
-          "default": "http://54.163.13.24:3000",
+          "default": "https://tokengram.click",
           "description": "License-server endpoint."
         },
         "tokengram.devRoot": {
