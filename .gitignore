@@ -65,6 +65,9 @@ models_cache/
 # Müvəqqəti append/edit faylları
 _tmp_*.md
 
+# .mcp.json backups (setupWizard hər yenidən yazanda .bak-<ts> yaradır — per-machine)
+.mcp.json.bak*
+
 # Claude Code lokal/şəxsi tənzimləmələr (settings.json paylaşılır)
 .claude/settings.local.json
 
@@ -93,3 +96,6 @@ build_tmp/
 # Releases or the Marketplace, not the repo)
 vscode-extension/*.vsix
 _install_simulate/
+
+# Node deps (admin/license servers — restored via `npm ci` on the box)
+node_modules/

@@ -511,8 +511,46 @@ app.get('/admin/audit', requireAdmin, (_req, res) => {
     res.json({ rows });
 });
 
+// ====================================================================
+// /buy — Paddle checkout hazır olana qədər stub.
+// Landing-dəki bütün CTA düymələri bura gəlir (?plan=trial|monthly|yearly).
+// Paddle inteqrasiyası bitəndə bu route Paddle checkout URL-inə 302 edəcək
+// (bax: PAYMENT_PLAN.md, addım 4).
+// ====================================================================
+app.get('/buy', (req, res) => {
+    const plan = ['trial', 'monthly', 'yearly'].includes(String(req.query.plan))
+        ? String(req.query.plan)
+        : 'monthly';
+    const planLabel = { trial: '1-day Free Trial', monthly: 'Pro — $5/month', yearly: 'Pro — $29/year' }[plan];
+    res.type('html').send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tokengram — Checkout</title><link rel="icon" type="image/png" href="/icon.png">
+<style>
+  body { font-family: "Segoe UI", system-ui, sans-serif; background: #070b14; color: #e8edf7;
+         display: grid; place-items: center; min-height: 100vh; margin: 0; text-align: center; }
+  .card { max-width: 420px; padding: 40px 32px; border: 1px solid rgba(77,144,255,.3); border-radius: 16px;
+          background: rgba(17,25,45,.6); box-shadow: 0 0 50px rgba(77,144,255,.12); }
+  img { width: 72px; filter: drop-shadow(0 0 20px rgba(77,144,255,.35)); }
+  h1 { font-size: 1.3rem; margin: 18px 0 6px; }
+  .plan { color: #7fb4ff; font-weight: 600; }
+  p { color: #93a0b8; font-size: .92rem; line-height: 1.55; }
+  a.btn { display: inline-block; margin-top: 18px; padding: 10px 24px; border-radius: 10px;
+          background: linear-gradient(135deg,#2f6fe0,#4d90ff); color: #fff; text-decoration: none; font-weight: 600; }
+</style></head><body>
+<div class="card">
+  <img src="/icon.png" alt="Tokengram">
+  <h1>Checkout opens very soon</h1>
+  <p>You picked <span class="plan">${planLabel}</span>.<br>
+     Payments go live shortly — drop us a line and we'll send your checkout link the moment it's ready.</p>
+  <a class="btn" href="mailto:n.ilkin.humbatov@gmail.com?subject=Tokengram%20${encodeURIComponent(plan)}%20plan">Notify me</a>
+</div>
+</body></html>`);
+});
+
 // ---- Static UI ----
-app.use('/', express.static(path.join(__dirname, 'public')));
+// Admin paneli /admin/ altına köçdü; kök (/) artıq tokengram.click landing-i verir.
+app.use('/admin', express.static(path.join(__dirname, 'public')));
+app.use('/', express.static(path.join(__dirname, 'site')));
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[tokengram-admin] http://0.0.0.0:${PORT}`);
