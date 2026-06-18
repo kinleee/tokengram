@@ -6,6 +6,11 @@ within a monorepo) the hooks would scope to that subfolder and reject Read
 events on parent files. The bar's `savingsReader.findProjectRoot()` already
 walks up; we mirror it here so hooks and the bar agree on one project root.
 
+Walk-up stops at the user's HOME directory: `~/.claude/settings.json` is the
+global Claude Code config that virtually every user has, and climbing into
+it would scope every workspace's sidecar files to $HOME — polluting home
+with `.mla_session_log.jsonl` etc. and merging unrelated projects' state.
+
 Priority order matches savingsReader.ts:
   1. .mla_savings_history.jsonl  (strongest signal — real data lives here)
   2. .claude/settings.json       (hooks are configured here)
@@ -20,10 +25,15 @@ _MAX_DEPTH = 8
 
 def find_project_root(start_dir: Path | str | None = None) -> Path:
     start = Path(start_dir or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
+    home = Path.home().resolve()
 
     def walk_up(predicate) -> Path | None:
         cur = start
         for _ in range(_MAX_DEPTH):
+            # Stop at HOME boundary: ~/.claude/settings.json belongs to
+            # the global Claude Code config, not a project root.
+            if cur == home:
+                return None
             if predicate(cur):
                 return cur
             parent = cur.parent

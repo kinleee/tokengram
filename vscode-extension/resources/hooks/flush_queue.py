@@ -21,14 +21,14 @@ import os
 import sys
 from pathlib import Path
 
-# Workspace yolu Claude-dan gəlir; install layout-da hook ~/.tokengram/-dədir.
-PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
-QUEUE_FILE = PROJECT_ROOT / ".mla_pending.txt"
-
 # Import path-larını həm install root, həm hook-un yanına əlavə et.
 _INSTALL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_INSTALL_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from project_root import find_project_root
+
+PROJECT_ROOT = find_project_root()
+QUEUE_FILE = PROJECT_ROOT / ".mla_pending.txt"
 
 
 def main() -> int:

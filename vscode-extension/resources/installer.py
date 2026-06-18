@@ -312,6 +312,42 @@ def install_tokengram(venv: Path, source: str | None, uv: str | None) -> None:
         _pip_run([pip, "install", "tokengram"])
 
 
+def predownload_embedding_model(venv: Path) -> None:
+    """Embedding modelini setup zamanı ONLINE endir (HF cache-ə yaz).
+
+    Reindex runtime-da `HF_HUB_OFFLINE=1` ilə işləyir (worker hang qarşısı) —
+    yəni model əvvəlcədən cache-də OLMALIDIR, yoxsa embedding boş keçir və
+    baza boş qalır (səssiz uğursuzluq). Burada online endiririk.
+
+    Symlink xəbərdarlığı söndürülür (Windows-da Developer Mode yoxdursa HF
+    copy ilə işləyir — symlink lazım deyil). Uğursuz olsa install dayanmır:
+    runtime-da `_ensure_loaded` ehtiyat online fallback edir.
+    """
+    log("[5/5] Pre-downloading embedding model (~130 MB, one-time)...")
+    py = str(venv_python(venv))
+    env = dict(os.environ)
+    # Online məcburi (offline bayraqlarını sil) + symlink xəbərdarlığını sus
+    env.pop("HF_HUB_OFFLINE", None)
+    env.pop("TRANSFORMERS_OFFLINE", None)
+    env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+    env["TRANSFORMERS_VERBOSITY"] = "error"
+    code = (
+        "from tokengram import config;"
+        "from sentence_transformers import SentenceTransformer;"
+        "SentenceTransformer(config.EMBEDDING_MODEL_NAME);"
+        "print('model cached')"
+    )
+    try:
+        subprocess.run(
+            [py, "-c", code], env=env, timeout=600, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        log("[5/5] Embedding model cached OK")
+    except Exception as e:
+        # Non-fatal: runtime fallback modeli ilk reindex-də endirəcək.
+        log(f"[5/5] Model pre-download keçildi (runtime fallback edəcək): {e}")
+
+
 def install_hooks_locally(venv: Path, home: Path) -> None:
     """Copy hooks/ from the installed package into ~/.tokengram/hooks/.
 
@@ -459,6 +495,7 @@ def main() -> None:
     create_venv(venv, uv)
     upgrade_pip(venv, uv)
     install_tokengram(venv, args.source, uv)
+    predownload_embedding_model(venv)
     install_hooks_locally(venv, home)
     write_marker(home)
     log("done")

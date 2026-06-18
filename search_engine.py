@@ -12,6 +12,7 @@ from typing import List, Optional, Dict
 from dataclasses import dataclass, field
 from rank_bm25 import BM25Okapi
 import config
+import db_guard
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,63 @@ class BM25Index:
         self._is_built = True
         logger.info(f"📑 BM25 indeks quruldu: {len(documents)} sənəd")
     
+    def save(self, path: str) -> bool:
+        """BM25 indeksini diskə yaz (iki fazalı index üçün).
+
+        Faza 1-də xam chunk-lardan qurulan keyword indeksi buraya pickle
+        edilir ki, embedding bitməsini gözləmədən keyword axtarış işləsin.
+        Atomic write — yarımçıq fayl başqa prosesi qırmaz.
+        """
+        if not self._is_built or self.bm25 is None:
+            return False
+        import pickle
+        try:
+            payload = {
+                "bm25": self.bm25,
+                "documents": self.documents,
+                "doc_ids": self.doc_ids,
+                "doc_metadatas": self.doc_metadatas,
+                # Baza nəsli — köhnə pickle təzə/boş bazaya aid sayılmasın
+                "generation": db_guard.current_generation(config.CHROMA_DB_PATH),
+            }
+            tmp = f"{path}.tmp.{os.getpid()}"
+            with open(tmp, "wb") as f:
+                pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp, path)
+            logger.debug(f"💾 BM25 indeksi saxlanıldı: {path}")
+            return True
+        except Exception as e:
+            logger.warning(f"BM25 indeksi saxlanıla bilmədi: {e}")
+            return False
+
+    def load(self, path: str) -> bool:
+        """BM25 indeksini diskdən yüklə. Uğurda True qaytarır."""
+        import pickle
+        try:
+            if not os.path.exists(path):
+                return False
+            with open(path, "rb") as f:
+                payload = pickle.load(f)
+            stored_gen = payload.get("generation")
+            if stored_gen is not None and stored_gen != db_guard.current_generation(
+                config.CHROMA_DB_PATH
+            ):
+                logger.warning(
+                    "BM25 pickle köhnə baza nəslinə aiddir — atılır, yenidən qurulacaq"
+                )
+                return False
+            self.bm25 = payload["bm25"]
+            self.documents = payload["documents"]
+            self.doc_ids = payload["doc_ids"]
+            self.doc_metadatas = payload["doc_metadatas"]
+            self._is_built = self.bm25 is not None and bool(self.documents)
+            if self._is_built:
+                logger.info(f"📑 BM25 indeksi diskdən yükləndi: {len(self.documents)} sənəd")
+            return self._is_built
+        except Exception as e:
+            logger.warning(f"BM25 indeksi yüklənə bilmədi, sıfırdan qurulacaq: {e}")
+            return False
+
     def search(self, query, top_k=10):
         """BM25 ilə keyword axtarışı."""
         if not self._is_built or self.bm25 is None:
@@ -158,7 +216,10 @@ class HybridSearchEngine:
         self.bm25_index = BM25Index()
         self.reranker = Reranker()
         self._bm25_signature: float = 0.0
-        self._build_bm25_index()
+        self._bm25_pickle_sig: float = 0.0
+        # Startup: persist edilmiş pickle varsa onu yüklə (sürətli start +
+        # iki fazalı index-də keyword dərhal hazır), yoxsa chroma-dan qur.
+        self._build_bm25_index(prefer_persisted=True)
 
     def _hash_store_signature(self) -> float:
         """HashStore faylının mtime-ı (yoxdursa 0.0)."""
@@ -167,26 +228,74 @@ class HybridSearchEngine:
         except OSError:
             return 0.0
 
-    def _build_bm25_index(self):
+    def _bm25_pickle_signature(self) -> float:
+        """Persist edilmiş BM25 pickle faylının mtime-ı (yoxdursa 0.0).
+
+        Başqa proses (CLI `--reindex`-in faza 1-i) bu faylı yenidən yazanda
+        mtime dəyişir → bu serving proses keyword indeksini dərhal yeniləyə bilir.
+        """
         try:
+            return os.path.getmtime(getattr(config, "BM25_INDEX_PATH", ""))
+        except OSError:
+            return 0.0
+
+    def _build_bm25_index(self, prefer_persisted: bool = False):
+        """BM25 indeksini qur.
+
+        prefer_persisted=True: əvvəl disk-dəki pickle-i yüklə (sürətli, ML yox).
+        Uğursuz olsa və ya istənməsə, chroma-dan qurub pickle-i yenidən yaz
+        (canonical mənbə chroma qalır — incremental edit-lər orada görünür).
+        """
+        try:
+            persisted_path = getattr(config, "BM25_INDEX_PATH", "")
+            if prefer_persisted and persisted_path and self.bm25_index.load(persisted_path):
+                self._bm25_signature = self._hash_store_signature()
+                self._bm25_pickle_sig = self._bm25_pickle_signature()
+                return
+
             documents, ids, metadatas = self.vector_store.get_all_texts_with_ids()
             if documents:
                 self.bm25_index.build(documents, ids, metadatas)
-            # Hər uğurlu build-dən sonra imzanı yenilə
+                # Chroma-dan qurduq → pickle-i sinxron saxla ki, növbəti
+                # startup sürətli olsun və başqa proseslər eyni indeksi görsün.
+                if persisted_path:
+                    self.bm25_index.save(persisted_path)
+            # Hər uğurlu build-dən sonra imzaları yenilə
             self._bm25_signature = self._hash_store_signature()
+            self._bm25_pickle_sig = self._bm25_pickle_signature()
         except Exception as e:
             logger.warning(f"BM25 indeks qurma xətası: {e}")
 
     def rebuild_bm25(self):
-        """BM25 indeksini yenidən qur."""
-        self._build_bm25_index()
+        """BM25 indeksini chroma-dan yenidən qur (incremental update sonrası)."""
+        self._build_bm25_index(prefer_persisted=False)
 
     def _ensure_fresh_bm25(self):
-        """Başqa proses hash-ları yenilədibsə, BM25-i yenidən qur."""
-        current = self._hash_store_signature()
-        if current != self._bm25_signature and current > 0:
-            logger.info("🔄 BM25 stale (hash store dəyişib) — yenidən qurulur")
-            self._build_bm25_index()
+        """Başqa proses indeksi yeniləyibsə, BM25-i təzələ.
+
+        İki mənbə izlənir:
+        - hash store mtime → bu proses/incremental index_file dəyişib.
+        - BM25 pickle mtime → başqa proses (CLI `--reindex` faza 1) keyword
+          indeksini yenidən yazıb; biz onu dərhal yükləyirik (embedding
+          bitməsini gözləmədən keyword axtarış canlı olur).
+        """
+        hash_sig = self._hash_store_signature()
+        pickle_sig = self._bm25_pickle_signature()
+        hash_changed = hash_sig != self._bm25_signature and hash_sig > 0
+        pickle_changed = pickle_sig != self._bm25_pickle_sig and pickle_sig > 0
+
+        if pickle_changed and not hash_changed:
+            logger.info("🔄 BM25 pickle yeniləndi (xarici reindex) — yüklənir")
+            # Xarici reindex chroma-nı da dəyişdi → semantic handle-ı təzələ ki,
+            # semantic axtarış da yeni datanı görsün (get_stats kimi).
+            self.vector_store.refresh_collection()
+            self.collection = self.vector_store.collection
+            self._build_bm25_index(prefer_persisted=True)
+        elif hash_changed:
+            logger.info("🔄 BM25 stale (hash store dəyişib) — chroma-dan qurulur")
+            self.vector_store.refresh_collection()
+            self.collection = self.vector_store.collection
+            self._build_bm25_index(prefer_persisted=False)
 
     def search(self, query, top_k=None, alpha=None, file_type=None, use_reranker=True):
         """Hybrid axtarış. Returns (results, confidence)."""

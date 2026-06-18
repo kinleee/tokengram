@@ -38,7 +38,12 @@ def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "--reindex":
         return mod._cli_reindex(sys.argv[2:])
 
-    mod.mcp.run()
+    serve = getattr(mod, "serve", None)
+    if serve is not None:
+        # 0.1.24+: fon servislər (worker, warm-up, watchdog) + zəmanətli çıxış.
+        # mcp.run()-ı birbaşa çağırmaq bunların heç birini başlatmırdı.
+        return serve()
+    mod.mcp.run()  # köhnə .pyd üçün fallback
     return 0
 
 

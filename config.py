@@ -38,11 +38,65 @@ FALLBACK_CHUNK_SIZE = 1200
 FALLBACK_CHUNK_OVERLAP = 200
 
 # ============================================
+# LAYİHƏ KÖKÜ (DB / index / hash faylları burada yaşayır)
+# ============================================
+# DİQQƏT: əvvəl CHROMA_DB_PATH/HASH/BM25 `os.path.dirname(__file__)`-ə bağlı idi.
+# `python -m tokengram` cwd-dən staging (MLA_AGENT/tokengram/) və ya site-packages
+# `tokengram/`-i yükləyəndə __file__ PAKET qovluğuna düşürdü → DB layihə kökü
+# əvəzinə `tokengram/chroma_db`-ə (clean install-da hətta site-packages-ə, bütün
+# layihələr üçün ORTAQ) yazılırdı. Hook-lar isə həmişə layihə kökünə yazır →
+# split-brain + fon drain livelock (2026-06-14 "re-index failed" insidenti).
+# İndi hook-lardakı (hooks/project_root.py) EYNİ məntiq: CLAUDE_PROJECT_DIR
+# (Claude Code launch-da təyin edir) → marker walk-up.
+def _resolve_project_root() -> str:
+    # DİQQƏT: hooks/project_root.py-dakı find_project_root ilə EYNİ olmalıdır.
+    # Köhnə versiya səviyyə-səviyyə gedib HƏR səviyyədə marker-lərdən HƏR HANSI
+    # birini tapan KİMİ qayıdırdı (ən yaxın səviyyə qalib gəlir → depth-first).
+    # Hook-lar isə HƏR marker üçün AYRI tam walk-up edir → ən GÜCLÜ marker
+    # (.mla_savings_history.jsonl = real data) dərinlikdən asılı olmayaraq qalib
+    # gəlir (priority-first). Fərq monorepo split-brain yaradırdı: alt-qovluqda
+    # .mcp.json, valideyndə real history olanda server alt-qovluğa, hook-lar
+    # valideynə işarə edirdi. İndi hook-larla eyni priority-first məntiq.
+    start = os.path.abspath(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+    home = os.path.abspath(os.path.expanduser("~"))
+
+    def walk_up(predicate):
+        cur = start
+        for _ in range(8):
+            if cur == home:
+                return None  # ~/.claude qlobal config-dir, layihə kökü deyil
+            try:
+                if predicate(cur):
+                    return cur
+            except OSError:
+                pass
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                return None
+            cur = parent
+        return None
+
+    def _nonempty_history(d):
+        h = os.path.join(d, ".mla_savings_history.jsonl")
+        return os.path.exists(h) and os.path.getsize(h) > 0
+
+    return (
+        walk_up(_nonempty_history)
+        or walk_up(lambda d: os.path.exists(os.path.join(d, ".claude", "settings.json")))
+        or walk_up(lambda d: os.path.exists(os.path.join(d, ".mcp.json")))
+        or walk_up(lambda d: os.path.exists(os.path.join(d, ".mla_enforcement.flag")))
+        or start
+    )
+
+
+PROJECT_ROOT = _resolve_project_root()
+
+# ============================================
 # CHROMADB KONFİQURASİYASI
 # ============================================
 
-# ChromaDB verilənlər bazasının yolu
-CHROMA_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
+# ChromaDB verilənlər bazasının yolu (layihə kökü-nisbi — yuxarıdakı izaha bax)
+CHROMA_DB_PATH = os.path.join(PROJECT_ROOT, "chroma_db")
 
 # ChromaDB collection adı
 COLLECTION_NAME = "code_vectors"
@@ -93,6 +147,12 @@ CONFIDENCE_THRESHOLD = 0.3
 # Graph expansion zamanı əlavə gətirilən chunk sayı
 GRAPH_EXPANSION_COUNT = 2
 
+# Model warm-up (A1): server start-da embedding modelini fonda RAM-a yüklə.
+# Soyuq ilk semantic/auto axtarış 30-60s çəkir — warm-up bunu ~1s-ə endirir,
+# beləcə "auto" mode demək olar həmişə semantic işləyə bilir (real qənaət ↑).
+# Zəif/az-RAM maşında söndürmək üçün: MLA_DISABLE_WARMUP=1
+ENABLE_MODEL_WARMUP = os.getenv("MLA_DISABLE_WARMUP", "").lower() not in ("1", "true", "yes")
+
 # ============================================
 # LLM KONFİQURASİYASI
 # ============================================
@@ -128,8 +188,19 @@ RAG_LIGHT_THRESHOLD = 50_000  # ~200K simvol
 # Debounce vaxtı (saniyə) — çoxsaylı save-ləri birləşdirir
 WATCHER_DEBOUNCE_SEC = 2.0
 
-# Hash store faylı (incremental indexing üçün)
-HASH_STORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".file_hashes.json")
+# Hash store faylı (incremental indexing üçün) — layihə kökü-nisbi
+HASH_STORE_PATH = os.path.join(PROJECT_ROOT, ".file_hashes.json")
+
+# BM25 keyword indeksinin persist faylı (iki fazalı index).
+# Faza 1: xam chunk-lardan BM25 dərhal qurulub buraya yazılır (ML yox, saniyələr)
+# → keyword axtarış embedding bitməsini gözləmədən işləyir.
+# CHROMA_DB_PATH ilə eyni qovluqda (layihə kökü) qalır ki, hər iki proses eyni yeri tapsın.
+BM25_INDEX_PATH = os.path.join(PROJECT_ROOT, ".bm25_index.pkl")
+
+# Embedding encode batch ölçüsü. SentenceTransformer default 32.
+# 128 böyük PHP fayllarında (vendor) zəif maşında RAM spike + upsert crash
+# verirdi (12542 fayl → hamısı xəta) → 32-yə endirildi. Stabil profil.
+EMBED_BATCH_SIZE = 32
 
 # Daxili (builtin) watcher: MCP server-in özündə file system izləməsi.
 # Hooks-dan asılı olmur — VS Code Claude Code, Antigravity, Cursor və s.

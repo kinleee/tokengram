@@ -62,6 +62,8 @@ COMPILED_MODULES = [
     "config",
     "mla_constants",
     "i18n",
+    # 2026-06-11: korrupsiya qoruması (pre-flight + karantin + yazıçı kilidi)
+    "db_guard",
 ]
 
 # 2026-05-14: əvvəlki hamı .pyd-ə keçirildi (bax: setup_cython.py MODULES).

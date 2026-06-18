@@ -31,6 +31,16 @@ CREATE TABLE IF NOT EXISTS licenses (
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
+-- Bir maşın = bir trial. Lokal faylların silinməsi reset vermir,
+-- çünki qeyd fingerprint-ə bağlıdır və serverdə yaşayır.
+CREATE TABLE IF NOT EXISTS trials (
+  fingerprint TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  license_key TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS admin_users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT UNIQUE NOT NULL,

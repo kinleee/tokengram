@@ -50,15 +50,32 @@ import license as _license
 # yüklənməsinə alternativ.
 import conversation_indexer as _convo
 
+# DB guard — ölü prosesin qoyub getdiyi qalıq kilid fayllarını təmizləyir.
+# split-brain: köhnə wheel kilidi paket qovluğuna (`tokengram/`) qoyurdu, yeni
+# kod isə config-dən gələn kanonik qovluğa — ölü-PID lock o köhnə qovluqda qalıb
+# canlı serveri 3 gün stall edə bilir (2026-06-17). clear_stale_locks HƏR İKİ
+# qovluğu süpürür (bax db_guard._candidate_lock_dirs); yalnız ÖLÜ PID-li fayl
+# silinir, canlıya toxunulmur.
+import db_guard
+
+# KRİTİK: bu sidecar fayllar config.PROJECT_ROOT-a (layihə kökü) bağlanır,
+# `Path(__file__).parent`-ə YOX. Kompilyasiya olunan `.pyd` paket qovluğunda
+# (`tokengram/` və ya site-packages) yaşayır → __file__.parent layihə kökü
+# DEYİL. Hook-lar (queue_change.py) və VS Code extension növbəni/flag-ı KÖKƏ
+# yazır; əgər server onları paket qovluğunda axtarsa split-brain olur: növbə
+# kökdə yığılır, drain işçisi boş paket-qovluq faylına baxır → ⟳ N əbədi ilişir
+# (2026-06-17 insidenti). config.PROJECT_ROOT = hook/extension ilə EYNİ walk-up.
+_ROOT = Path(config.PROJECT_ROOT)
+
 # Sessiya analytics — hər search_code çağırışı bura yazılır,
 # Stop hook bunu oxuyur və qənaət hesabatı göstərir.
-SESSION_LOG = Path(__file__).parent / ".mla_session_log.jsonl"
-ENFORCEMENT_FLAG = Path(__file__).parent / ".mla_enforcement.flag"
+SESSION_LOG = _ROOT / ".mla_session_log.jsonl"
+ENFORCEMENT_FLAG = _ROOT / ".mla_enforcement.flag"
 
 # PostToolUse hook-u (queue_change.py) bu fayla redaktə olunmuş yolları yazır.
 # Fon işçisi (aşağıda) periodik olaraq dren edir və yenidən indeksləşdirir.
-PENDING_QUEUE = Path(__file__).parent / ".mla_pending.txt"
-PROCESSING_QUEUE = Path(__file__).parent / ".mla_pending.processing"
+PENDING_QUEUE = _ROOT / ".mla_pending.txt"
+PROCESSING_QUEUE = _ROOT / ".mla_pending.processing"
 
 # Logging — stderr-ə (stdout MCP üçün rezerv olunub)
 logging.basicConfig(
@@ -243,17 +260,119 @@ def _drain_pending_queue() -> int:
 
 _worker_stop_event = threading.Event()
 _worker_thread: Optional[threading.Thread] = None
+_watchdog_thread: Optional[threading.Thread] = None
+
+# LİDER (single-instance) — eyni layihə çox IDE pəncərəsində açılanda hər server
+# öz ~700 MB modelini yükləyirdi (8 GB maşında OOM → proses ölür → növbə ilişir,
+# 2026-06-17 spawn-storm insidenti). İndi yalnız LİDER modeli yükləyir + drain
+# edir; followerlar boş gözləyir. Lider ölərsə/ilişərsə (heartbeat 150s köhnə)
+# növbəti follower lideri avtomatik götürür (bax db_guard.acquire_leader_lock).
+_leader_lock = None  # type: Optional[object]  # db_guard.AdvisoryLock
+
+# Self-heal: növbə irəlilədikcə (kiçildikcə/boşaldıqca) təzələnir. Watchdog
+# bunu izləyir — lider olub növbə dolu ikən uzun müddət irəliləmə olmazsa
+# (drain donub) proses os._exit(70) ilə restart olur → host yenidən qaldırır.
+_last_progress_ts = time.time()
+
+
+def _pending_count() -> int:
+    """Növbədə + drain-də gözləyən (boş olmayan) sətirlərin sayı."""
+    n = 0
+    for qf in (PENDING_QUEUE, PROCESSING_QUEUE):
+        try:
+            n += sum(
+                1 for line in qf.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+        except OSError:
+            pass
+    return n
+
+
+def _ensure_leader() -> bool:
+    """Bu proses bu layihənin lideridirmi? Lider modeli yükləyir + drain edir.
+
+    `acquire_leader_lock(wait=0)` re-entrantdır (özümüzdürsə yenidən qaytarır) və
+    daxildə heartbeat `touch` edir — worker dövrü hər 2s çağırdığı üçün ts təzə
+    qalır. db_guard problemində köhnə davranışa (hamı drain edir) düşürük."""
+    global _leader_lock
+    try:
+        lock = db_guard.acquire_leader_lock(config.CHROMA_DB_PATH, wait_sec=0.0)
+        _leader_lock = lock
+        return lock is not None
+    except Exception as e:
+        logger.warning(f"Leader yoxlaması alınmadı (fallback: lider kimi davam): {e}")
+        _leader_lock = None
+        return True
 
 
 def _worker_loop(poll_interval: float = 2.0) -> None:
-    """Növbəni periodik yoxlayan fon işçisi."""
+    """Növbəni periodik yoxlayan fon işçisi (yalnız lider drain edir).
+
+    GRACE (2026-06-17): wait-then-drain — ilk drain-dən ƏVVƏL bir poll_interval
+    gözləyirik ki, model yükü (ChromaDB/ST) mcp.run() initialize handshake
+    pəncərəsinə düşməsin. Növbə yenə də ilk poll-dan sonra (≤poll_interval)
+    drenlənir → ilişmiş növbə riski yoxdur."""
+    global _last_progress_ts
     while not _worker_stop_event.is_set():
-        try:
-            _drain_pending_queue()
-        except Exception as e:
-            logger.error(f"Fon işçisi dövrü xətası: {e}")
         # `wait` iki funksiya görür: yatma + sürətli stop reaksiyası
         _worker_stop_event.wait(poll_interval)
+        if _worker_stop_event.is_set():
+            break
+        try:
+            if not _ensure_leader():
+                # Follower — lider drain edir; biz RAM-a model yükləmirik.
+                _last_progress_ts = time.time()  # follower stuck sayılmamalıdır
+                continue
+            before = _pending_count()
+            _drain_pending_queue()
+            after = _pending_count()
+            # İrəliləmə = növbə kiçildi və ya boşaldı. (Soyuq model yükü ~70s
+            # ərzində after dəyişmir, amma should_self_heal stale_sec=150 > 70s.)
+            if after == 0 or after < before:
+                _last_progress_ts = time.time()
+        except Exception as e:
+            logger.error(f"Fon işçisi dövrü xətası: {e}")
+
+
+def _watchdog_loop(check_interval: float = 30.0) -> None:
+    """Donmuş drain-i aşkarlayıb prosesi restart edən watchdog (yalnız lider).
+
+    Worker thread drain içində DONARSA (model-yük hangı, ChromaDB yazı hangı)
+    `_worker_loop`-dakı progress yoxlamasına heç vaxt çatmır — ona görə bu AYRI
+    thread müstəqil izləyir. Lider olub növbə dolu ikən `should_self_heal` True
+    qaytararsa (150s+ irəliləmə yoxdur), `os._exit(70)` → Claude Code serveri
+    yenidən qaldırır, start-da `_recover_stale_processing_queue` növbəni bərpa
+    edir. Crash-mid-drain "əbədi ilişmə"sinin (2026-06-17 ekran şəkli) həllidir."""
+    while not _worker_stop_event.is_set():
+        _worker_stop_event.wait(check_interval)
+        if _worker_stop_event.is_set():
+            break
+        try:
+            if _leader_lock is None:          # follower — drain bizim işimiz deyil
+                continue
+            if _pending_count() == 0:         # görüləsi iş yoxdur
+                continue
+            age = time.time() - _last_progress_ts
+            if db_guard.should_self_heal(
+                lock_held=True,               # lider = drain sahibi
+                last_progress_age=age,
+                in_cli_mode=False,
+            ):
+                logger.error(
+                    f"🩹 Self-heal: drain {int(age)}s irəliləmir "
+                    f"({_pending_count()} fayl gözləyir) — restart üçün exit(70)"
+                )
+                try:
+                    db_guard.write_health_event(
+                        config.CHROMA_DB_PATH, "self_heal_restart",
+                        f"drain {int(age)}s no-progress → exit(70)",
+                    )
+                except Exception:
+                    pass
+                os._exit(70)
+        except Exception as e:
+            logger.warning(f"Watchdog dövrü xətası: {e}")
 
 
 def _recover_stale_processing_queue() -> None:
@@ -297,6 +416,20 @@ def _start_background_worker() -> None:
     logger.info("🧵 Fon yenidən-indeksləmə işçisi başladı")
 
 
+def _start_watchdog() -> None:
+    """Self-heal watchdog thread-ini başlat (idempotent)."""
+    global _watchdog_thread
+    if _watchdog_thread is not None and _watchdog_thread.is_alive():
+        return
+    _watchdog_thread = threading.Thread(
+        target=_watchdog_loop,
+        name="mla-self-heal-watchdog",
+        daemon=True,
+    )
+    _watchdog_thread.start()
+    logger.info("🐕 Self-heal watchdog başladı")
+
+
 # ============================================
 # DAXİLİ (BUİLTİN) FAYL İZLƏYİCİSİ
 # ============================================
@@ -332,15 +465,81 @@ def _resolve_watch_directory() -> Optional[str]:
 
 
 def _append_to_pending_queue(paths: list) -> None:
-    """Yolları `.mla_pending.txt`-ə əlavə et (drainer onu dren edəcək)."""
+    """Yolları `.mla_pending.txt`-ə əlavə et (drainer onu dren edəcək).
+
+    Növbədə (.txt) və ya drain-də (.processing) ARTIQ olan yolu atlayır — eyni
+    faylı dəfələrlə save/redaktə etmək növbəni şişirdirdi (drainer onsuz da dedup
+    edir, lakin sayğac və təkrar-embed işi böyüyürdü). Müqayisə hərf-həssasdır
+    (Windows yolları üçün lower())."""
     if not paths:
+        return
+    existing = set()
+    for qf in (PENDING_QUEUE, PROCESSING_QUEUE):
+        try:
+            existing.update(
+                line.strip().lower()
+                for line in qf.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+        except OSError:
+            pass
+    fresh = []
+    seen = set()
+    for p in paths:
+        key = (p or "").strip().lower()
+        if not key or key in existing or key in seen:
+            continue
+        seen.add(key)
+        fresh.append(p)
+    if not fresh:
         return
     try:
         with open(PENDING_QUEUE, "a", encoding="utf-8") as f:
-            for p in paths:
+            for p in fresh:
                 f.write(p + "\n")
     except IOError as e:
         logger.warning(f"Pending queue-ya yazıla bilmədi: {e}")
+
+
+def _snapshot_queue() -> set:
+    """Növbədə (.txt + .processing) HAZIRDA olan yolların lower-case dəsti."""
+    snap = set()
+    for qf in (PENDING_QUEUE, PROCESSING_QUEUE):
+        try:
+            snap.update(
+                line.strip().lower()
+                for line in qf.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+        except OSError:
+            pass
+    return snap
+
+
+def _drop_queue_paths(drop_lc: set) -> None:
+    """Verilən (lower-case) yolları növbədən çıxar, qalanını saxla.
+
+    Tam reindex bitəndə çağırılır: reindex BAŞLAYANDA növbədə olanlar artıq
+    indekslənib, ona görə silinir (bar ⟳N təmizlənir, fon drain təkrar işləmir);
+    reindex GEDƏRKƏN əlavə olunan YENİ dəyişikliklər saxlanır (itki yox)."""
+    if not drop_lc:
+        return
+    for qf in (PENDING_QUEUE, PROCESSING_QUEUE):
+        try:
+            lines = qf.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        kept = [
+            ln for ln in lines
+            if ln.strip() and ln.strip().lower() not in drop_lc
+        ]
+        try:
+            if kept:
+                qf.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            else:
+                qf.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _build_queueing_handler():
@@ -785,6 +984,18 @@ def _cli_reindex(argv: list) -> int:
         print(f"[tokengram] xəta: qovluq tapılmadı: {directory}", file=_sys.stderr)
         return 1
 
+    # Reindex-dən əvvəl ölü-PID qalıq kilidlərini süpür (split-brain orfan lock):
+    # köhnə paket qovluğunda qalan ölü writer.lock canlı reindex-i bloklamasın.
+    try:
+        db_guard.clear_stale_locks(config.CHROMA_DB_PATH)
+    except Exception as _e:
+        print(f"[tokengram] xəbərdarlıq: clear_stale_locks: {_e}", file=_sys.stderr)
+
+    # Növbənin BAŞLANĞIC vəziyyətini götür — bu reindex onları əhatə edəcək, ona
+    # görə sonda silinəcəklər (bar ilişib qalmasın). Reindex gedərkən gələn yeni
+    # dəyişikliklər saxlanacaq.
+    _queue_before = _snapshot_queue()
+
     print(
         f"\n[1/3] 📁 Fayllar skan edilir: {directory}",
         file=_sys.stderr, flush=True,
@@ -822,6 +1033,9 @@ def _cli_reindex(argv: list) -> int:
         f"\n✓ Hazır: {indexed} chunk indekslendi{tail}",
         file=_sys.stderr, flush=True,
     )
+    # Reindex başlayanda növbədə olanları sil → bar ⟳N təmizlənir, fon drain
+    # artıq-indekslənmişi təkrar işləmir, auto-recovery sonsuz dövrəyə düşmür.
+    _drop_queue_paths(_queue_before)
     return 0
 
 
@@ -829,16 +1043,74 @@ def _cli_reindex(argv: list) -> int:
 # ƏSAS GİRİŞ
 # ============================================
 
+def _maybe_start_warmup() -> None:
+    """Embedding modelini fonda əvvəlcədən RAM-a yüklə ki, ilk save-dən sonra
+    fon drain soyuq-yük (~70s 8GB maşında) gözləməsin. config.ENABLE_MODEL_WARMUP
+    (MLA_DISABLE_WARMUP=1 ilə söndürülür) idarə edir. Best-effort: alınmasa
+    drain ilk faylda onsuz da lazy yükləyəcək.
+
+    GRACE (2026-06-17): warmup thread mcp.run() handshake pəncərəsində (ilk ~5s)
+    ChromaDB/modeli yükləməsin — başlanğıcda time.sleep(5) ilə əsas thread-ə
+    initialize handshake-i bitirmək üçün yer açırıq. ST import lazy şəkildə BURADA
+    (worker thread-ində) baş verir — əsas thread bloklanmır."""
+    if not getattr(config, "ENABLE_MODEL_WARMUP", True):
+        logger.info("Model warmup söndürülüb (MLA_DISABLE_WARMUP)")
+        return
+
+    def _warm() -> None:
+        try:
+            # Handshake pəncərəsi üçün grace — əsas thread mcp.run()-a çatsın.
+            time.sleep(5)
+            # Yalnız LİDER modeli əvvəlcədən yükləyir — followerlar RAM yükləmir
+            # (spawn-storm N×700 MB → 1×700 MB). Follower-də search gələrsə model
+            # onsuz da lazy yüklənir (vector_store._ensure_loaded).
+            if not _ensure_leader():
+                logger.info("Bu proses lider deyil — warmup atlanır (RAM qənaəti)")
+                return
+            with _index_lock:
+                _get_store()
+            logger.info("🔥 Embedding modeli warmup tamamlandı (lider)")
+        except Exception as e:
+            logger.warning(f"Warmup xətası (drain lazy yükləyəcək): {e}")
+
+    threading.Thread(target=_warm, name="mla-warmup", daemon=True).start()
+
+
+def serve() -> int:
+    """`-m tokengram` / run_mcp_server.py giriş nöqtəsi.
+
+    run_mcp_server.main() `mcp_server.serve`-i axtarır; YOXDURSA `mcp.run()`-a
+    düşür və fon işçisini, watcher-i, warmup-u HEÇ başlatmır → `.mla_pending.txt`
+    növbəsi heç vaxt drenlənmir (2026-06-17 insidenti: bar ⟳ N-də ilişib qalır).
+    Bütün fon servisləri buradan qaldırılır ki, hər iki giriş yolu eyni olsun."""
+    logger.info("MLA Agent MCP server başladı (stdio)")
+    # Ölü prosesin qalıq kilid fayllarını (kanonik + köhnə paket qovluğu) süpür.
+    try:
+        db_guard.clear_stale_locks(config.CHROMA_DB_PATH)
+    except Exception as _e:
+        logger.warning(f"clear_stale_locks (start) xətası: {_e}")
+    # KRİTİK (2026-06-17): ƏSAS thread-də HEÇ NƏ ağır işləməməlidir mcp.run()-dan
+    # əvvəl. Köhnə `_preimport_ml_libs()` (import sentence_transformers, 9-40s)
+    # əsas thread-i bloklayırdı → mcp.run() asyncio loop-u 30s MCP initialize
+    # handshake deadline-ından sonra başlayırdı → server öldürülürdü (30068ms log).
+    # "Import-lock deadlock" YANLIŞ DİAQNOZ idi (per-module lock-lar, qraflar ayrı).
+    # Model lazy şəkildə vector_store._ensure_loaded-da worker/warmup thread-ində
+    # yüklənir — tarixən işləyən dizayn. Əsas thread mcp.run()-a ~2-3s-də çatmalıdır.
+    _start_background_worker()
+    _start_watchdog()
+    _start_builtin_watcher()
+    _maybe_start_warmup()
+    try:
+        mcp.run()
+    finally:
+        _stop_builtin_watcher()
+    return 0
+
+
 if __name__ == "__main__":
     import sys as _sys
 
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--reindex":
         _sys.exit(_cli_reindex(_sys.argv[2:]))
 
-    logger.info("MLA Agent MCP server başladı (stdio)")
-    _start_background_worker()
-    _start_builtin_watcher()
-    try:
-        mcp.run()
-    finally:
-        _stop_builtin_watcher()
+    _sys.exit(serve())

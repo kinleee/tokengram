@@ -23,8 +23,10 @@ sys.path.insert(0, str(_INSTALL_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from i18n import tr
 from license_gate import enforcement_active
+from project_root import find_project_root
+from atomic_write import write_atomic
 
-PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
+PROJECT_ROOT = find_project_root()
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 ARCH_STATE = PROJECT_ROOT / ".mla_arch_state.json"
 ARCH_DOC = PROJECT_ROOT / ".mla_arch.md"
@@ -59,10 +61,9 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    ARCH_STATE.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # Atomic: kill -9 və ya power loss-da `.mla_arch_state.json` korrupt qalmasın
+    # (load_state silent reset edirdi — bütün files/recent_searches itirdik).
+    write_atomic(ARCH_STATE, json.dumps(state, ensure_ascii=False, indent=2))
 
 
 def render_doc(state: dict) -> None:
@@ -116,7 +117,7 @@ def render_doc(state: dict) -> None:
             extra = f" +{len(files)-5}" if len(files) > 5 else ""
             lines.append(f"- **{ts}** — `\"{query}\"` → {files_str}{extra}")
 
-    ARCH_DOC.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_atomic(ARCH_DOC, "\n".join(lines) + "\n")
 
 
 def main() -> int:
@@ -146,6 +147,11 @@ def main() -> int:
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        # Yalnız search_code event-ləri arch doc-a düşür — read_block /
+        # grep_search / bash_inspect / read_pass arch-da yer tutmasın
+        # (əvvəl recent_searches boş "no results" sətirləri ilə dolurdu).
+        if entry.get("type", "search_code") != "search_code":
             continue
 
         files_raw = entry.get("files", {})

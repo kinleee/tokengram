@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { SignJWT, importPKCS8 } from 'jose';
+import { SignJWT, importPKCS8, importSPKI, jwtVerify } from 'jose';
 
 type Env = {
   DB: D1Database;
@@ -150,21 +150,32 @@ app.post('/activate', async (c) => {
 // ============================================================
 app.post('/validate', async (c) => {
   // Bu endpoint öncəki token-i RE-issue edir.
-  // Köhnə token verify yalnız fingerprint və user_id-ni almaq üçündür.
-  // Real təhlükəsizlik yoxlaması DB-də yenidən aparılır.
+  // Köhnə token SIGNATURE doğrulanmalı (issuer biz olmuşuq), lakin EXPIRY
+  // ignore olunur — expired refresh halal use-case-dir. Signature olmasa
+  // istənilən şəxs sırf base64 payload qoyub yeni JWT ala bilərdi.
   const authHeader = c.req.header('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
     return c.json({ error: 'missing_token' }, 401);
   }
   const oldToken = authHeader.slice(7);
 
-  // Köhnə token-dən claim-ləri parsla (verify etmədən, çünki expired ola bilər)
+  if (!c.env.JWT_PUBLIC_KEY) {
+    return c.json({ error: 'server_misconfigured' }, 500);
+  }
+
   let claims: { user_id?: string; fingerprint?: string; license_key?: string };
   try {
-    const [, payload] = oldToken.split('.');
-    claims = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
-  } catch {
-    return c.json({ error: 'malformed_token' }, 400);
+    const publicKey = await importSPKI(c.env.JWT_PUBLIC_KEY, 'RS256');
+    // currentDate çox uzaq keçmişə qoyularaq expired token qəbul olunur,
+    // amma signature və issuer hələ yoxlanılır.
+    const verified = await jwtVerify(oldToken, publicKey, {
+      algorithms: ['RS256'],
+      issuer: 'mla-license-server',
+      currentDate: new Date(0),
+    });
+    claims = verified.payload as typeof claims;
+  } catch (e) {
+    return c.json({ error: 'invalid_token_signature' }, 401);
   }
 
   if (!claims.user_id || !claims.fingerprint || !claims.license_key) {

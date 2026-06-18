@@ -37,6 +37,8 @@ MODULES = [
     "config.py",
     "mla_constants.py",
     "i18n.py",
+    # 2026-06-11: korrupsiya qoruması (pre-flight + karantin + yazıçı kilidi)
+    "db_guard.py",
 ]
 
 def _build():

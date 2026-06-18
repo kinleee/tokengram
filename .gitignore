@@ -2,6 +2,9 @@
 chroma_db/
 # Backup snapshots of broken/migrated DBs
 chroma_db.broken-*/
+# Corruption quarantine (db_guard auto-renames a corrupt DB aside) + marker
+chroma_db.corrupt-*/
+*.quarantine_pending
 
 # API açarları
 .env
@@ -62,6 +65,22 @@ models_cache/
 .mla_arch.md
 .mla_arch_state.json
 
+# Tokengram BM25 keyword index (rebuildable from chroma_db in seconds)
+.bm25_index.pkl
+
+# Tokengram process locks + handoff markers (transient, per-machine)
+.tokengram.writer.lock
+.tokengram.drainer.lock
+.tokengram.leader.lock
+.tokengram.reindex.want
+.tokengram.*.lock.tmp.*
+
+# Tokengram DB self-heal health event (status-bar diagnostic)
+.mla_db_health.json
+
+# Tokengram session-log atomic-flush temp (Stop hook rename target)
+.mla_session_log.jsonl.processing.*
+
 # Müvəqqəti append/edit faylları
 _tmp_*.md
 
@@ -99,3 +118,27 @@ _install_simulate/
 
 # Node deps (admin/license servers — restored via `npm ci` on the box)
 node_modules/
+
+# >>> Tokengram (auto-managed) — runtime artifacts, do not commit >>>
+chroma_db/
+chroma_db.broken-*/
+chroma_db.corrupt-*/
+.bm25_index.pkl
+.file_hashes.json
+.mla_pending.txt
+.mla_pending.processing
+.mla_session_log.jsonl
+.mla_session_log.jsonl.processing.*
+.mla_savings_history.jsonl
+.mla_savings_history.jsonl.bak.*
+.mla_enforcement.flag
+.mla_arch.md
+.mla_arch_state.json
+.mla_db_health.json
+.tokengram.writer.lock
+.tokengram.drainer.lock
+.tokengram.leader.lock
+.tokengram.reindex.want
+.tokengram.*.lock.tmp.*
+*.quarantine_pending
+# <<< Tokengram (auto-managed) <<<

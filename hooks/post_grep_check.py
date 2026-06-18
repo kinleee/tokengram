@@ -16,9 +16,14 @@ _INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(_INSTALL_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS, estimate_tokens
-from license_gate import enforcement_active
-from project_root import find_project_root
+try:
+    from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS, estimate_tokens
+    from license_gate import enforcement_active
+    from project_root import find_project_root
+    from atomic_write import append_atomic
+except Exception:
+    # Dependency import alınmadı — heç vaxt tool-u block etmə, səssiz çıx.
+    sys.exit(0)
 
 PROJECT_ROOT = find_project_root()
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
@@ -81,12 +86,7 @@ def main() -> int:
         "estimated_baseline_tokens": estimated_baseline,
         "estimated_actual_tokens": estimated_actual,
     }
-    try:
-        with open(SESSION_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-
+    append_atomic(SESSION_LOG, json.dumps(record, ensure_ascii=False))
     return 0
 
 

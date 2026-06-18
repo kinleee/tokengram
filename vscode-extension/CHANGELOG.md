@@ -2,6 +2,156 @@
 
 All notable changes to the Tokengram VS Code extension will be documented here.
 
+## [0.1.59] — 2026-06-17 — ships wheel 0.1.30
+
+### Fixed — the per-file index queue (`⟳ N`) now actually starts and drains to zero
+Three latent engine bugs meant a normally-launched MCP server never ran its background indexer — so edited files queued (`⟳ N`) but nothing ever indexed them, and the count stuck forever:
+- **Background worker never started.** The `-m tokengram` entrypoint looked for a `serve()` function that didn't exist and silently fell back to a no-op path that started no drain worker. Added `serve()` so the worker, file watcher, and lazy model warm-up all start on every launch.
+- **Queue watched the wrong folder (split-brain).** The pending-queue / state sidecar files were resolved relative to the compiled package directory instead of the project root, so the drainer watched an empty path while the real queue piled up at the project root. They now resolve to the same project root the hooks and status bar use.
+- **Server was killed before it could serve (30 s handshake timeout).** A heavy model pre-import ran on the main thread *before* the MCP handshake; on low-RAM machines that import (10–40 s) pushed the MCP `initialize` past Claude Code's 30 s connection deadline, so the server was killed before it could connect or drain. The pre-import is removed; the model now loads lazily on a background thread *after* the handshake. The server now connects in ~1–3 s.
+
+Net effect: a single edit shows `⟳ 1` and ticks down to `0`; the spinner disappears when indexing finishes.
+
+### Fixed — stale dead-process lock files are cleaned across both lock locations
+- Dead-process leftover lock files (`.tokengram.*.lock`) are now swept from both the canonical project-root location **and** the legacy package directory, so an orphaned lock from an old build can no longer wedge a live server. Only dead-PID locks are removed; live locks are never touched.
+
+### Changed — build/dev directories excluded from auto-indexing
+- `build_tmp/`, `dist_compiled/`, and the `tokengram/` build-staging directory are now excluded from the file watcher, so rebuilding the engine no longer floods the queue with build-artifact paths.
+
+## [0.1.58] — 2026-06-17 — ships wheel 0.1.29
+
+### Fixed — the background index queue no longer freezes at "N files pending" (multi-window RAM livelock)
+- On a memory-constrained machine with several VS Code windows open, the per-file indexing queue could get stuck (e.g. `⟳ 97` that never decreased). Root cause: the background drainer ran on **every** MCP server, so a non-leader server would cold-load the ~700 MB embedding model just to drain — with 3 windows that meant 2–3 concurrent model loads, the machine paged everything to swap, and the drainer wedged in native code holding the write lock. The no-progress self-heal then couldn't even execute its own `os._exit` (its thread was starved), so the frozen server held the locks indefinitely and the queue never drained.
+- Fix (wheel 0.1.29): **only the leader server drains/indexes.** The leader is the single instance that already warms the embedding model, so indexing never triggers a second model load — eliminating the RAM thrash that caused the freeze. If the leader dies, a follower is promoted within seconds and resumes draining; the `.processing` hand-off already prevents file loss. Result: the `⟳ N` count now ticks down to zero and the spinner disappears when indexing finishes, even with multiple windows open.
+
+## [0.1.57] — 2026-06-17
+
+### Fixed — `git add` no longer fails on the locked index lock file
+- A held `.tokengram.writer.lock` (kept open by the running MCP server) cannot be read by `git`, so `git add .` failed **fatally** ("Permission denied … fatal: adding files failed") in any project where the lock file was not yet git-ignored — and it took the entire staging operation down with it, so even the files you *did* want to add were not staged. The extension now applies the Tokengram `.gitignore` block to **already-configured** projects on activation (previously only fresh setup got it), so existing projects are protected after one window reload. Idempotent (sentinel-guarded); only writes in a git repo or where a `.gitignore` already exists.
+
+## [0.1.56] — 2026-06-17
+
+### Fixed — status bar no longer flickers yellow during normal work
+- The `DATA RESET` (yellow) warning used to strobe yellow↔green every few seconds: the Stop hook empties the session log after each task, which momentarily flipped the bar into the "data reset" state even while indexing was running and work was happening. The warning is now shown **only when the system is genuinely quiet** — no files indexing and no tasks in the last 24h — so a freshly-reset-but-actively-working project stays green. (The reset notice still appears on a truly idle bar, as intended.)
+
+### Added — auto-index on editor save + visible pending count
+- Saving a file in the VS Code editor (Ctrl+S) now **immediately** queues it for indexing and the status bar shows the spinning `⟳ N` badge the instant you save — previously only Claude Code edits (via the PostToolUse hook) and the slower Python file-watcher (2 s debounce) caught saves, so the spinner often never appeared. No new process is spawned: the save handler only appends to the index queue; the already-running MCP background worker does the embedding (no spawn-storm / RAM cost). Filters mirror the indexer (supported extensions, excluded dirs), respects the OFF toggle, and debounces rapid re-saves.
+- The pending-files badge now appears for **any** pending file (was gated at ≥ 5, so small 1–3 file edits never showed it). The bar also watches `.mla_pending.processing`, so the badge clears promptly when the drain finishes instead of waiting for the 5 s poll.
+
+### Changed — tidy project folder (artifacts no longer clutter the explorer or git)
+- Tokengram's per-machine runtime files (`chroma_db/`, `.tokengram.*.lock`, `.bm25_index.pkl`, `.mla_*`, pending queue, savings history, …) are now **hidden from the VS Code Explorer by default** via the extension's `files.exclude` contribution — the project folder looks clean, the files still exist on disk and keep working.
+- Setup now appends a guarded Tokengram block to the project's `.gitignore` (idempotent; only in a git repo / where a `.gitignore` already exists) so these artifacts never land in commits. The repo's own `.gitignore` also closed gaps (`.bm25_index.pkl`, the three `.tokengram.*.lock` files, `chroma_db.corrupt-*`, health JSON, flush temps).
+- `Reset savings history` now keeps only the **2 most recent** `.bak` backups instead of accumulating one per reset (folders had grown a dozen+ stale backups).
+
+## [0.1.55] — 2026-06-17
+
+### Added — automatic server-side freeze recovery (ships wheel 0.1.28, from a 3-agent design)
+
+The "Refresh Tokengram" button (0.1.54) recovers a frozen index on demand. This release makes recovery **automatic**, so end users never hit a dead-end even without clicking anything:
+
+- **No-progress self-heal watchdog.** A server that holds the write lock but makes no database progress for over 150 s is treated as frozen: it writes a health event and restarts itself, and Claude Code respawns a clean server that clears the stale locks and resumes the queue. No data loss (writes are serialized + atomically renamed); it never fires when idle or during a normal cold model load, and the one-shot Re-index CLI is exempt.
+- **Single-instance leader election.** When several windows spawn several servers, only the **leader** loads the ~700 MB embedding model; the others stay lightweight and answer searches in fast mode, loading the model lazily only if a semantic query actually arrives. This collapses the multi-window memory pressure (3×700 MB → 1×700 MB) that was the root of the index-freeze livelocks on low-RAM machines. Indexing still runs on every server (already single-writer–coordinated), so nothing is lost.
+- Also in wheel 0.1.28: dead-process lock files (including orphan `.lock.tmp.<pid>` atomic-write leftovers) are swept on start/reindex, and the manual Re-index no longer races the background drainer for the write lock.
+
+## [0.1.54] — 2026-06-17
+
+### Changed — "Refresh status bar" → "Refresh Tokengram" (one-click freeze recovery)
+
+- **The menu item is now a real recovery button.** Previously it only touched a file's mtime to repaint the status bar. Now, when the index is frozen — a server holds the write lock but the database has made no progress for over two minutes (the multi-window "another process is still indexing" / "wait a minute" dead-end) — the button **terminates the frozen server process(es)** so Claude Code respawns a clean one, **clears stale lock files left by dead processes** (including orphan `.tokengram.*.lock.tmp.<pid>` atomic-write leftovers), then offers a one-click **Re-index now**. No terminal required.
+- The frozen process's PID is read even while the write lock is held (the lock pins only the first byte; the owner JSON lives at offset 1).
+- When nothing is frozen, the button still refreshes the bar and silently sweeps any dead-process lock files.
+
+## [0.1.53] — 2026-06-11
+
+### Fixed (first-run reliability — from a 3-agent reindex audit). Ships wheel 0.1.27.
+
+- **Re-index now repairs stale `.mcp.json` files.** Configs written by old extension versions lacked the offline environment flags (`HF_HUB_OFFLINE` etc.), which could hang the embedding phase on a HuggingFace network check. The Re-index button now patches the missing keys into the existing `tokengram` entry — user-set values, command and args are never touched.
+- **Keyless machines get a trial offer right after Re-index** instead of a confusing search failure later. If no license key is present, a notification offers "Start free trial" (one-time internet needed) and the savings counter starts immediately.
+- **Hooks no longer reach the network on keyless machines** (wheel 0.1.27). The license gate now returns instantly when no key file exists — previously the 0.1.26 trial flow could stall a hook for 10-20 s when offline. Trials are started only by the MCP server or the extension, never from a hook.
+
+## [0.1.52] — 2026-06-11
+
+### Added (free trial + closed dev-mode hole). Ships wheel 0.1.26.
+
+- **Automatic free trial.** First run without a license key now requests a trial from the license server (one trial per machine, bound to the machine fingerprint server-side — deleting local files does not reset it; duration is server-controlled). The status bar shows a `trial Nd` countdown badge while the trial is active.
+- **New `TRIAL ENDED` status-bar state.** When the trial expires the bar shows a calm conversion CTA instead of a red error — nothing breaks, the agent keeps working, only token savings stop. The tooltip shows your own savings from the trial.
+- **Dev-mode bypass structurally closed in release builds** (wheel 0.1.26). `TOKENGRAM_DEV_MODE=1` no longer has any effect in the compiled wheel — dev mode is only possible in a source checkout. A release smoke test now asserts this on every build.
+- **License server: expired subscriptions can no longer refresh tokens.** `/activate` and `/validate` now check the subscription period end — previously an expired `trialing`/manual subscription could renew its JWT forever.
+
+## [0.1.51] — 2026-06-11
+
+### Fixed (false "corruption" message on Re-index + lock starvation). Ships wheel 0.1.25.
+
+- **Re-index no longer reports "Index corruption detected" when the index is healthy.** The CLI used exit code 3 for two very different failures — real corruption *and* a plain writer-lock timeout. When the background queue drain happened to hold the lock for more than 90 s (cold model load right after a reload), the button showed the scary corruption message even though nothing was corrupt. Lock timeout is now exit code 4 with an honest "another process is still indexing — wait a minute and try again" message.
+- **The background drain can no longer starve the Re-index button.** The drain worker used to hold the inter-process writer lock for a whole batch (up to 20 files — minutes under a cold model). It now acquires/releases the lock per file, so a user-initiated re-index grabs the lock within seconds; the drain re-queues its remaining files and resumes after the re-index finishes.
+- **Cython-generated `.c`/`.cpp` files are no longer indexed** (wheel 0.1.25). Files starting with the standard `Generated by Cython` banner are machine output, not source — on a machine that builds native wheels they accounted for 6 364 of 7 659 indexed chunks, drowning search results and quadrupling re-index time. Detected by content signature, so hand-written C projects are unaffected.
+
+## [0.1.50] — 2026-06-11
+
+### Fixed (orphan server processes + cold semantic search). Ships wheel 0.1.24.
+
+- **MCP server processes no longer linger after their session ends.** The production entry path (`python -m tokengram`) called `mcp.run()` directly and skipped every startup routine — the parent-death watchdog, the model warm-up and the background re-index worker never started. On top of that, the old watchdog only watched `os.getppid()`, which on Windows is the venv *launcher* (it never dies before its child), so even when it did run it could never fire. Observed result: up to 4 zombie `-m tokengram` processes, ~700 MB RAM each.
+- **New three-layer shutdown** (wheel 0.1.24): (1) the watchdog opens SYNCHRONIZE handles to both the launcher *and* its parent (the real owner — Claude Code/VS Code) and exits when either dies, immune to PID reuse; (2) a stdin-pipe sentinel (`PeekNamedPipe`) detects a broken/closed pipe even if the stdio reader thread is stuck; (3) after `mcp.run()` returns the process hard-exits (`os._exit`), so no stray non-daemon thread can keep it alive. Disable with `MLA_DISABLE_PARENT_WATCH=1`.
+- **First semantic search is no longer minutes-cold.** Because warm-up never ran in production, the first `semantic` query paid the full model load on demand (50 s on an idle machine; ~10 min observed under multi-process contention). With `serve()` wiring warm-up at startup, a warm semantic query answers in ~1-2 s. *Known limitation (pre-existing, not new in this release):* on some Windows machines the in-server model load can stall for minutes (DLL loader-lock contention between torch/scipy extension loading and event-loop thread spawns — confirmed via py-spy; zero CPU, machine/timing-dependent). `auto` mode keeps falling back to fast (BM25) until the model is warm, so searches never block on it, and shutdown is unaffected (verified with a deliberately wedged warm-up thread).
+- **Background re-index worker + built-in file watcher now actually start in production** — Edit/Write queue draining no longer depends on hook-side triggers alone (likely cause of historical "N files stuck in queue" reports).
+- Verified by isolation tests against the installed wheel: stdin EOF → exit; launcher killed → child exits; owner killed abruptly → server exits; 20 s with a live owner → no false suicide.
+
+## [0.1.49] — 2026-06-10
+
+### Changed (latency: drop per-call Grep/Bash analytics hooks). Same wheel (0.1.23).
+
+- **Terminal commands and Grep are no longer slowed by a hook.** The `Grep` and `Bash` PostToolUse hooks spawned a fresh Python process (~90 ms each) on *every* call purely to record savings analytics — they never affected the tool's behavior. They are now unwired, so Grep/Bash run with zero added latency. (`pre_read` on Read and the Edit/Write index-queue hook are unchanged.)
+- **Savings bar now reflects code-search/reading savings.** With the Grep/Bash events gone, the savings counter is computed from `search_code` (logged in-process by the MCP server, no latency) plus Read events — i.e. the tokens Tokengram saves on getting code context. The full-read events (`read_pass`) still count as spend, so the percentage stays honest; it's now scoped to code retrieval rather than diluted by unrelated terminal output. No change to the savings math itself — it self-adjusts to the events present.
+- The `post_grep_check.py` / `post_bash_check.py` scripts remain on disk (only unwired), so this is fully reversible by reinstalling the previous build.
+
+## [0.1.48] — 2026-06-10
+
+### Changed / Fixed (incremental re-index robustness + honest UI + queue hygiene). Ships wheel 0.1.23.
+
+- **Interrupted re-index no longer restarts from zero.** The file-hash store was written only once at the very end of a re-index, so closing the window / Cancel / a parent-death exit mid-run lost all progress and the next run re-embedded everything. Hashes are now persisted **per batch** — a file's hash is saved as soon as all of its chunks are written — so an interrupted re-index resumes and only embeds what's left. (A file's chunks may span batches; its hash is recorded only after its last chunk lands, so a partially-indexed file is never wrongly skipped.)
+- **The re-index menu item no longer claims "from scratch."** It is incremental (only changed files; first run is full); the label/description now say so in both English and Azerbaijani.
+- **Stale "N files pending" badge cleared.** A successful re-index now clears the background queue (`.mla_pending.txt` / `.mla_pending.processing`), so ghost entries (e.g. deleted temp files, duplicates) stop inflating the spinning indexing badge. The queue hook also no longer enqueues files living under the OS temp directory.
+- **Corrupt-but-locked re-index shows a clear message.** When the index is corrupt and another process holds it open, the button now says "Close Claude Code completely, then click Re-index again" instead of a generic "exited with code 3."
+
+## [0.1.47] — 2026-06-10
+
+### Fixed (corrupt-index self-heal — `Error loading hnsw index`). Ships wheel 0.1.22.
+
+- **A corrupt vector index now repairs itself instead of dead-ending re-index.** If a previous indexing process was killed mid-write, the on-disk HNSW segment could be left corrupt; the next (incremental) re-index then failed with `chromadb … Error loading hnsw index / Error sending backfill request to compactor` and there was no recovery path short of manually deleting the database. The re-index CLI now **probes the index health up front** and, on detecting corruption, moves the broken database aside to `chroma_db.corrupt` and rebuilds a clean one from scratch — automatically, no data loss (the index is derived from your source; your code is never touched).
+- **The recovery actually releases the database on Windows.** ChromaDB caches its client in a process-wide `SharedSystemClient`, so dropping the reference wasn't enough to free the SQLite/HNSW file handles — the move-aside step failed with `WinError 5 Access denied`. The repair now clears that cache (and retries the move with backoff) before renaming, so the rebuild succeeds in-process. (Validated: without the cache-clear the rename fails 5/5; with it, it succeeds.) If another live process is still holding the database open, it returns a clear "close Claude Code and re-index again" message instead of failing cryptically.
+
+> This supersedes 0.1.45/0.1.46 (includes the `__main__.py` install-repair fix as well). Updating triggers a one-time venv reinstall.
+
+## [0.1.45] — 2026-06-10
+
+### Fixed (tester install repair — `No module named tokengram.__main__`)
+
+- An older wheel shipped without `tokengram/__main__.py`, so `python -m tokengram` (which runs **both** the MCP server and the re-index CLI) failed with `No module named tokengram.__main__` — the server and re-index were dead on those machines. Three-part fix: (1) the wheel version is bumped so the extension re-installs the venv instead of short-circuiting on an equal version; (2) the extension now **detects a broken install** (missing `__main__.py`) and repairs the venv even when the version compare says "already up to date"; (3) the build pipeline now **guarantees** `__main__.py`/`__init__.py` are always present in the wheel (writes them if missing + fail-fast guard).
+
+> Existing testers: updating to this version triggers a one-time venv repair on first activation — no manual steps.
+
+## [0.1.44] — 2026-06-10
+
+### Fixed (re-index reliability + a process leak). Ships wheel with three core fixes.
+
+- **Re-index no longer produces an unreadable index.** The Re-index button runs the indexer as a separate one-shot process; on ChromaDB 1.5.8 that process wrote the vectors but exited before the HNSW segment was compacted, so the live MCP server then failed to open it (`Error loading hnsw index`) and search returned nothing. The indexer now forces a compaction query before exiting, so the on-disk index is always readable by the server. (Confirmed with a two-phase test: build+query+exit → reopens fine; build+exit → fails.)
+- **Re-index is now incremental.** Previously every re-index wiped the whole database and re-embedded all files (minutes, even if nothing changed). It now skips unchanged files via an MD5 hash check and only re-embeds new/changed ones — routine re-index is seconds. Deleted files are pruned; the keyword (BM25) index still covers the full corpus. First run on an empty index still does a full build. (A full rebuild is still available via the `--reindex … --fresh` CLI for format changes/recovery.)
+- **No more orphaned Python process after closing a window.** On Windows a child process isn't killed when its parent dies, so two things leaked: (1) a re-index spawned by the extension kept running if you closed the window mid-index — the extension now tracks and kills it on deactivate/cancel; (2) the MCP server itself lingered when Claude Code didn't terminate it on window close — the server now watches its parent and self-exits when the parent dies. Opt out with `MLA_DISABLE_PARENT_WATCH=1`.
+- Model/tokenizer caches (`.fastembed_cache`) are excluded from indexing (were adding ~700 chunks of noise).
+
+> Activation: reinstall (bundled wheel → venv) and reload. The re-index button is now cancellable and incremental.
+
+## [0.1.43] — 2026-06-09
+
+### Changed (token-savings engine — bigger real savings + an honest bar). Ships wheel 0.1.19.
+
+- **Search picks its own mode now (`auto` default).** `search_code` routes each query automatically: symbol/identifier lookups → fast BM25; natural-language/conceptual questions → semantic embeddings. The old default was BM25-only, so conceptual queries returned weak hits and the agent fell back to reading whole files (zero savings). `auto` falls back to fast when the embedding model isn't warm, so it never blocks.
+- **Embedding model warms up at server start.** The first semantic search used to cost 30–60 s (cold model load), which is why everyone stayed on keyword-only search. The model now loads in a background thread when the MCP server starts → semantic search is ready (~1 s). Opt out on low-RAM machines with `MLA_DISABLE_WARMUP=1`.
+- **Results carry line anchors + a "don't read the whole file" nudge.** Each hit shows `path:start-end` and tells the agent to use a bounded `Read(offset, limit)` instead of re-reading the entire file — turning "search then full read" into "search then small read". (Re-index to populate anchors on existing code.)
+- **The savings bar no longer counts phantom savings.** If the agent searched a file and then fully read it anyway, that search saved nothing — but the old math still credited it (a big part of "bar says 90%, invoice says 20%"). The Stop hook now zeroes a search's credited baseline when the same file is fully read in the same task, so the percentage reflects reality.
+
+> Activation: reinstall (bundled wheel 0.1.19 → venv) and reload. The bar-accuracy fix applies as soon as hooks are reinstalled; the search changes apply once the MCP server restarts on the new wheel.
+
 ## [0.1.36] — 2026-06-04
 
 ### Fixed (license validation — kills `network_error:AbortError` for testers)

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """PreToolUse hook — Read tool-u indekslənmiş fayllar üçün tənzimləyir.
 
-İki səviyyə:
-  >= THRESHOLD_BLOCK  → exit 2 (block) + search_code istifadəsi tələb olunur
-  >= THRESHOLD_WARN   → exit 0 (allow) + yumşaq məsləhət (stderr)
+WARN-ONLY (heç vaxt block etmir — block redaktəni sındırırdı):
+  >= THRESHOLD_WARN   → exit 0 (allow) + yumşaq məsləhət: search_code daha sərfəli (stderr)
   < THRESHOLD_WARN    → exit 0 (silent allow)
+chunked Read (limit) və hər ölçü fayl həmişə icazəlidir.
 """
 import json
 import os
@@ -23,13 +23,27 @@ if sys.platform == "win32":
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS, estimate_tokens
-from i18n import tr
-from license_gate import enforcement_active
-from project_root import find_project_root
+try:
+    from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS, estimate_tokens
+    from i18n import tr
+    from license_gate import enforcement_active
+    from project_root import find_project_root
+    from atomic_write import append_atomic
+except Exception:
+    # Dependency moduldan biri tapılmadı (natamam install və s.) — Read-i HEÇ
+    # vaxt block etmə. Fail open: səssiz icazə ver (exit 0 = allow).
+    sys.exit(0)
 
-THRESHOLD_BLOCK = 50
-THRESHOLD_WARN = 30
+# DİQQƏT: artıq HARD-BLOCK YOXDUR. Əvvəl 50+ sətirlik faylın tam Read-i
+# bloklanırdı (exit 2) → Edit əvvəlcə Read tələb etdiyi üçün redaktə tamamilə
+# sınırdı, istifadəçi /MlaOff-a məcbur olurdu. Bu səhv idi: enforcement-in
+# məqsədi böyük EXPLORATION oxumalarını search_code-a yönləndirib token qənaət
+# etməkdir — redaktəni dağıtmaq YOX.
+#
+# İndi hook YALNIZ XƏBƏRDARLIQ edir (heç vaxt block): böyük faylda "search_code
+# daha sərfəlidir" deyir, amma oxumağa həmişə icazə verir. Qənaət agent
+# təklifə əməl edib search_code/chunked Read işlədəndə gəlir.
+THRESHOLD_WARN = 250
 
 # Average chars per line for estimating "limit-bounded Read" cost when only
 # `limit` is specified but actual content isn't measured yet. ~80 chars/line.
@@ -38,18 +52,14 @@ AVG_CHARS_PER_LINE = 80
 
 def _log_read_pass(session_log, file_path, estimated_tokens, reason):
     """Bypassed / silent-allowed Read-i real-spend bucket-inə salır."""
-    try:
-        record = {
-            "ts": time.time(),
-            "type": "read_pass",
-            "file": str(file_path),
-            "reason": reason,
-            "estimated_tokens": int(estimated_tokens),
-        }
-        with open(session_log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    record = {
+        "ts": time.time(),
+        "type": "read_pass",
+        "file": str(file_path),
+        "reason": reason,
+        "estimated_tokens": int(estimated_tokens),
+    }
+    append_atomic(session_log, json.dumps(record, ensure_ascii=False))
 
 
 def _log_read_chunked(session_log, file_path, lines, limit, baseline, spent):
@@ -59,20 +69,16 @@ def _log_read_chunked(session_log, file_path, lines, limit, baseline, spent):
     qeydə alınır. savings_report.py bunları həm "saved", həm "real_spent"
     bucket-lərinə düzgün böləcək.
     """
-    try:
-        record = {
-            "ts": time.time(),
-            "type": "read_chunked",
-            "file": str(file_path),
-            "lines": int(lines),
-            "limit": int(limit),
-            "estimated_baseline_tokens": int(baseline),
-            "estimated_spent_tokens": int(spent),
-        }
-        with open(session_log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    record = {
+        "ts": time.time(),
+        "type": "read_chunked",
+        "file": str(file_path),
+        "lines": int(lines),
+        "limit": int(limit),
+        "estimated_baseline_tokens": int(baseline),
+        "estimated_spent_tokens": int(spent),
+    }
+    append_atomic(session_log, json.dumps(record, ensure_ascii=False))
 
 
 def main():
@@ -113,6 +119,39 @@ def main():
     session_log = project_root / ".mla_session_log.jsonl"
     limit_val = tool_input.get("limit")
 
+    # Stat-əsaslı early-out: faylın 1MB-dan böyükdürsə, hətta read_bytes
+    # 30-100ms IO əlavə edir (5 paralel Read = 500ms görünən Claude lag).
+    # Limit yoxdursa və fayl çox böyükdürsə block ediləcəyi onsuz da
+    # bəllidir — full read əvəzinə baseline-i stat.st_size ilə təxmin et.
+    try:
+        file_size = file_path.stat().st_size
+    except OSError:
+        sys.exit(0)
+
+    # ~80 char/line ortalama → byte-based heuristic line count.
+    # Real read yalnız böyük fayllarda və ya limit-bounded Read-də olsun.
+    if limit_val is None and file_size > 200_000:
+        # Çox böyük fayl — HARD-BLOCK ETMİRİK (block redaktəni sındırır).
+        # Yalnız xəbərdarlıq + icazə. Perf üçün read_bytes etmirik, baseline-i
+        # stat ilə təxmin edirik. Read faktiki baş verir → real spend kimi say.
+        estimated_line_count = max(THRESHOLD_WARN + 1, file_size // 80)
+        estimated_baseline = estimate_tokens(b"x" * file_size)
+        record = {
+            "ts": time.time(),
+            "type": "read_warn",
+            "file": str(file_path),
+            "lines": int(estimated_line_count),
+            "estimated_baseline_tokens": estimated_baseline,
+        }
+        append_atomic(session_log, json.dumps(record, ensure_ascii=False))
+        _log_read_pass(session_log, file_path, estimated_baseline, "large_allow")
+        print(
+            tr("read_warn", name=file_path.name,
+               lines=int(estimated_line_count), est_tokens=estimated_baseline),
+            file=sys.stderr,
+        )
+        sys.exit(0)
+
     try:
         content = file_path.read_bytes()
     except OSError:
@@ -144,42 +183,19 @@ def main():
         )
         sys.exit(0)
 
-    if line_count >= THRESHOLD_BLOCK:
-        # Block hadisəsini session_log-a yaz — savings_report təxmini qənaəti
-        # baseline-ə əlavə edəcək (biz 0 token istifadə etdik).
-        try:
-            record = {
-                "ts": time.time(),
-                "type": "read_block",
-                "file": str(file_path),
-                "lines": line_count,
-                "estimated_baseline_tokens": estimated_baseline,
-            }
-            with open(session_log, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except OSError:
-            pass
-
-        print(tr("read_block", name=file_path.name, lines=line_count), file=sys.stderr)
-        sys.exit(2)
-
     if line_count >= THRESHOLD_WARN:
         # Soft warning — user (və ya AI) hələ də Read edə bilər, amma biz
         # event-i log-a salırıq ki, savings_report "soft" kateqoriyasında
         # tracking aparsın. Bu BASELINE-a əlavə olunmur (Read faktiki baş
         # verə bilər), yalnız MLA-nın guidance işini sayır.
-        try:
-            record = {
-                "ts": time.time(),
-                "type": "read_warn",
-                "file": str(file_path),
-                "lines": line_count,
-                "estimated_baseline_tokens": estimated_baseline,
-            }
-            with open(session_log, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except OSError:
-            pass
+        record = {
+            "ts": time.time(),
+            "type": "read_warn",
+            "file": str(file_path),
+            "lines": line_count,
+            "estimated_baseline_tokens": estimated_baseline,
+        }
+        append_atomic(session_log, json.dumps(record, ensure_ascii=False))
 
         # Warn-da fayl yenə də oxunur → real_spent-ə daxil et
         _log_read_pass(session_log, file_path, estimated_baseline, "warn_allow")

@@ -25,20 +25,26 @@ import os
 import sys
 from pathlib import Path
 
-# Layihə kökü Claude Code-dan gəlir; install layout-da hook ~/.tokengram/-dədir.
-PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
-QUEUE_FILE = PROJECT_ROOT / ".mla_pending.txt"
-
 # Mərkəzi siyahılar — install layout-unda mla_constants hook-un yanındadır.
 _INSTALL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_INSTALL_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mla_constants import (
-    SUPPORTED_EXTENSIONS,
-    EXCLUDED_DIRS,
-    EXCLUDED_FILE_PATTERNS,
-    EXCLUDED_FILE_SUFFIXES,
-)
+try:
+    from mla_constants import (
+        SUPPORTED_EXTENSIONS,
+        EXCLUDED_DIRS,
+        EXCLUDED_FILE_PATTERNS,
+        EXCLUDED_FILE_SUFFIXES,
+    )
+    from license_gate import enforcement_active
+    from project_root import find_project_root
+    from atomic_write import append_atomic
+except Exception:
+    # Dependency import alınmadı — queue hook-u səssiz keç, heç nə block etmə.
+    sys.exit(0)
+
+PROJECT_ROOT = find_project_root()
+QUEUE_FILE = PROJECT_ROOT / ".mla_pending.txt"
 
 
 def main() -> int:
@@ -48,6 +54,10 @@ def main() -> int:
         # Pis JSON — sakit çıx, Claude Code-u bloklamayaq
         return 0
 
+    # Off-mode-da queue böyüməsin (flush_queue sonsuz işləməsin).
+    if not enforcement_active(PROJECT_ROOT):
+        return 0
+
     tool_input = data.get("tool_input") or {}
     file_path = tool_input.get("file_path")
     if not file_path:
@@ -55,8 +65,20 @@ def main() -> int:
 
     p = Path(file_path)
 
-    # Filtrlər
-    if p.suffix not in SUPPORTED_EXTENSIONS:
+    # Müvəqqəti qovluqlardakı faylları növbəyə salma. ChromaDB/test skriptləri
+    # AppData\Local\Temp altında .py faylı yaradıb redaktə edəndə hook onları
+    # növbəyə yazırdı; fayl sonra silinir, amma sətir növbədə "ghost" qalırdı.
+    try:
+        import tempfile
+        _tmp = Path(tempfile.gettempdir()).resolve()
+        _rp = p.resolve()
+        if _rp == _tmp or _tmp in _rp.parents:
+            return 0
+    except Exception:
+        pass
+
+    # Filtrlər (Windows-da `.PY` ≠ `.py` problemi üçün lowercase suffix)
+    if p.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return 0
     if any(part in EXCLUDED_DIRS for part in p.parts):
         return 0
@@ -65,15 +87,20 @@ def main() -> int:
     if any(p.name.endswith(sfx) for sfx in EXCLUDED_FILE_SUFFIXES):
         return 0
 
-    # Növbəyə əlavə et (idempotent — eyni yol çoxlu dəfə ola bilər,
-    # flush_queue.py duplikatları silir)
-    try:
-        with open(QUEUE_FILE, "a", encoding="utf-8") as f:
-            f.write(str(p.resolve()) + "\n")
-    except IOError:
-        # Yazıla bilmirsə, sakit çıx
-        return 0
-
+    # Növbədə (.txt) və ya drain-də (.processing) artıq varsa təkrar yazma —
+    # eyni faylı dəfələrlə redaktə etmək növbəni şişirdirdi. Drainer onsuz da
+    # dedup edir, lakin sayğac/təkrar-embed işi böyüyürdü. Hərf-həssas (Windows).
+    resolved = str(p.resolve())
+    want = resolved.lower()
+    processing = PROJECT_ROOT / ".mla_pending.processing"
+    for qf in (QUEUE_FILE, processing):
+        try:
+            with open(qf, "r", encoding="utf-8") as fh:
+                if any(line.strip().lower() == want for line in fh):
+                    return 0
+        except OSError:
+            pass
+    append_atomic(QUEUE_FILE, resolved)
     return 0
 
 

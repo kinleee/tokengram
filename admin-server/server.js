@@ -37,6 +37,7 @@ const JWT_PUBLIC_KEY_PATH = process.env.JWT_PUBLIC_KEY_PATH || path.join(__dirna
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
 const JWT_TTL_SECONDS = 7 * 24 * 60 * 60;
+const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || '30', 10);
 
 // ---- DB ----
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -74,14 +75,24 @@ try {
     console.warn(`[jwt] PEM açarları tapılmadı (${e.message}). /activate işləməyəcək.`);
 }
 
-async function issueToken(claims) {
+async function issueToken(claims, ttlSeconds = JWT_TTL_SECONDS) {
     const pk = await importPKCS8(jwtPrivateKeyPEM, 'RS256');
+    // iat 60s geriyə yazılır: müştəri saatı serverdən bir neçə saniyə geri
+    // qalanda köhnə wheel-lərin sıfır-leeway pyjwt verify-ı iat-ı "gələcəkdə"
+    // görüb tokeni rədd edirdi (2026-06-12 insidenti). exp-ə təsiri yoxdur —
+    // setExpirationTime cari vaxtdan hesablanır.
     return await new SignJWT(claims)
         .setProtectedHeader({ alg: 'RS256' })
-        .setIssuedAt()
-        .setExpirationTime(`${JWT_TTL_SECONDS}s`)
+        .setIssuedAt(nowSec() - 60)
+        .setExpirationTime(`${ttlSeconds}s`)
         .setIssuer('mla-license-server')
         .sign(pk);
+}
+
+// Token abunənin bitməsindən o yana yaşamamalıdır — yoxsa trialing istifadəçi
+// offline grace ilə trial sonunu 7 günə qədər uzada bilər.
+function tokenTtlFor(periodEnd) {
+    return Math.max(60, Math.min(JWT_TTL_SECONDS, periodEnd - nowSec()));
 }
 
 // ---- App ----
@@ -186,13 +197,17 @@ app.post('/activate', async (req, res) => {
         .get(licenseKey);
     if (!license || license.revoked) return res.status(401).json({ error: 'invalid_license' });
 
+    // current_period_end yoxlaması vacibdir: yoxsa bitmiş trialing/manual abunə
+    // əbədi /activate edə bilir (Paddle webhook-u olmayan abunələrdə status
+    // heç vaxt 'cancelled' olmur — vaxt yeganə qapıdır).
     const sub = db
         .prepare(
             `SELECT status, current_period_end FROM subscriptions
              WHERE user_id = ? AND status IN ('active','trialing')
+               AND current_period_end > ?
              ORDER BY current_period_end DESC LIMIT 1`,
         )
-        .get(license.user_id);
+        .get(license.user_id, nowSec());
     if (!sub) return res.status(402).json({ error: 'no_active_subscription' });
 
     if (license.machine_fingerprint && license.machine_fingerprint !== fp) {
@@ -209,13 +224,15 @@ app.post('/activate', async (req, res) => {
     }
 
     try {
+        const ttl = tokenTtlFor(sub.current_period_end);
         const token = await issueToken({
             user_id: license.user_id,
             license_key: license.key,
             fingerprint: fp,
             subscription_status: sub.status,
-        });
-        res.json({ token, expires_at: nowSec() + JWT_TTL_SECONDS });
+            period_end: sub.current_period_end,
+        }, ttl);
+        res.json({ token, expires_at: nowSec() + ttl });
     } catch (e) {
         console.error('[activate] JWT sign error:', e);
         res.status(500).json({ error: 'jwt_sign_failed' });
@@ -236,13 +253,15 @@ app.post('/validate', async (req, res) => {
     if (!claims.user_id || !claims.fingerprint || !claims.license_key) {
         return res.status(400).json({ error: 'malformed_claims' });
     }
+    // Bitmiş abunə refresh ala bilməz (bax /activate-dəki şərh).
     const sub = db
         .prepare(
-            `SELECT status FROM subscriptions
+            `SELECT status, current_period_end FROM subscriptions
              WHERE user_id = ? AND status IN ('active','trialing')
+               AND current_period_end > ?
              ORDER BY current_period_end DESC LIMIT 1`,
         )
-        .get(claims.user_id);
+        .get(claims.user_id, nowSec());
     if (!sub) return res.status(401).json({ error: 'subscription_inactive' });
 
     const lic = db
@@ -252,15 +271,113 @@ app.post('/validate', async (req, res) => {
         return res.status(401).json({ error: 'license_revoked' });
     }
     try {
+        const ttl = tokenTtlFor(sub.current_period_end);
         const token = await issueToken({
             user_id: claims.user_id,
             license_key: claims.license_key,
             fingerprint: claims.fingerprint,
             subscription_status: sub.status,
-        });
-        res.json({ token, expires_at: nowSec() + JWT_TTL_SECONDS });
+            period_end: sub.current_period_end,
+        }, ttl);
+        res.json({ token, expires_at: nowSec() + ttl });
     } catch (e) {
         console.error('[validate] JWT sign error:', e);
+        res.status(500).json({ error: 'jwt_sign_failed' });
+    }
+});
+
+// POST /trial — açarsız ilk işə düşmədə 30 günlük trial.
+// Bir maşın = bir trial: qeyd `trials` cədvəlində fingerprint-ə bağlıdır,
+// lokal faylların silinməsi reset vermir. Trial hələ aktivdirsə (reinstall
+// halı) eyni açar üçün təzə token verilir; bitibsə 403 trial_expired.
+app.post('/trial', async (req, res) => {
+    const fp = String(req.body?.machine_fingerprint || '').trim();
+    if (!fp || fp.length < 16 || fp.length > 128) {
+        return res.status(400).json({ error: 'missing_fingerprint' });
+    }
+    const now = nowSec();
+
+    const existing = db.prepare('SELECT user_id, license_key FROM trials WHERE fingerprint = ?').get(fp);
+    if (existing) {
+        const sub = db
+            .prepare(
+                `SELECT status, current_period_end FROM subscriptions
+                 WHERE user_id = ? AND status = 'trialing' AND current_period_end > ?
+                 ORDER BY current_period_end DESC LIMIT 1`,
+            )
+            .get(existing.user_id, now);
+        if (!sub) return res.status(403).json({ error: 'trial_expired' });
+        try {
+            const ttl = tokenTtlFor(sub.current_period_end);
+            const token = await issueToken({
+                user_id: existing.user_id,
+                license_key: existing.license_key,
+                fingerprint: fp,
+                subscription_status: 'trialing',
+                period_end: sub.current_period_end,
+            }, ttl);
+            return res.json({
+                token,
+                expires_at: now + ttl,
+                license_key: existing.license_key,
+                trial_ends_at: sub.current_period_end,
+            });
+        } catch (e) {
+            console.error('[trial] JWT sign error:', e);
+            return res.status(500).json({ error: 'jwt_sign_failed' });
+        }
+    }
+
+    const trialEnd = now + TRIAL_DAYS * 86400;
+    const trx = db.transaction(() => {
+        const userId = newId('usr_');
+        const email = `trial-${fp.slice(0, 12)}@trial.tokengram.local`;
+        db.prepare('INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)').run(userId, email, now);
+        const licenseKey = newId('mla_trial_');
+        db.prepare(
+            'INSERT INTO licenses (key, user_id, machine_fingerprint, activated_at, note, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(licenseKey, userId, fp, now, 'auto-trial', now);
+        const subId = newId('sub_');
+        db.prepare(
+            `INSERT INTO subscriptions
+               (id, user_id, polar_subscription_id, status, current_period_end, plan, created_at, updated_at)
+             VALUES (?, ?, ?, 'trialing', ?, 'trial', ?, ?)`,
+        ).run(subId, userId, 'trial_' + subId.slice(4), trialEnd, now, now);
+        db.prepare('INSERT INTO trials (fingerprint, user_id, license_key, created_at) VALUES (?, ?, ?, ?)').run(
+            fp,
+            userId,
+            licenseKey,
+            now,
+        );
+        return { userId, licenseKey };
+    });
+
+    let created;
+    try {
+        created = trx();
+    } catch (e) {
+        // UNIQUE race (eyni fingerprint paralel iki sorğu) → retry oxu
+        const row = db.prepare('SELECT user_id, license_key FROM trials WHERE fingerprint = ?').get(fp);
+        if (!row) {
+            console.error('[trial] create error:', e);
+            return res.status(500).json({ error: 'trial_create_failed' });
+        }
+        created = { userId: row.user_id, licenseKey: row.license_key };
+    }
+
+    try {
+        const ttl = tokenTtlFor(trialEnd);
+        const token = await issueToken({
+            user_id: created.userId,
+            license_key: created.licenseKey,
+            fingerprint: fp,
+            subscription_status: 'trialing',
+            period_end: trialEnd,
+        }, ttl);
+        logAudit('system-trial', 'create_trial', created.licenseKey, { fingerprint: fp.slice(0, 12), trialEnd });
+        res.json({ token, expires_at: now + ttl, license_key: created.licenseKey, trial_ends_at: trialEnd });
+    } catch (e) {
+        console.error('[trial] JWT sign error:', e);
         res.status(500).json({ error: 'jwt_sign_failed' });
     }
 });

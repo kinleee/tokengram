@@ -15,18 +15,28 @@ const EN: Messages = {
   'menu.toggleOn': '$(circle-filled) Turn ON',
   'menu.toggleOff': '$(circle-large-outline) Turn OFF',
   'menu.currentState': 'current: {state}',
-  'menu.refresh': '$(refresh) Refresh status bar',
-  'menu.refreshDesc': 'touch mtime — bar updates immediately',
+  'menu.refresh': '$(refresh) Refresh Tokengram',
+  'menu.refreshDesc': 'deep recovery — unstick a frozen index, then refresh the bar',
   'menu.arch': '$(book) Show arch doc',
   'menu.archDesc': '.mla_arch.md in the side panel',
   'menu.sync': '$(save) Sync session log → history',
   'menu.syncDesc': 'manual run when the Stop hook is skipped',
   'menu.reindex': '$(database) ChromaDB re-index',
-  'menu.reindexDesc': 'Re-index the current workspace from scratch (60-120s)',
+  'menu.reindexDesc': 'Re-index the workspace — incremental (only changed files; first run is full)',
   'menu.reset': '$(trash) Reset savings history',
   'menu.resetDesc': 'old history is moved to a backup file',
   'menu.toggleResult': 'Tokengram: {output}',
-  'menu.refreshResult': 'Tokengram: status bar refresh triggered',
+  'menu.refreshResult': 'Tokengram: index healthy — status bar refreshed',
+  'menu.refreshTitle': 'Refreshing Tokengram — checking for a frozen index...',
+  'menu.refreshRecovered':
+    'Tokengram recovered: terminated {n} frozen process(es) (index stuck ~{mins} min). Re-indexing {pending} pending file(s) now...',
+  'menu.refreshReindexBtn': 'Re-index now',
+  'menu.refreshInProgress':
+    'Tokengram: indexing in progress — {pending} file(s) still queued.',
+  'menu.autoRecover':
+    'Tokengram: index was stuck — auto-recovering {pending} file(s) (killed {n} frozen process(es)). Re-indexing now...',
+  'menu.refreshCleared':
+    'Tokengram: cleared {cleared} stale lock file(s) left by dead processes; bar refreshed.',
   'menu.archMissing': 'No .mla_arch.md yet — it appears after the first Read of an indexable file.',
   'menu.toggleNeedsLicense':
     'Tokengram cannot be turned ON without a license key. Set your license key first.',
@@ -44,7 +54,7 @@ const EN: Messages = {
   'menu.reindexHooksMissing':
     'Tokengram: hook scripts could not be installed at ~/.tokengram/hooks. Re-index will run but enforcement/savings hooks may be inactive.',
   'menu.reindexNoRoot':
-    'Tokengram: Tokengram is not installed (~/.tokengram/venv missing). Run install.ps1 first, then click re-index again.',
+    'Tokengram: Tokengram is not installed (~/.tokengram/venv missing). Run "Tokengram: Setup" first, then click re-index again.',
   'menu.reindexFailed': 'Tokengram: re-index failed — {output}',
   'menu.syncDoneFallback': 'Tokengram: sync complete (no new events)',
   'menu.error': 'Tokengram: {action} failed — {message}',
@@ -78,9 +88,21 @@ const EN: Messages = {
   'bar.indexingBadge': '$(sync~spin) {n}',
   'bar.calibrating': 'calibrating',
 
+  'trial.offer':
+    'Index is ready, but no license key was found — searches will fail. ' +
+    'Start your free trial? (needs internet once)',
+  'trial.startButton': 'Start free trial',
+  'trial.starting': 'Tokengram: starting your free trial…',
+  'trial.started': 'Free trial started — {days} day(s) left. Your savings counter is live.',
+  'trial.expired':
+    'Your free trial on this machine has already ended. Nothing breaks — only token savings stop. ' +
+    'Continue: https://tokengram.click/buy',
+  'trial.failed': 'Could not start trial: {detail}',
+
   'bar.state.no_project': 'NO PROJECT',
   'bar.state.no_key': 'NO KEY',
   'bar.state.invalid': 'INVALID',
+  'bar.state.trial_expired': 'TRIAL ENDED',
   'bar.state.stale': 'STALE',
   'bar.state.off': 'OFF',
   'bar.state.queue_stuck': 'QUEUE STUCK',
@@ -91,6 +113,8 @@ const EN: Messages = {
 
   'bar.cta.no_key': '{icon} Tokengram: set license key',
   'bar.cta.invalid': '{icon} Tokengram: invalid license',
+  'bar.cta.trial_expired': '{icon} Tokengram: trial ended · get a license',
+  'bar.trialBadge': '$(clock) trial {days}d',
   'bar.cta.off': '{icon} Tokengram: OFF · click to enable',
   'bar.cta.queue_stuck': '{icon} Tokengram: index queue stuck ({n})',
   'bar.cta.data_reset': '{icon} Tokengram: savings data reset',
@@ -113,6 +137,14 @@ const EN: Messages = {
     'New tasks will start accumulating again.',
   'bar.tip.staleNote':
     '⚠ License last-check is stale (offline mode). Hooks keep using the cached result.',
+  'bar.tip.trialNote':
+    '⏱ Free trial: {days} days left. Your own savings counter above is the proof — ' +
+    'get a license to keep it running: https://tokengram.click/buy',
+  'bar.tip.trial_expired':
+    'Your free trial has ended. Nothing breaks — the agent works as usual, ' +
+    'only the token savings stop.\n' +
+    'You saved {savedK}k tokens in the last 24h of the trial.\n' +
+    'Continue: https://tokengram.click/buy',
   'bar.tip.lastUpdate':
     'Files: history mtime {history} · session-log mtime {session}',
 
@@ -146,18 +178,28 @@ const AZ: Messages = {
   'menu.toggleOn': '$(circle-filled) Yandır (ON)',
   'menu.toggleOff': '$(circle-large-outline) Söndür (OFF)',
   'menu.currentState': 'cari: {state}',
-  'menu.refresh': '$(refresh) Status bar yenilə',
-  'menu.refreshDesc': 'mtime touch — bar dərhal refresh edir',
+  'menu.refresh': '$(refresh) Refresh Tokengram',
+  'menu.refreshDesc': 'dərin bərpa — donmuş indeksi aç, sonra bar-ı yenilə',
   'menu.arch': '$(book) Arch doc göstər',
   'menu.archDesc': '.mla_arch.md yan paneldə',
   'menu.sync': '$(save) Session log → history (sync)',
   'menu.syncDesc': 'Stop hook fire olmayıbsa manual çağır',
   'menu.reindex': '$(database) ChromaDB re-index',
-  'menu.reindexDesc': 'Cari workspace-i sıfırdan yenidən indekslə (60-120 san)',
+  'menu.reindexDesc': 'Workspace-i yenidən indekslə — incremental (yalnız dəyişən fayllar; ilk dəfə tam)',
   'menu.reset': '$(trash) Savings history sıfırla',
   'menu.resetDesc': 'köhnəsi backup-a köçürülür',
   'menu.toggleResult': 'Tokengram: {output}',
-  'menu.refreshResult': 'Tokengram: status bar refresh triggered',
+  'menu.refreshResult': 'Tokengram: indeks sağlamdır — status bar yeniləndi',
+  'menu.refreshTitle': 'Tokengram yenilənir — donmuş indeks yoxlanılır...',
+  'menu.refreshRecovered':
+    'Tokengram bərpa olundu: {n} donmuş proses dayandırıldı (indeks ~{mins} dəq ilişmişdi). İndi {pending} gözləyən fayl yenidən indekslənir...',
+  'menu.refreshReindexBtn': 'İndi re-index et',
+  'menu.refreshInProgress':
+    'Tokengram: indeksləmə davam edir — {pending} fayl hələ növbədə.',
+  'menu.autoRecover':
+    'Tokengram: indeks ilişmişdi — avtomatik bərpa: {pending} fayl ({n} donmuş proses öldürüldü). İndi yenidən indekslənir...',
+  'menu.refreshCleared':
+    'Tokengram: ölü proseslərdən {cleared} qalıq kilid faylı təmizləndi; bar yeniləndi.',
   'menu.archMissing': '.mla_arch.md hələ yoxdur — ilk indekslənən faylın Read-indən sonra yaranır.',
   'menu.toggleNeedsLicense':
     'Tokengram-i lisenziya açarı olmadan ON-a keçirmək olmaz. Əvvəlcə açar daxil et.',
@@ -175,7 +217,7 @@ const AZ: Messages = {
   'menu.reindexHooksMissing':
     'Tokengram: hook skriptləri ~/.tokengram/hooks-a quraşdırıla bilmədi. Re-index işləyəcək, amma enforcement/savings hooks deaktiv ola bilər.',
   'menu.reindexNoRoot':
-    'Tokengram qurulmayıb (~/.tokengram/venv yoxdur). Əvvəlcə install.ps1-i işlət, sonra re-index düyməsinə təkrar bas.',
+    'Tokengram qurulmayıb (~/.tokengram/venv yoxdur). Əvvəlcə "Tokengram: Setup" işlət, sonra re-index düyməsinə təkrar bas.',
   'menu.reindexFailed': 'Tokengram: re-index uğursuz — {output}',
   'menu.syncDoneFallback': 'Tokengram: sync tamamlandı (yeni hadisə yox idi)',
   'menu.error': 'Tokengram: {action} uğursuz — {message}',
@@ -210,8 +252,20 @@ const AZ: Messages = {
   'bar.calibrating': 'kalibrləyir',
 
   'bar.state.no_project': 'LAYİHƏ YOX',
+  'trial.offer':
+    'İndeks hazırdır, amma lisenziya açarı yoxdur — axtarışlar xəta verəcək. ' +
+    'Pulsuz trial başladılsın? (bir dəfəlik internet lazımdır)',
+  'trial.startButton': 'Trial başlat',
+  'trial.starting': 'Tokengram: pulsuz trial başladılır…',
+  'trial.started': 'Pulsuz trial başladı — {days} gün. Qənaət sayğacın artıq işləyir.',
+  'trial.expired':
+    'Bu maşında pulsuz trial artıq bitib. Heç nə sınmır — sadəcə token qənaəti dayanır. ' +
+    'Davam: https://tokengram.click/buy',
+  'trial.failed': 'Trial başladıla bilmədi: {detail}',
+
   'bar.state.no_key': 'AÇAR YOX',
   'bar.state.invalid': 'ETIBARSIZ',
+  'bar.state.trial_expired': 'TRIAL BİTDİ',
   'bar.state.stale': 'OFFLINE',
   'bar.state.off': 'SÖNÜK',
   'bar.state.queue_stuck': 'QUEUE DAYANIB',
@@ -222,6 +276,8 @@ const AZ: Messages = {
 
   'bar.cta.no_key': '{icon} Tokengram: lisenziya açarı yaz',
   'bar.cta.invalid': '{icon} Tokengram: etibarsız lisenziya',
+  'bar.cta.trial_expired': '{icon} Tokengram: trial bitdi · lisenziya al',
+  'bar.trialBadge': '$(clock) trial {days}g',
   'bar.cta.off': '{icon} Tokengram: SÖNÜK · aktivləşdirmək üçün klik',
   'bar.cta.queue_stuck': '{icon} Tokengram: index queue dayanıb ({n})',
   'bar.cta.data_reset': '{icon} Tokengram: qənaət data sıfırlanıb',
@@ -244,6 +300,14 @@ const AZ: Messages = {
     'Yeni task-lar yenidən toplanacaq.',
   'bar.tip.staleNote':
     '⚠ Lisenziya yoxlanışı köhnəlmiş (offline). Hook-lar keş ilə işləyir.',
+  'bar.tip.trialNote':
+    '⏱ Pulsuz trial: {days} gün qalıb. Yuxarıdakı qənaət sayğacı sənin öz sübutundur — ' +
+    'davam etmək üçün lisenziya al: https://tokengram.click/buy',
+  'bar.tip.trial_expired':
+    'Pulsuz trial bitdi. Heç nə sınmır — agent adi qaydada işləyir, ' +
+    'sadəcə token qənaəti dayanır.\n' +
+    'Trialın son 24 saatında {savedK}k token qənaət etmisən.\n' +
+    'Davam: https://tokengram.click/buy',
   'bar.tip.lastUpdate':
     'Fayllar: history mtime {history} · session-log mtime {session}',
 

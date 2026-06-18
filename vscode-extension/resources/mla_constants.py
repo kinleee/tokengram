@@ -29,14 +29,21 @@ SUPPORTED_EXTENSIONS = {
 # İndeksləmə zamanı tam istisna olunan qovluqlar.
 EXCLUDED_DIRS = {
     # Baza & cache
-    "chroma_db", "__pycache__", ".git",
-    "models_cache",
-    # Package manager
+    "chroma_db", "__pycache__", ".git", ".svn", ".hg",
+    "models_cache", ".fastembed_cache",  # HF/fastembed model cache (tokenizer.json = 700+ chunk noise)
+    # Package manager / vendor (asılılıq qovluqları — semantik dəyər yox,
+    # layihəni nəhəng göstərir: Laravel vendor/ = 12k+ fayl)
     "node_modules", "venv", ".venv", "env", ".env",
-    "site-packages",
+    "site-packages", "vendor", "bower_components",
+    ".gradle", ".m2", "Pods", ".dart_tool", ".pub-cache", ".terraform",
     # Build output
     "dist", "build", "out", "target",
     ".next", ".nuxt", ".eggs",
+    # Cache / coverage
+    ".cache", ".parcel-cache", ".turbo",
+    "coverage", "htmlcov", ".nyc_output",
+    # Laravel runtime (storage/framework/views compiled blade və s.)
+    "storage",
     # IDE / agent state
     ".idea", ".vscode",
     ".claude", ".aider", ".cursor", ".antigravity", ".mla",
@@ -50,6 +57,11 @@ EXCLUDED_DIRS = {
 EXCLUDED_FILE_PATTERNS = (
     # MLA internal state
     ".mla_pending", ".mla_session_log", ".file_hashes",
+    # Test prompt / fixture noise — keyword spam BM25-i aldadır,
+    # konseptual sorğularda real koddan üstün gəlir.
+    "TEST_PROMPT", "test_prompt",
+    "PROMPT_", "prompts.",
+    "FIXTURE_", "fixture_",
     # Package manager lock faylları
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "Cargo.lock", "go.sum", "composer.lock", "Gemfile.lock",

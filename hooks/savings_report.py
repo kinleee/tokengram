@@ -27,10 +27,16 @@ if sys.platform == "win32":
 _INSTALL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_INSTALL_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from i18n import tr
-from license_gate import enforcement_active
+try:
+    from i18n import tr
+    from license_gate import enforcement_active
+    from project_root import find_project_root
+    from atomic_write import append_atomic
+except Exception:
+    # Dependency import alınmadı — Stop hook-u səssiz keç, heç nə block etmə.
+    sys.exit(0)
 
-PROJECT_ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
+PROJECT_ROOT = find_project_root()
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 # Per-task savings tarixçəsi — Claude/Claude Code yenidən oxuya bilsin deyə.
 SAVINGS_HISTORY = PROJECT_ROOT / ".mla_savings_history.jsonl"
@@ -42,6 +48,19 @@ SAVINGS_HISTORY = PROJECT_ROOT / ".mla_savings_history.jsonl"
 MAX_BASELINE_PER_EVENT = 10_000
 
 
+def _norm(p) -> str:
+    """Yol müqayisəsi üçün normallaşdır: absolute posix + lowercase.
+
+    search_code faylları kanonik posix formada (`c:/x/y.py`) qeyd edir, hooks
+    isə `Path.resolve()` (Windows-da backslash) ilə. Müqayisə üçün hər iki tərəfi
+    eyni formaya gətiririk ki, B1 korrelyasiyası faylları tuta bilsin.
+    """
+    try:
+        return Path(str(p)).resolve(strict=False).as_posix().lower()
+    except (OSError, ValueError):
+        return str(p).replace("\\", "/").lower()
+
+
 
 def main() -> int:
     # Stdin-i oxuyub at (Stop hook-da bizə lazım deyil)
@@ -50,24 +69,31 @@ def main() -> int:
     except Exception:
         pass
 
-    # MLA OFF → history yazma, mövcud session_log-u sil (data yığma)
+    # MLA OFF → off-mode-da hook-lar onsuz da session_log-a yazmır,
+    # silmə cəhdi paralel yazısı ilə race yarada bilərdi → skip.
     if not enforcement_active(PROJECT_ROOT):
-        try:
-            SESSION_LOG.unlink(missing_ok=True)
-        except OSError:
-            pass
         return 0
 
     if not SESSION_LOG.exists():
         return 0
 
+    # Atomic rename: oxu-sil arası başqa hook session_log-a yaza bilərdi;
+    # rename onu öz `.processing.<pid>` faylımıza çevirir, yeni event-lər
+    # boş yenidən yaranan SESSION_LOG-a yazılır, bu run heç nə itirmir.
+    pid_log = SESSION_LOG.parent / f".mla_session_log.jsonl.processing.{os.getpid()}"
     try:
-        lines = SESSION_LOG.read_text(encoding="utf-8").strip().splitlines()
+        os.replace(SESSION_LOG, pid_log)
+    except OSError:
+        return 0
+
+    try:
+        lines = pid_log.read_text(encoding="utf-8").strip().splitlines()
     except IOError:
+        pid_log.unlink(missing_ok=True)
         return 0
 
     if not lines:
-        SESSION_LOG.unlink(missing_ok=True)
+        pid_log.unlink(missing_ok=True)
         return 0
 
     # Bütün çağırışları parse et
@@ -117,6 +143,21 @@ def main() -> int:
     # ikinci search "free saving" sayılmır, çünki MLA-sız agent də iki dəfə oxumazdı.
     search_baseline = 0
     unique_files_for_count = set()
+
+    # B1 — search→read korrelyasiyası: agent bir faylı search edib SONRA tam
+    # oxuyubsa (read_pass = silent/warn/large allow), o axtarış HEÇ NƏ qənaət
+    # etməyib — əksinə, chunk + tam fayl = ARTIQ xərc. Aşağıda həmin search-lərin
+    # baseline-ını (saxta qənaəti) sıfırlayırıq. Beləcə "90% yazır, real 20%"
+    # inflyasiyası riyazi olaraq aradan qalxır. grep/bash/chunked-Read bunlar özü
+    # qənaət alternatividir → sayılmır (yalnız tam Read = read_pass cancel edir).
+    fully_read = {
+        _norm(e.get("file"))
+        for e in entries
+        if e.get("type") == "read_pass" and e.get("file")
+    }
+    search_cancelled = 0
+    cancelled_spent = 0  # ləğv olunan axtarışların chunk tokenləri (real xərc)
+
     for e in entries:
         entry_type = e.get("type", "search_code")
         if entry_type == "read_block":
@@ -161,12 +202,24 @@ def main() -> int:
             # Bu event üçün TOP fayl baseline-ı götür (rank order qorunur)
             # və event-i cap-lə. Agent MLA-sız 1 chunked Read edərdi, N deyil.
             files = e.get("files", {})
+            cancelled = False
             if files:
                 # Ranked: ilk fayl ən yaxşı match. Yalnız onu credit et.
-                top_tokens = next(iter(files.values()))
-                search_baseline += min(top_tokens, MAX_BASELINE_PER_EVENT)
+                top_file, top_tokens = next(iter(files.items()))
+                # B1: bu fayl sonradan tam oxunubsa, axtarış qənaət etməyib —
+                # neytral say (0% töhfə): nə baseline-a credit, nə də saving.
+                # Onun chunk tokenləri ardınca gələn Read-in qiymətinə qatılır
+                # (cancelled_spent → real xərc), beləcə denominator dürüst qalır,
+                # amma saxta qənaət (və mənfi spike) yaranmır.
+                if _norm(top_file) in fully_read:
+                    cancelled = True
+                    search_cancelled += 1
+                    cancelled_spent += e.get("actual_tokens", 0)
+                else:
+                    search_baseline += min(top_tokens, MAX_BASELINE_PER_EVENT)
                 unique_files_for_count.update(files.keys())
-            total_actual += e.get("actual_tokens", 0)
+            if not cancelled:
+                total_actual += e.get("actual_tokens", 0)
 
     has_search = search_count > 0
     has_block = block_count > 0
@@ -179,7 +232,7 @@ def main() -> int:
 
     if not (has_search or has_block or has_grep or has_bash or has_warn
             or has_read_pass or has_bash_output or has_chunked):
-        SESSION_LOG.unlink(missing_ok=True)
+        pid_log.unlink(missing_ok=True)
         return 0
 
     baseline = (
@@ -196,7 +249,7 @@ def main() -> int:
     # inspect heuristic 20% × baseline idi, real isə tam fayl ola bilərdi.
     # Real istifadə üçün bash_output ölçülmüş dəyərdir; bash_actual müvəqqəti
     # double-count-dur, gələcəkdə bash_inspect-i tamamilə sökmək olar.
-    untracked_spent = read_pass_tokens + bash_output_tokens
+    untracked_spent = read_pass_tokens + bash_output_tokens + cancelled_spent
     total_spent = actual + untracked_spent
     # "Real %" — sessiya boyu MLA-nın diversiya etdiyi token-lərin TOTAL sessiya
     # spend-ə (saved + actual + untracked) nisbəti. Edit-heavy refactor-da
@@ -262,12 +315,16 @@ def main() -> int:
             "saving_tokens": saving,
             "saving_pct": round(pct, 2),
             "file_count": len(unique_files_for_count),
+            # B1: neçə axtarış sonradan tam Read olunduğu üçün qənaəti ləğv edildi.
+            "search_cancelled": search_cancelled,
         }
-        with open(SAVINGS_HISTORY, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        append_atomic(SAVINGS_HISTORY, json.dumps(record, ensure_ascii=False))
     except IOError:
         # Arşivləmə uğursuz olsa belə, hesabat artıq stderr-ə yazılıb
         pass
+    finally:
+        # `.processing.<pid>` faylını həmişə təmizlə (rename ilə öz mülkümüzdür).
+        pid_log.unlink(missing_ok=True)
 
     # Log-u təmizlə (sonrakı task üçün)
     try:

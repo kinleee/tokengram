@@ -4,16 +4,36 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-const MLA_DIR = path.join(os.homedir(), '.mla');
-const KEY_FILE = path.join(MLA_DIR, 'license_key.txt');
-const SERVER_URL_FILE = path.join(MLA_DIR, 'server_url.txt');
-const STATUS_FILE = path.join(MLA_DIR, 'last_check.json');
+const TOKENGRAM_DIR = path.join(os.homedir(), '.tokengram');
+const LEGACY_DIR = path.join(os.homedir(), '.mla');
+
+// Oxumalar əvvəl canonical ~/.tokengram-a, sonra legacy ~/.mla-ya baxır (rebrand).
+// Yazmalar həmişə canonical-a gedir ki, mənbə tək olsun.
+function readDirFirst(filename: string): string | null {
+  for (const d of [TOKENGRAM_DIR, LEGACY_DIR]) {
+    try {
+      const t = fs.readFileSync(path.join(d, filename), 'utf-8').trim();
+      if (t) return t;
+    } catch {
+      /* növbəti qovluğa keç */
+    }
+  }
+  return null;
+}
 
 const RECHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const STALE_AFTER_MS = 2 * 60 * 60 * 1000; // 2 hours
 const HTTP_TIMEOUT_MS = 10_000;
 
-export type EffectiveState = 'valid' | 'invalid' | 'no_key' | 'stale';
+export type EffectiveState =
+  | 'valid'
+  | 'trialing'       // açar trial açarıdır və hələ aktivdir — bar normal işləyir + "N gün" badge
+  | 'trial_expired'  // trial açarı bitib — CTA state (heç nə sınmır, qənaət dayanır)
+  | 'invalid'
+  | 'no_key'
+  | 'stale';
+
+const TRIAL_KEY_PREFIX = 'mla_trial_';
 
 export interface CheckResult {
   valid: boolean;
@@ -25,21 +45,12 @@ export interface CheckResult {
 }
 
 export function readKey(): string | null {
-  try {
-    const t = fs.readFileSync(KEY_FILE, 'utf-8').trim();
-    return t || null;
-  } catch {
-    return null;
-  }
+  return readDirFirst('license_key.txt');
 }
 
 export function readServerUrl(): string | null {
-  try {
-    const t = fs.readFileSync(SERVER_URL_FILE, 'utf-8').trim();
-    if (t) return t.replace(/\/+$/, '');
-  } catch {
-    /* fall through */
-  }
+  const t = readDirFirst('server_url.txt');
+  if (t) return t.replace(/\/+$/, '');
   const fromConfig = vscode.workspace
     .getConfiguration('tokengram')
     .get<string>('licenseServerUrl', '')
@@ -48,8 +59,10 @@ export function readServerUrl(): string | null {
 }
 
 export function readCachedStatus(): CheckResult | null {
+  const t = readDirFirst('last_check.json');
+  if (!t) return null;
   try {
-    return JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8')) as CheckResult;
+    return JSON.parse(t) as CheckResult;
   } catch {
     return null;
   }
@@ -57,10 +70,41 @@ export function readCachedStatus(): CheckResult | null {
 
 function writeCachedStatus(r: CheckResult): void {
   try {
-    fs.mkdirSync(MLA_DIR, { recursive: true });
-    fs.writeFileSync(STATUS_FILE, JSON.stringify(r, null, 2), 'utf-8');
+    fs.mkdirSync(TOKENGRAM_DIR, { recursive: true });
+    fs.writeFileSync(
+      path.join(TOKENGRAM_DIR, 'last_check.json'),
+      JSON.stringify(r, null, 2),
+      'utf-8',
+    );
   } catch {
     /* best effort */
+  }
+}
+
+/**
+ * JWT public key-i license server-dən endirib ~/.tokengram/pubkey.pem-ə yazır.
+ * license.from_env() bu faylı oxuyaraq imzalanmış token-ləri verify edir —
+ * fayl olmasa MCP server hər validation-da xəta atır və təmiz install heç vaxt
+ * "valid" ola bilməz. Açar saxlanmazdan əvvəl bir dəfə çağırılır.
+ */
+export async function fetchPubkey(serverUrl: string): Promise<boolean> {
+  const url = `${serverUrl.replace(/\/+$/, '')}/pubkey`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return false;
+    const pem = (await res.text()).trim();
+    if (!pem.includes('BEGIN PUBLIC KEY') && !pem.includes('BEGIN RSA PUBLIC KEY')) {
+      return false;
+    }
+    fs.mkdirSync(TOKENGRAM_DIR, { recursive: true });
+    fs.writeFileSync(path.join(TOKENGRAM_DIR, 'pubkey.pem'), pem + '\n', 'utf-8');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -242,12 +286,98 @@ export async function refreshStatus(): Promise<CheckResult> {
 
 /** What should the UI show right now, based on the cached status. Cheap (no I/O beyond reading files). */
 export function effectiveStatus(): EffectiveState {
-  if (!readKey()) return 'no_key';
+  const key = readKey();
+  if (!key) return 'no_key';
+  const isTrialKey = key.startsWith(TRIAL_KEY_PREFIX);
   const cached = readCachedStatus();
   if (!cached) return 'stale';
   const ageMs = Date.now() - cached.checked_at * 1000;
   if (ageMs > STALE_AFTER_MS) return 'stale';
-  return cached.valid ? 'valid' : 'invalid';
+  if (cached.valid) {
+    return cached.status === 'trialing' || isTrialKey ? 'trialing' : 'valid';
+  }
+  // Bitmiş trial "etibarsız açar" deyil — gözlənilən lifecycle hadisəsidir.
+  // Ayrı state: bar qırmızı INVALID əvəzinə konversiya CTA-sı göstərir.
+  if (isTrialKey && cached.reason === 'no_active_subscription') return 'trial_expired';
+  return 'invalid';
+}
+
+/** Trialın bitməsinə qalan günlər (yuvarlaqlaşdırma yuxarı). Trial deyilsə null. */
+export function trialDaysLeft(): number | null {
+  const key = readKey();
+  if (!key || !key.startsWith(TRIAL_KEY_PREFIX)) return null;
+  const cached = readCachedStatus();
+  if (!cached || !cached.valid || !cached.expires_at) return null;
+  const secLeft = cached.expires_at - Math.floor(Date.now() / 1000);
+  return Math.max(0, Math.ceil(secLeft / 86400));
+}
+
+export type TrialOutcome =
+  | { ok: true; license_key: string; trial_ends_at?: number }
+  | { ok: false; reason: 'trial_expired' }
+  | { ok: false; reason: 'network_error' | 'unknown'; detail?: string };
+
+/**
+ * Serverdən 30 günlük trial istə və lokal state-i yaz (license_key.txt,
+ * server_url.txt, pubkey.pem, last_check.json). Server fingerprint-başına
+ * bir trial verir — lokal faylları silmək reset vermir, mövcud trial hələ
+ * aktivdirsə eyni açar yenidən qaytarılır (reinstall halı).
+ */
+export async function startTrial(serverUrl: string): Promise<TrialOutcome> {
+  let fingerprint: string;
+  try {
+    fingerprint = await getMachineFingerprint();
+  } catch (e: unknown) {
+    const detail = e instanceof Error ? e.message : String(e);
+    return { ok: false, reason: 'unknown', detail };
+  }
+
+  const url = `${serverUrl.replace(/\/+$/, '')}/trial`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ machine_fingerprint: fingerprint }),
+      signal: controller.signal,
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      license_key?: string;
+      trial_ends_at?: number;
+      error?: string;
+    };
+    if (res.status === 403 && body.error === 'trial_expired') {
+      return { ok: false, reason: 'trial_expired' };
+    }
+    if (!res.ok || !body.license_key) {
+      return { ok: false, reason: 'unknown', detail: `HTTP ${res.status}: ${body.error ?? ''}` };
+    }
+
+    await fetchPubkey(serverUrl);
+    fs.mkdirSync(TOKENGRAM_DIR, { recursive: true });
+    fs.writeFileSync(path.join(TOKENGRAM_DIR, 'license_key.txt'), body.license_key, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    fs.writeFileSync(
+      path.join(TOKENGRAM_DIR, 'server_url.txt'),
+      serverUrl.replace(/\/+$/, ''),
+      'utf-8',
+    );
+    writeCachedStatus({
+      valid: true,
+      status: 'trialing',
+      expires_at: body.trial_ends_at,
+      checked_at: Math.floor(Date.now() / 1000),
+    });
+    return { ok: true, license_key: body.license_key, trial_ends_at: body.trial_ends_at };
+  } catch (e: unknown) {
+    const detail = e instanceof Error ? e.message : String(e);
+    return { ok: false, reason: 'network_error', detail };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Start the periodic recheck timer. Returns a Disposable that clears it. */

@@ -53,7 +53,7 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
     // this extension. Otherwise we need to upgrade.
     const installed = installedWheelVersion();
     const bundled = bundledWheelVersion(context);
-    if (installed && bundled && compareSemver(installed, bundled) >= 0) {
+    if (installed && bundled && compareSemver(installed, bundled) >= 0 && !installedTokengramBroken()) {
       // Even when no install is needed, a freshly-opened workspace may still
       // be missing the Tokengram hook wiring in .claude/settings.json. Without
       // this, Read enforcement silently no-ops in every new project the user
@@ -324,6 +324,16 @@ function venvHasTokengram(): boolean {
   const binDir = process.platform === 'win32' ? 'Scripts' : 'bin';
   const exe = process.platform === 'win32' ? 'tokengram.exe' : 'tokengram';
   return fs.existsSync(path.join(VENV_DIR, binDir, exe));
+}
+
+// `python -m tokengram` (həm MCP server, həm reindex CLI buradan keçir) paketdə
+// `__main__.py` TƏLƏB edir. Bəzi köhnə wheel-lər onsuz ship olunmuşdu → "No
+// module named tokengram.__main__" və həm server, həm reindex sınırdı. Versiya
+// müqayisəsi "güncəldir" desə belə, bu sınıq vəziyyəti aşkar edib təmir edirik.
+function installedTokengramBroken(): boolean {
+  const pkgDir = path.join(VENV_DIR, 'Lib', 'site-packages', 'tokengram');
+  if (!fs.existsSync(pkgDir)) return false; // paket yoxdursa "sınıq" demə
+  return !fs.existsSync(path.join(pkgDir, '__main__.py'));
 }
 
 function installedWheelVersion(): string | null {
@@ -675,14 +685,14 @@ export function writeWorkspaceHooks(): boolean {
           matcher: 'Edit|Write|MultiEdit',
           hooks: [{ type: 'command', command: hookCmd('queue_change.py') }],
         },
-        {
-          matcher: 'Grep',
-          hooks: [{ type: 'command', command: hookCmd('post_grep_check.py') }],
-        },
-        {
-          matcher: 'Bash',
-          hooks: [{ type: 'command', command: hookCmd('post_bash_check.py') }],
-        },
+        // PERF (0.1.49): Grep və Bash PostToolUse hook-ları çıxarıldı. Onlar yalnız
+        // qənaət-analitikası yazırdı (funksional iş yox), amma hər Grep/Bash-a soyuq
+        // Python prosesi (~90ms) əlavə edirdi. Qənaət barı indi YALNIZ search_code
+        // (MCP server, gecikməsiz) + Read (pre_read) event-lərindən hesablanır —
+        // yəni "kod axtarışı/oxuması" üzrə qənaət. savings_report.py riyaziyyatı
+        // dəyişmir: bu event-lər gəlmədikdə onları həm qənaətdən, həm xərcdən
+        // avtomatik çıxarır. (post_grep_check.py / post_bash_check.py faylları
+        // diskdə qalır — yalnız işə salınmır.)
       ],
       Stop: [
         {
@@ -737,6 +747,62 @@ export function writeWorkspaceHooks(): boolean {
   delete mcpConfig.mcpServers['mla_agent'];
   mcpConfig.mcpServers['tokengram'] = tokengramEntry;
   fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2), 'utf-8');
+
+  // Tokengram bu layihədə chroma_db/, kilidlər, növbə, qənaət tarixçəsi və s.
+  // per-machine runtime faylları yaradır — onlar user-in commit-lərinə düşməməlidir.
+  ensureGitignore(root);
   return true;
+}
+
+// Layihənin .gitignore-una Tokengram bloku əlavə et ki, per-machine artefaktlar
+// (chroma_db/, .tokengram.*.lock, .mla_*, .bm25_index.pkl, ...) git-ə getməsin.
+// Idempotent: sentinel comment təkrar yazılmanın qarşısını alır. Setup action-ına
+// (writeWorkspaceHooks) bağlıdır — activation-da səssiz yazı DEYİL. Git layihəsi
+// deyilsə (nə .git, nə .gitignore var) toxunmuruq — boş qovluğa fayl atmırıq.
+export function ensureGitignore(root: string): void {
+  const SENTINEL = '# >>> Tokengram (auto-managed) — runtime artifacts, do not commit >>>';
+  try {
+    const isGitRepo = fs.existsSync(path.join(root, '.git'));
+    const giPath = path.join(root, '.gitignore');
+    const hasGitignore = fs.existsSync(giPath);
+    if (!isGitRepo && !hasGitignore) return;
+
+    let cur = '';
+    try {
+      cur = fs.readFileSync(giPath, 'utf-8');
+    } catch {
+      cur = '';
+    }
+    if (cur.includes('# >>> Tokengram (auto-managed)')) return; // artıq yazılıb
+
+    const block =
+      SENTINEL + '\n' +
+      'chroma_db/\n' +
+      'chroma_db.broken-*/\n' +
+      'chroma_db.corrupt-*/\n' +
+      '.bm25_index.pkl\n' +
+      '.file_hashes.json\n' +
+      '.mla_pending.txt\n' +
+      '.mla_pending.processing\n' +
+      '.mla_session_log.jsonl\n' +
+      '.mla_session_log.jsonl.processing.*\n' +
+      '.mla_savings_history.jsonl\n' +
+      '.mla_savings_history.jsonl.bak.*\n' +
+      '.mla_enforcement.flag\n' +
+      '.mla_arch.md\n' +
+      '.mla_arch_state.json\n' +
+      '.mla_db_health.json\n' +
+      '.tokengram.writer.lock\n' +
+      '.tokengram.drainer.lock\n' +
+      '.tokengram.leader.lock\n' +
+      '.tokengram.reindex.want\n' +
+      '.tokengram.*.lock.tmp.*\n' +
+      '*.quarantine_pending\n' +
+      '# <<< Tokengram (auto-managed) <<<\n';
+    const sep = cur === '' ? '' : cur.endsWith('\n') ? '\n' : '\n\n';
+    fs.appendFileSync(giPath, sep + block, 'utf-8');
+  } catch {
+    // Best-effort — heç vaxt setup-u bloklama.
+  }
 }
 

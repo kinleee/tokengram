@@ -12,6 +12,7 @@ fayllar yenidən indekslənir.
 import json
 import hashlib
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 
@@ -19,6 +20,7 @@ import chromadb
 
 from document_loader import CodeChunk
 import config
+import db_guard
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +67,61 @@ class CodeEmbeddingFunction:
         return "mla-bge-small-en-v1.5"
 
     def _ensure_loaded(self):
-        """İlk dəfə real embedding lazım olduqda modeli yüklə."""
+        """İlk dəfə real embedding lazım olduqda modeli yüklə.
+
+        Reindex `HF_HUB_OFFLINE=1` ilə işləyir (worker online-check hang qarşısı).
+        Əgər model lokal cache-də YOXDURSA offline yükləmə fail olur → köhnə
+        kodda embedding boş keçir, baza boş qalır (səssiz uğursuzluq — testerin
+        12547 chunk "98%" göstərib boş baza problemi). İndi self-heal edirik:
+        offline fail olsa, BİR DƏFƏ online endirməyə cəhd edirik (sonra offline
+        bayraqları geri qoyulur). Beləcə cache-i boş maşınlar özünü sağaldır.
+        """
         if self._model is not None:
             return
         from sentence_transformers import SentenceTransformer
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
         logger.info(f"🔄 Embedding modeli yüklənir: {config.EMBEDDING_MODEL_NAME}")
+        try:
+            self._model = SentenceTransformer(config.EMBEDDING_MODEL_NAME)
+            logger.info("✅ Embedding modeli yükləndi (cache)")
+            return
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Model offline/cache-dən yüklənmədi ({type(e).__name__}: {e}); "
+                f"təmiz subprocess ilə online endirmə cəhdi edilir..."
+            )
+        # Online endirmə: AYRI subprocess-də. Bu prosesdə `huggingface_hub`/
+        # `transformers` offline bayrağını import zamanı sabitə oxuyub — `os.environ`-i
+        # dəyişmək kifayət etmir. Təmiz env-li yeni proses bayrağı sıfırdan oxuyur,
+        # modeli paylaşılan HF cache-ə endirir; sonra biz cache-dən offline yükləyirik.
+        import sys as _sys
+        import subprocess as _sp
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+        }
+        env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+        env["TRANSFORMERS_VERBOSITY"] = "error"
+        dl_code = (
+            "from sentence_transformers import SentenceTransformer;"
+            f"SentenceTransformer({config.EMBEDDING_MODEL_NAME!r})"
+        )
+        try:
+            _sp.run(
+                [_sys.executable, "-c", dl_code],
+                env=env, timeout=600, check=True,
+                stdout=_sp.PIPE, stderr=_sp.STDOUT,
+            )
+        except Exception as e:
+            logger.error(
+                f"❌ Embedding modeli endirilə bilmədi (offline cache boş + online "
+                f"uğursuz): {type(e).__name__}: {e}. İndeksləmə embedding-siz baş "
+                f"tutmayacaq — internet bağlantısı yoxla."
+            )
+            raise
+        # İndi model cache-dədir → offline (in-process) yüklə
         self._model = SentenceTransformer(config.EMBEDDING_MODEL_NAME)
-        logger.info("✅ Embedding modeli yükləndi")
+        logger.info("✅ Embedding modeli online endirildi (subprocess) + cache-dən yükləndi")
 
     def __call__(self, input: List[str]) -> List[List[float]]:
         """Mətnləri embedding vektorlarına çevir.
@@ -86,7 +136,11 @@ class CodeEmbeddingFunction:
         # bge sənəd embedding-i üçün prefix istəmir (config-də DOCUMENT_PREFIX="")
         if config.DOCUMENT_PREFIX:
             input = [f"{config.DOCUMENT_PREFIX}{t}" for t in input]
-        embeddings = self._model.encode(input, show_progress_bar=False)
+        embeddings = self._model.encode(
+            input,
+            batch_size=getattr(config, "EMBED_BATCH_SIZE", 128),
+            show_progress_bar=False,
+        )
         return embeddings.tolist()
 
     def embed_query(self, input) -> List[List[float]]:
@@ -103,7 +157,11 @@ class CodeEmbeddingFunction:
         texts = [input] if isinstance(input, str) else list(input)
         if config.QUERY_PREFIX:
             texts = [f"{config.QUERY_PREFIX}{t}" for t in texts]
-        embeddings = self._model.encode(texts, show_progress_bar=False)
+        embeddings = self._model.encode(
+            texts,
+            batch_size=getattr(config, "EMBED_BATCH_SIZE", 128),
+            show_progress_bar=False,
+        )
         return embeddings.tolist()
 
     def embed_documents(self, input: List[str]) -> List[List[float]]:
@@ -128,21 +186,45 @@ class HashStore:
         self._load()
     
     def _load(self):
-        """Disk-dən hash-ları yüklə."""
+        """Disk-dən hash-ları yüklə.
+
+        Generation yoxlaması: hash-lar hansı chroma_db nəslinə aiddirsə, o
+        nəsil artıq mövcud deyilsə (baza karantinə alınıb / silinib / təzə
+        yaradılıb) köhnə hash-lar ATILIR. Əks halda "hashes hər şey indekslidir
+        deyir, baza isə boşdur" səssiz boş-indeks vəziyyəti yaranır.
+        """
         try:
             if Path(self.store_path).exists():
                 with open(self.store_path, "r", encoding="utf-8") as f:
                     self.hashes = json.load(f)
+                stored_gen = self.hashes.pop("__generation__", None)
+                live_gen = db_guard.current_generation(config.CHROMA_DB_PATH)
+                if stored_gen is not None and stored_gen != live_gen:
+                    logger.warning(
+                        "Hash store köhnə baza nəslinə aiddir — sıfırlanır "
+                        "(tam re-index ediləcək)"
+                    )
+                    self.hashes = {}
                 logger.debug(f"Hash store yükləndi: {len(self.hashes)} fayl")
         except (json.JSONDecodeError, IOError) as e:
             logger.warning(f"Hash store oxuna bilmədi, sıfırdan başlanır: {e}")
             self.hashes = {}
     
     def _save(self):
-        """Hash-ları diskə yaz."""
+        """Hash-ları diskə atomic yaz.
+
+        Köhnə write-truncate naxışı concurrent worker + tool yazışı altında
+        partial JSON yarada bilirdi; növbəti `_load` JSONDecodeError catch
+        edib `self.hashes = {}` edirdi → tam reindex (incremental cache itir).
+        """
         try:
-            with open(self.store_path, "w", encoding="utf-8") as f:
-                json.dump(self.hashes, f, indent=2, ensure_ascii=False)
+            tmp = Path(str(self.store_path) + f".tmp.{os.getpid()}")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            payload = dict(self.hashes)
+            payload["__generation__"] = db_guard.current_generation(config.CHROMA_DB_PATH)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.store_path)
         except IOError as e:
             logger.error(f"Hash store yazıla bilmədi: {e}")
     
@@ -205,8 +287,30 @@ class ChromaVectorStore:
         """
         self.db_path = db_path or config.CHROMA_DB_PATH
         self.collection_name = collection_name or config.COLLECTION_NAME
+
+        # PRE-FLIGHT: bazanı AÇMAZDAN ƏVVƏL bütövlük yoxla. Zədəli pickle/sqlite
+        # ilə PersistentClient açmaq Chroma-nın daxili retry dövrünə (dəqiqələrlə
+        # səssiz donma) və handle-lar üzündən rename-in mümkünsüzlüyünə aparır.
+        # Burada hələ heç bir handle yoxdur → karantin həmişə mümkündür.
+        heal = db_guard.preflight_check_and_heal(self.db_path)
+        if heal == "healed":
+            logger.warning(
+                "🛡️ Zədəli indeks karantinə alındı — təmiz baza qurulur. "
+                "Mənbə kodunuza toxunulmayıb; tam re-index lazımdır."
+            )
+        elif heal == "heal_failed":
+            # FAIL-FAST: zədəli bazanı Chroma ilə açmağa cəhd etmək dəqiqələrlə
+            # daxili retry deməkdir (2026-06-11: 150+ saniyə səssiz donma).
+            # Aydın xəta dərhal qayıdır; marker onsuz da yazılıb — maneə
+            # törədən proses bağlananda növbəti açılış özü sağaldacaq.
+            raise RuntimeError(
+                "Tokengram indeksi zədəlidir və başqa proses onu açıq saxlayır. "
+                "Bütün Claude Code pəncərələrini bağlayıb yenidən açın — "
+                "növbəti açılış indeksi AVTOMATİK sağaldacaq (marker yazılıb)."
+            )
+
         self.hash_store = HashStore()
-        
+
         # ChromaDB PersistentClient yarat
         try:
             logger.info(f"🗄️  ChromaDB açılır: {self.db_path}")
@@ -229,34 +333,71 @@ class ChromaVectorStore:
             logger.error(f"❌ ChromaDB qurulma xətası: {e}")
             raise
     
-    def index_documents(self, chunks: List[CodeChunk], 
-                        batch_size: int = 50) -> Dict[str, int]:
+    def index_documents(self, chunks: List[CodeChunk],
+                        batch_size: int = 64,
+                        progress_cb=None,
+                        skip_predelete: bool = False) -> Dict[str, int]:
         """Chunk-ları ChromaDB-yə upsert ilə əlavə edir.
-        
+
         Eyni ID ilə mövcud chunk varsa, yenilənir (dublikat yoxdur).
         Batch processing ilə böyük dataset-ləri effektiv idarə edir.
-        
+
         Args:
             chunks: İndekslənəcək CodeChunk siyahısı
-            batch_size: Hər batch-da neçə chunk göndərilsin
-            
+            batch_size: Hər batch-da neçə chunk göndərilsin (böyük batch =
+                az embedding round-trip = daha yüksək throughput)
+            progress_cb: Optional callable(done:int, total:int) — hər batch
+                upsert-dən sonra çağrılır. Streaming progress üçün.
+            skip_predelete: True olarsa köhnə chunk silmə tam keçilir. Fresh
+                index-də collection onsuz da boşdur → 634 mənasız delete
+                round-trip-i ləğv olur.
+
         Returns:
             Statistika: {"indexed": N, "skipped": N, "errors": N}
         """
         if not chunks:
             logger.warning("İndekslənəcək chunk yoxdur")
             return {"indexed": 0, "skipped": 0, "errors": 0}
-        
+
+        # Pre-delete: per-file əvvəlcədən köhnə chunk-ları silmək — fayl
+        # edit edilib chunk sayı azalsa (məs. funksiya silindi), köhnə
+        # chunk-lar collection-da əbədi qalmazdı. index_file özü bunu
+        # edirdi, index_directory(fresh=False) etmirdi → silinmiş kod
+        # search-də qayıdırdı.
+        #
+        # Optimallaşdırma: əvvəl hər fayl üçün ayrı delete(where=...) edilirdi
+        # (634 fayl = 634 round-trip). İndi tək `$in` filtri ilə bir çağırış.
+        # fresh index-də (skip_predelete) ümumiyyətlə keçilir.
+        if not skip_predelete:
+            seen_files = set()
+            for chunk in chunks:
+                fp = chunk.metadata.get("file_path") if hasattr(chunk, "metadata") else None
+                if fp:
+                    seen_files.add(_canonical_path(fp))
+            if seen_files:
+                # SQLite `$in` dəyişən tavanı (~32766) var; böyük layihədə
+                # (12k+ fayl) tək sorğu "too many SQL variables" verir.
+                # 500-lük partiyalara bölürük.
+                paths = list(seen_files)
+                for j in range(0, len(paths), 500):
+                    try:
+                        self.collection.delete(
+                            where={"file_path": {"$in": paths[j:j + 500]}}
+                        )
+                    except Exception as e:
+                        logger.debug(f"Batch pre-delete keçildi: {e}")
+
         stats = {"indexed": 0, "skipped": 0, "errors": 0}
-        
+        total = len(chunks)
+
         # Batch-lara böl
-        for i in range(0, len(chunks), batch_size):
+        for i in range(0, total, batch_size):
             batch = chunks[i:i + batch_size]
-            
+
             ids = []
             documents = []
             metadatas = []
-            
+
             for chunk in batch:
                 try:
                     # Defensive: chunk metadata-sındakı file_path-i normallaşdır
@@ -271,10 +412,12 @@ class ChromaVectorStore:
                     logger.error(f"Chunk hazırlama xətası: {e}")
                     stats["errors"] += 1
                     continue
-            
+
             if ids:
                 try:
-                    # Upsert: mövcud olanları yenilə, yenilərini əlavə et
+                    # Upsert: mövcud olanları yenilə, yenilərini əlavə et.
+                    # Upsert embedding-i ChromaDB-nin içində bütün batch üçün
+                    # hesablayır — böyük batch CPU/RAM spike verə bilər.
                     self.collection.upsert(
                         ids=ids,
                         documents=documents,
@@ -284,9 +427,33 @@ class ChromaVectorStore:
                     logger.debug(f"  Batch {i // batch_size + 1}: "
                                 f"{len(ids)} chunk upsert edildi")
                 except Exception as e:
-                    logger.error(f"Batch upsert xətası: {e}")
-                    stats["errors"] += len(ids)
-        
+                    # Köhnə davranış: bütün batch (məs. 256 chunk) xəta sayılırdı
+                    # → bir batch-in uğursuzluğu "0 indexed, hamısı xəta" verirdi
+                    # (12542 fayl → 69224 xəta). İndi bir-bir təkrar edirik:
+                    # tək problemli/böyük chunk 63-ünü batırmır, real xəta sayı
+                    # görünür, və yaddaş spike-i batch üçün deyil tək chunk üçün olur.
+                    logger.warning(
+                        f"Batch upsert uğursuz ({len(ids)} chunk), bir-bir "
+                        f"təkrarlanır: {type(e).__name__}: {e}"
+                    )
+                    for cid, doc, meta in zip(ids, documents, metadatas):
+                        try:
+                            self.collection.upsert(
+                                ids=[cid], documents=[doc], metadatas=[meta]
+                            )
+                            stats["indexed"] += 1
+                        except Exception as e2:
+                            logger.error(f"Chunk upsert xətası ({cid}): "
+                                         f"{type(e2).__name__}: {e2}")
+                            stats["errors"] += 1
+
+            # Streaming progress — hər batch-dan sonra "done/total" bildir.
+            if progress_cb is not None:
+                try:
+                    progress_cb(min(i + batch_size, total), total)
+                except Exception:
+                    pass
+
         logger.info(f"📊 İndeksləmə nəticəsi: {stats}")
         return stats
     
@@ -336,8 +503,8 @@ class ChromaVectorStore:
         except Exception as e:
             logger.warning(f"Köhnə chunk-ları silmə xətası: {e}")
 
-        # Yeni chunk-ları əlavə et
-        self.index_documents(chunks)
+        # Yeni chunk-ları əlavə et (köhnələri yuxarıda artıq sildik)
+        self.index_documents(chunks, skip_predelete=True)
 
         # Hash-i yenilə
         if new_hash:
@@ -371,20 +538,41 @@ class ChromaVectorStore:
         except Exception as e:
             logger.error(f"Fayl silmə xətası: {e}")
     
-    def clear_collection(self):
-        """Collection-u tamamilə sıfırlayır.
-        
-        DİQQƏT: Bu əməliyyat geri qaytarıla bilməz!
+    def refresh_collection(self):
+        """Collection handle-ı persistent client-dən yenidən al.
+
+        Başqa proses (`--reindex`) yazıbsa, bu uzunömürlü serving prosesin
+        cache-lədiyi handle köhnə qala bilir → `count()` 0 qaytarır, halbuki
+        baza doludur. `get_or_create_collection` canlı handle-a yenidən bağlayır.
         """
         try:
-            self.client.delete_collection(self.collection_name)
             self.collection = self.client.get_or_create_collection(
                 name=self.collection_name,
                 embedding_function=self.embedding_fn,
-                metadata={"description": "Kod bazası vektor indeksi"}
+                metadata={"description": "Kod bazası vektor indeksi"},
             )
+        except Exception as e:
+            logger.warning(f"Collection refresh xətası: {e}")
+
+    def clear_collection(self):
+        """Collection-u sıfırlayır — sətirləri YERİNDƏ silir.
+
+        DİQQƏT: geri qaytarıla bilməz!
+
+        Köhnə kod `delete_collection()` edirdi → collection-un daxili id-si
+        dəyişirdi. Başqa serving proses köhnə id-li handle saxladığı üçün
+        `get_stats`/semantic search 0 qaytarırdı (cross-process staleness).
+        İndi collection identity-si qorunur: yalnız sətirlər silinir, beləcə
+        başqa proseslərin handle-ı canlı qalır və yeni yazıları görür.
+        """
+        try:
+            existing = self.collection.get(include=[])
+            ids = existing.get("ids", []) if existing else []
+            # SQLite dəyişən tavanına görə partiyalarla sil
+            for i in range(0, len(ids), 5000):
+                self.collection.delete(ids=ids[i:i + 5000])
             self.hash_store.clear()
-            logger.info("🗑️  Collection sıfırlandı")
+            logger.info(f"🗑️  Collection sıfırlandı (yerində, {len(ids)} chunk silindi)")
         except Exception as e:
             logger.error(f"Collection sıfırlama xətası: {e}")
     
@@ -407,6 +595,9 @@ class ChromaVectorStore:
             dict: chunk sayı, fayl sayı, fayl növləri və s.
         """
         try:
+            # Başqa proses (--reindex) yazmış ola bilər — canlı handle al.
+            # get_stats nadir çağrılır, bu ucuz metadata əməliyyatıdır.
+            self.refresh_collection()
             total = self.collection.count()
             
             if total == 0:

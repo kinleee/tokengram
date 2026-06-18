@@ -12,9 +12,13 @@ if sys.platform == "win32":
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from i18n import tr
+from project_root import find_project_root
 
-ARCH_DOC = Path(__file__).resolve().parent.parent / ".mla_arch.md"
+# ARCH_DOC layihə kökündə yaranır (arch_doc.py orada yazır).
+# Path(__file__).parent.parent paket qovluğuna düşürdü — heç vaxt match etmirdi.
+ARCH_DOC = find_project_root() / ".mla_arch.md"
 
 
 def main() -> int:

@@ -2,7 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { tr } from './i18n';
-import { effectiveStatus } from './licenseStatus';
+import { effectiveStatus, trialDaysLeft } from './licenseStatus';
+import { autoRecoverIfStuck } from './menu';
 import { findHistoryFile, findProjectRoot, readSavings } from './savingsReader';
 
 const REFRESH_MS = 5_000;
@@ -13,6 +14,7 @@ type BarState =
   | 'no_project'
   | 'no_key'
   | 'invalid'
+  | 'trial_expired' // trial bitdi — konversiya CTA (heç nə sınmır, qənaət dayanır)
   | 'stale'
   | 'off'
   | 'queue_stuck'   // background worker dayanıb, yeni indekslə baş tutmur
@@ -67,6 +69,11 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     // Hooks `.claude/settings.json`-ın bağlı olduğu kökə yazır — biz də orada axtaraq.
     const projectRoot = findProjectRoot(workspacePath);
     const flagOn = readEnforcement(projectRoot);
+    // İstifadəçi HEÇ düyməyə basmamalıdır: növbə ilişibsə (pending>0 + indeksləmə
+    // no-progress) avtomatik bərpa et — GIL-donmuş server özünü qurtara bilmir,
+    // ona görə xarici proses (bu extension) onu öldürüb reindex ilə drenləyir.
+    // autoRecoverIfStuck ucuz yoxlama + 5dəq cooldown ilə qorunur (churn yox).
+    if (flagOn) void autoRecoverIfStuck(projectRoot, context.extensionPath);
     const licenseState = effectiveStatus();
     const historyPath =
       findHistoryFile() ??
@@ -84,6 +91,7 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     let state: BarState;
     if (licenseState === 'no_key') state = 'no_key';
     else if (licenseState === 'invalid') state = 'invalid';
+    else if (licenseState === 'trial_expired') state = 'trial_expired';
     else if (!flagOn) state = 'off';
     else if (
       summary &&
@@ -95,7 +103,15 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       summary &&
       summary.historyEmpty &&
       summary.historyMtimeAgeSec < DATA_RESET_FRESH_THRESHOLD_SEC &&
-      summary.pendingActivityCount === 0
+      summary.pendingActivityCount === 0 &&
+      // Yalnız sistem HƏQİQƏTƏN sakit olanda "reset" sarı xəbərdarlığı göstər.
+      // Əks halda: Stop hook hər task bitəndə session log-u boşaldır →
+      // pendingActivityCount bir anda 0 olur → bar data_reset(sarı) ↔ live(yaşıl)
+      // arasında hər neçə saniyədən bir titrəyir (user "nəsə sınıb" sanır).
+      // İndekslənmə gedirsə və ya son 24s-də task olubsa, bu reset deyil, normal
+      // işdir → yaşıl active/idle göstər.
+      summary.indexingPending === 0 &&
+      summary.recent24hTasks === 0
     )
       state = 'data_reset';
     else if (summary && summary.pendingActivityCount > 0) state = 'live';
@@ -113,6 +129,11 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       case 'invalid':
         icon = '$(warning)';
         color = new vscode.ThemeColor('charts.red');
+        break;
+      case 'trial_expired':
+        // Qırmızı yox — trial bitməsi xəta deyil, gözlənilən lifecycle anıdır.
+        icon = '$(clock)';
+        color = new vscode.ThemeColor('charts.yellow');
         break;
       case 'queue_stuck':
       case 'data_reset':
@@ -145,6 +166,15 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     if (state === 'no_key' || state === 'invalid') {
       item.text = tr(`bar.cta.${state}`, { icon });
       item.tooltip = tr(`bar.tip.${state}`);
+      item.color = color;
+      return;
+    }
+    if (state === 'trial_expired') {
+      // Konversiya anı: qənaət rəqəmi burada ən güclü arqumentdir —
+      // "bu ay X qənaət etdin, davam etmək üçün lisenziya al".
+      const savedTotalK = summary ? (summary.savedTokens24h / 1000).toFixed(1) : '0.0';
+      item.text = tr('bar.cta.trial_expired', { icon });
+      item.tooltip = tr('bar.tip.trial_expired', { savedK: savedTotalK });
       item.color = color;
       return;
     }
@@ -209,8 +239,11 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
             count: safeSummary.pendingActivityCount,
           })
         : '';
+    // İstənilən pending fayl (1 belə) spinner+sayğac göstərsin — əvvəl `>= 5`
+    // idi, ona görə kiçik edit-lər (1-3 fayl) heç vaxt görünmürdü. İndi fayl
+    // edit olan kimi "⟳ N" çıxır, drain bitəndə itir.
     const indexingBadge =
-      safeSummary.indexingPending >= 5
+      safeSummary.indexingPending > 0
         ? tr('bar.indexingBadge', { n: safeSummary.indexingPending })
         : '';
     // Bar text shows absolute tokens only — the % is structurally a partial
@@ -219,7 +252,11 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     // it for power users.
     const calibrating = safeSummary.savedPct24h < 0;
     const pctFull = calibrating ? tr('bar.calibrating') : `${safeSummary.savedPct24h.toFixed(1)}%`;
-    const tail = [liveBadge, indexingBadge].filter(Boolean).join(' ');
+    // Aktiv trial: bar normal işləyir, amma qalan günlər həmişə görünür —
+    // "qalan gün + öz qənaət rəqəmin" cütlüyü konversiyanın əsas alətidir.
+    const trialDays = licenseState === 'trialing' ? trialDaysLeft() : null;
+    const trialBadge = trialDays !== null ? tr('bar.trialBadge', { days: trialDays }) : '';
+    const tail = [liveBadge, indexingBadge, trialBadge].filter(Boolean).join(' ');
     item.text = tr('bar.summary', { icon, savedK })
       + (tail ? ' ' + tail : '');
     item.color = color;
@@ -228,6 +265,10 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     const staleNote =
       licenseState === 'stale'
         ? '\n' + tr('bar.tip.staleNote')
+        : '';
+    const trialNote =
+      trialDays !== null
+        ? '\n' + tr('bar.tip.trialNote', { days: trialDays })
         : '';
     item.tooltip = tr('bar.tipFull', {
       state: stateLabel,
@@ -254,11 +295,27 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     }) + '\n' + tr('bar.tip.lastUpdate', {
       history: fileMtimeIso(historyPath),
       session: fileMtimeIso(sessionLogPath),
-    }) + staleNote;
+    }) + staleNote + trialNote;
   };
 
   refresh();
-  const interval = setInterval(refresh, REFRESH_MS);
+  let interval: NodeJS.Timeout | null = setInterval(refresh, REFRESH_MS);
+
+  // Fokus olmayan window-da hər 5s 32 sync stat → SMB drive-də UI laggy.
+  // Pəncərə blur olduqda timer-i dayandırırıq; focus qayıdanda bir dəfə
+  // refresh + interval-ı yenidən qururuq.
+  const focusListener = vscode.window.onDidChangeWindowState((state) => {
+    if (state.focused) {
+      if (interval === null) {
+        refresh();
+        interval = setInterval(refresh, REFRESH_MS);
+      }
+    } else if (interval !== null) {
+      clearInterval(interval);
+      interval = null;
+    }
+  });
+  context.subscriptions.push(focusListener);
 
   const folders = vscode.workspace.workspaceFolders;
   if (folders && folders.length > 0) {
@@ -271,6 +328,10 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       '.mla_savings_history.jsonl',
       '.mla_session_log.jsonl',
       '.mla_pending.txt',
+      // Drain başlayanda (.txt → .processing) və bitəndə (.processing silinir)
+      // bar dərhal yenilənsin ki, spinner+sayğac vaxtında çıxsın/itsin —
+      // əks halda yalnız 5s interval-ı gözləyirdi.
+      '.mla_pending.processing',
     ];
     for (const name of watcherFiles) {
       const w = vscode.workspace.createFileSystemWatcher(
@@ -284,7 +345,7 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
   }
 
   return new vscode.Disposable(() => {
-    clearInterval(interval);
+    if (interval !== null) clearInterval(interval);
     item.dispose();
   });
 }

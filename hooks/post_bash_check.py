@@ -22,9 +22,14 @@ _INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(_INSTALL_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS, estimate_tokens
-from license_gate import enforcement_active
-from project_root import find_project_root
+try:
+    from mla_constants import SUPPORTED_EXTENSIONS as INDEXED_EXTS, estimate_tokens
+    from license_gate import enforcement_active
+    from project_root import find_project_root
+    from atomic_write import append_atomic
+except Exception:
+    # Dependency import alınmadı — heç vaxt tool-u block etmə, səssiz çıx.
+    sys.exit(0)
 
 PROJECT_ROOT = find_project_root()
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
@@ -123,16 +128,12 @@ def _log_bash_output(tool_response) -> None:
         return
     total_chars = sum(len(p) for p in parts)
     est = estimate_tokens("".join(parts) if total_chars < 200_000 else "x" * total_chars)
-    try:
-        record = {
-            "ts": time.time(),
-            "type": "bash_output",
-            "estimated_tokens": int(est),
-        }
-        with open(SESSION_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    record = {
+        "ts": time.time(),
+        "type": "bash_output",
+        "estimated_tokens": int(est),
+    }
+    append_atomic(SESSION_LOG, json.dumps(record, ensure_ascii=False))
 
 
 def main() -> int:
@@ -180,11 +181,7 @@ def main() -> int:
             "estimated_baseline_tokens": estimated_baseline,
             "estimated_actual_tokens": estimated_actual,
         }
-        try:
-            with open(SESSION_LOG, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except OSError:
-            pass
+        append_atomic(SESSION_LOG, json.dumps(record, ensure_ascii=False))
 
     return 0
 

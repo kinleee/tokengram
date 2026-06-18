@@ -4,6 +4,10 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from project_root import find_project_root
+from atomic_write import write_atomic
+
 
 def main():
     if len(sys.argv) != 2 or sys.argv[1].lower() not in ("on", "off"):
@@ -11,9 +15,9 @@ def main():
         sys.exit(1)
 
     state = sys.argv[1].lower()
-    project_root = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()).resolve()
-    flag = project_root / ".mla_enforcement.flag"
-    flag.write_text(state, encoding="utf-8")
+    flag = find_project_root() / ".mla_enforcement.flag"
+    # Atomic write: read-during-write race-də license_gate yarımçıq oxuya bilməsin.
+    write_atomic(flag, state)
     print(f"MLA enforcement: {state.upper()}")
 
 

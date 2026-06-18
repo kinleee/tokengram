@@ -270,15 +270,29 @@ function countQueueLines(filePath: string): number {
   }
 }
 
+function addUniqueQueuePaths(filePath: string, into: Set<string>): void {
+  try {
+    const data = fs.readFileSync(filePath, 'utf-8');
+    for (const line of data.split('\n')) {
+      const t = line.trim();
+      if (t) into.add(t);
+    }
+  } catch {
+    /* yoxdursa heç nə əlavə etmə */
+  }
+}
+
 function readIndexingPending(historyPath: string): number {
-  // Background worker drain etməyən fayllar — re-embed gözləyirlər.
-  // Həm .pending.txt (növbədə), həm də .processing (drain mid-flight) sayılır
-  // ki worker stuck olduqda da real "ilişib qalan" sayı düzgün görünsün.
+  // Background worker drain etməyən UNİKAL fayllar — re-embed gözləyirlər.
+  // Həm .pending.txt (növbədə), həm də .processing (drain mid-flight) BİRLƏŞİB
+  // unikallaşır. Səbəb: eyni faylı 10 dəfə save etmək növbəyə 10 sətir yazırdı
+  // → spinner "⟳10" göstərirdi, halbuki gözləyən cəmi 1 fayldır (drain onsuz da
+  // dedup edir). İndi say real "neçə fayl gözləyir"i göstərir.
   const dir = path.dirname(historyPath);
-  return (
-    countQueueLines(path.join(dir, '.mla_pending.txt')) +
-    countQueueLines(path.join(dir, '.mla_pending.processing'))
-  );
+  const unique = new Set<string>();
+  addUniqueQueuePaths(path.join(dir, '.mla_pending.txt'), unique);
+  addUniqueQueuePaths(path.join(dir, '.mla_pending.processing'), unique);
+  return unique.size;
 }
 
 // `.mla_pending.processing` mövcud və **boş deyilsə**, MCP background worker

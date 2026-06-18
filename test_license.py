@@ -82,6 +82,7 @@ def _sign_token(
     fingerprint: str = "test_fp",
     subscription_status: str = "active",
     exp_offset_seconds: int = 7 * 24 * 60 * 60,
+    iat_offset_seconds: int = 0,
     issuer: str = lic.JWT_ISSUER,
 ) -> str:
     import jwt as pyjwt
@@ -92,7 +93,7 @@ def _sign_token(
         "license_key": license_key,
         "fingerprint": fingerprint,
         "subscription_status": subscription_status,
-        "iat": now,
+        "iat": now + iat_offset_seconds,
         "exp": now + exp_offset_seconds,
         "iss": issuer,
     }
@@ -223,6 +224,26 @@ class TestVerifyToken(unittest.TestCase):
         with self.assertRaises(lic.LicenseError):
             lic.verify_token(token, other_pubkey)
 
+    def test_future_iat_within_leeway_ok(self):
+        # 2026-06-12 insidenti: lokal saat serverdən bir neçə saniyə geri
+        # qalanda təzə tokenin iat-ı gələcəkdə görünürdü və 0-leeway verify
+        # tokeni rədd edirdi. Leeway daxilindəki fərq artıq keçməlidir.
+        token = _sign_token(
+            self.private_pem,
+            iat_offset_seconds=lic.JWT_LEEWAY_SECONDS - 10,
+        )
+        claims = lic.verify_token(token, self.public_pem)
+        self.assertEqual(claims.user_id, "user_test")
+
+    def test_future_iat_beyond_leeway_raises(self):
+        token = _sign_token(
+            self.private_pem,
+            iat_offset_seconds=lic.JWT_LEEWAY_SECONDS + 60,
+        )
+        with self.assertRaises(lic.LicenseError) as ctx:
+            lic.verify_token(token, self.public_pem)
+        self.assertIn("iat", str(ctx.exception).lower())
+
     def test_missing_required_claim_raises(self):
         import jwt as pyjwt
         claims = {
@@ -284,8 +305,11 @@ class TestEnsureLicenseFlow(unittest.TestCase):
         token = _sign_token(self.private_pem, fingerprint=real_fp)
         exp = int(time.time()) + 7 * 24 * 60 * 60
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # last_refreshed_at olmasa periodik recheck dərhal serverə gedir və
+        # cache-only ssenari pozulur (sahə PERIODIC_RECHECK ilə əlavə olunub).
         self.cache_path.write_text(json.dumps({
             "token": token, "expires_at": exp, "fingerprint": real_fp,
+            "last_refreshed_at": int(time.time()),
         }))
 
         with patch("license._activate") as m_act, patch("license._refresh") as m_ref:
@@ -381,8 +405,11 @@ class TestEnsureLicenseFlow(unittest.TestCase):
         cached_token = _sign_token(self.private_pem, fingerprint=real_fp, exp_offset_seconds=12 * 3600)
         cached_exp = int(time.time()) + 12 * 3600
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # last_refreshed_at offline grace pəncərəsinin açarıdır — yoxdursa 0
+        # sayılır və grace heç vaxt işləmir (sahə PERIODIC_RECHECK ilə gəlib).
         self.cache_path.write_text(json.dumps({
             "token": cached_token, "expires_at": cached_exp, "fingerprint": real_fp,
+            "last_refreshed_at": int(time.time()),
         }))
 
         with patch("license._refresh", side_effect=lic.LicenseError("network error: timeout")) as m_ref, \

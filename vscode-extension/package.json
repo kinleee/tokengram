@@ -2,7 +2,7 @@
   "name": "tokengram",
   "displayName": "Tokengram",
   "description": "Token-saving memory layer for Claude Code — hybrid RAG search over your project (local; up to 70% on search/Read-heavy tasks, less on edit-heavy refactors).",
-  "version": "0.1.36",
+  "version": "0.1.61",
   "publisher": "tokengram",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "icon.png",
@@ -78,6 +78,30 @@
           "default": "",
           "description": "Path to the Tokengram source tree (folder containing main.py). Used by the Re-index button until a production CLI ships in the wheel."
         }
+      }
+    },
+    "configurationDefaults": {
+      "files.exclude": {
+        "**/.tokengram.writer.lock": true,
+        "**/.tokengram.drainer.lock": true,
+        "**/.tokengram.leader.lock": true,
+        "**/.tokengram.reindex.want": true,
+        "**/.tokengram.*.lock.tmp.*": true,
+        "**/.bm25_index.pkl": true,
+        "**/.file_hashes.json": true,
+        "**/.mla_db_health.json": true,
+        "**/.mla_enforcement.flag": true,
+        "**/.mla_pending.txt": true,
+        "**/.mla_pending.processing": true,
+        "**/.mla_session_log.jsonl": true,
+        "**/.mla_session_log.jsonl.processing.*": true,
+        "**/.mla_savings_history.jsonl": true,
+        "**/.mla_savings_history.jsonl.bak.*": true,
+        "**/.mla_arch.md": true,
+        "**/.mla_arch_state.json": true,
+        "**/chroma_db": true,
+        "**/chroma_db.broken-*": true,
+        "**/chroma_db.corrupt-*": true
       }
     }
   },

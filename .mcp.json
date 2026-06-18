@@ -1,9 +1,10 @@
 {
   "mcpServers": {
-    "mla-agent": {
-      "command": "python",
+    "tokengram": {
+      "command": "C:\\Users\\ilkin.ha\\.tokengram\\venv\\Scripts\\python.exe",
       "args": [
-        "mcp_server.py"
+        "-m",
+        "tokengram"
       ],
       "env": {
         "PYTHONUNBUFFERED": "1",
