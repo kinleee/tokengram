@@ -135,8 +135,20 @@ function registerSaveIndexer(context: vscode.ExtensionContext): void {
         on = false;
       }
       if (!on) return;
-      if (alreadyQueued(projectRoot, filePath)) return;
-      fs.appendFileSync(path.join(projectRoot, '.mla_pending.txt'), filePath + '\n', 'utf-8');
+      if (!alreadyQueued(projectRoot, filePath)) {
+        fs.appendFileSync(path.join(projectRoot, '.mla_pending.txt'), filePath + '\n', 'utf-8');
+      }
+      // Editor save-i task-a bağlı deyil (Stop hook işləməyəcək) — ona görə
+      // drain marker-ini ÖZÜMÜZ buraxırıq ki, işləyən MCP server növbəni isti
+      // modeli ilə dərhal (~1s) drenlə. (Claude redaktələri queue_change.py ilə
+      // yığılır və task sonu Stop hook tərəfindən drenlənir — orada marker buraxmırıq.)
+      // Marker-i bir editor save-ı üçün 6s idle debounce-dan SONRA buraxırıq →
+      // davamlı drain churn-u yox, yazı bursunun sonunda bir drain.
+      try {
+        fs.writeFileSync(path.join(projectRoot, '.mla_drain.now'), '', 'utf-8');
+      } catch {
+        /* best-effort */
+      }
     } catch {
       // Best-effort — heç vaxt save əməliyyatını bloklama.
     }

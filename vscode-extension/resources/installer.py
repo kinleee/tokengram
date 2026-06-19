@@ -206,11 +206,12 @@ def _pip_run(args: list[str]) -> None:
     _run(args + _PIP_NET_FLAGS, timeout=_PIP_TIMEOUT_SEC)
 
 
-# Fresh install-da deps (torch + transformers + chromadb + sentence-transformers
-# + asılılıqlar) venv-ə təxminən bu qədər bayt yazır (real ölçü ~1.20 GB; baza
-# venv çıxılandan sonra ~1.25 GB böyümə). Yalnız disk böyüməsini 0-100% faizə
-# çevirmək üçündür — az/çox təxmin sadəcə barın dolma sürətini dəyişir, düzgünlüyü yox.
-_DEPS_TARGET_BYTES = 1_250_000_000
+# Fresh install-da deps (chromadb + onnxruntime + fastembed + mcp + asılılıqlar)
+# venv-ə təxminən bu qədər bayt yazır. torch + transformers + sentence-transformers
+# (~491MB torch + asılılıqlar) SİLİNDİ → fastembed onnxruntime-i təkrar istifadə
+# edir; venv böyüməsi ~1.25 GB-dan ~600 MB-a düşür. Yalnız barın dolma sürətini
+# kalibrləyir — az/çox təxmin düzgünlüyü pozmur.
+_DEPS_TARGET_BYTES = 600_000_000
 
 
 def _dir_size(path: Path) -> int:
@@ -323,7 +324,7 @@ def predownload_embedding_model(venv: Path) -> None:
     copy ilə işləyir — symlink lazım deyil). Uğursuz olsa install dayanmır:
     runtime-da `_ensure_loaded` ehtiyat online fallback edir.
     """
-    log("[5/5] Pre-downloading embedding model (~130 MB, one-time)...")
+    log("[5/5] Pre-downloading embed + rerank models (~220 MB, one-time)...")
     py = str(venv_python(venv))
     env = dict(os.environ)
     # Online məcburi (offline bayraqlarını sil) + symlink xəbərdarlığını sus
@@ -331,18 +332,22 @@ def predownload_embedding_model(venv: Path) -> None:
     env.pop("TRANSFORMERS_OFFLINE", None)
     env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     env["TRANSFORMERS_VERBOSITY"] = "error"
+    # fastembed (ONNX) — hər iki modeli cache-ə endir: bge-small (embed) +
+    # ms-marco (rerank). torch YOX → endirmə də, RAM da xeyli azdır.
     code = (
         "from tokengram import config;"
-        "from sentence_transformers import SentenceTransformer;"
-        "SentenceTransformer(config.EMBEDDING_MODEL_NAME);"
-        "print('model cached')"
+        "from fastembed import TextEmbedding;"
+        "from fastembed.rerank.cross_encoder import TextCrossEncoder;"
+        "list(TextEmbedding(model_name=config.EMBEDDING_MODEL_NAME).embed(['warmup']));"
+        "list(TextCrossEncoder(model_name=config.RERANKER_MODEL_NAME).rerank('warmup', ['doc']));"
+        "print('models cached')"
     )
     try:
         subprocess.run(
             [py, "-c", code], env=env, timeout=600, check=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
-        log("[5/5] Embedding model cached OK")
+        log("[5/5] Embed + rerank models cached OK")
     except Exception as e:
         # Non-fatal: runtime fallback modeli ilk reindex-də endirəcək.
         log(f"[5/5] Model pre-download keçildi (runtime fallback edəcək): {e}")

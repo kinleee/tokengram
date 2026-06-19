@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tokengram"
-version = "0.1.32"
+version = "0.1.36"
 description = "Token-saving memory layer for AI coding assistants — local hybrid RAG (BM25 + semantic + reranker) over your project, exposed via MCP."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -25,8 +25,8 @@ dependencies = [
     "chromadb==1.5.8",
     "anthropic>=0.42.0",
     "openai>=1.60.0",
-    "sentence-transformers>=3.3.0",
-    "einops>=0.8.0",
+    # fastembed (ONNX) — torch-suz embed + rerank; onnxruntime-i chromadb gətirir.
+    "fastembed>=0.8.0",
     "langchain-text-splitters>=0.3.0",
     "rank-bm25>=0.2.2",
     "watchdog>=6.0.0",

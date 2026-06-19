@@ -2,7 +2,7 @@
   "name": "tokengram",
   "displayName": "Tokengram",
   "description": "Token-saving memory layer for Claude Code — hybrid RAG search over your project (local; up to 70% on search/Read-heavy tasks, less on edit-heavy refactors).",
-  "version": "0.1.61",
+  "version": "0.1.65",
   "publisher": "tokengram",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "icon.png",

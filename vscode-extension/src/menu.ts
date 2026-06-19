@@ -540,9 +540,6 @@ const HOLDER_LOCK_NAMES = [
 // yenilənmir) = donub. Soyuq model yükü (~70s) eşikdən aşağıdır ki, canlı uzun
 // indeks yanlışlıqla öldürülməsin (2026-06-17: real donma 13 dəq idi).
 const DB_NOPROGRESS_SEC = 120;
-// Avtomatik recovery cooldown — bar hər 5s yoxlayır; eyni layihəni bu qədərdən
-// tez-tez bərpa etmə (kill+reindex churn-u olmasın).
-const AUTO_RECOVER_COOLDOWN_MS = 5 * 60 * 1000;
 
 function isPidAlive(pid: number): boolean {
   if (!pid || pid <= 0) return false;
@@ -717,10 +714,18 @@ interface RecoveryResult {
 function deepRecover(root: string): RecoveryResult {
   const pending = uniquePendingCount(root);
   const activityAgeSec = indexingActivityAgeSec(root);
-  const stuck = pending > 0 && activityAgeSec > DB_NOPROGRESS_SEC;
+  // "Donmuş" üçün ÜÇ şərt birlikdə lazımdır: (1) görüləsi iş var (pending>0),
+  // (2) indeksləmə DB_NOPROGRESS-dir irəliləmir, (3) CANLI bir proses lock tutub.
+  // 3-cü şərt kritikdir: canlı lock sahibi yoxdursa öldürüləsi DONMUŞ proses də
+  // yoxdur — ya server ümumiyyətlə işləmir, ya növbə orfandır. O halda "stuck"
+  // demək = "killed 0 frozen process(es)" kimi YALANÇI alarm. holders-i kill-dən
+  // ƏVVƏL bir dəfə oxuyuruq (kill onları öldürəndən sonra siyahı boşalır).
+  const holders = liveLockHolders(root);
+  const stuck =
+    pending > 0 && activityAgeSec > DB_NOPROGRESS_SEC && holders.length > 0;
   const killed: number[] = [];
   if (stuck) {
-    for (const pid of liveLockHolders(root)) {
+    for (const pid of holders) {
       if (killPid(pid)) killed.push(pid);
     }
   }
@@ -741,28 +746,12 @@ function deepRecover(root: string): RecoveryResult {
   return { killed, cleared, pending, activityAgeSec, stuck };
 }
 
-// Avtomatik recovery — status bar dövründən çağırılır ki, istifadəçi HEÇ düyməyə
-// basmasın. Yalnız aydın donmada (pending>0 + no-progress) + cooldown ilə işləyir:
-// donmuş server(lər)i öldür → stale lock təmizlə → reindex ilə drenlə. GIL-donmuş
-// server özünü bərpa edə bilmir (in-proc watchdog GIL-i ala bilmir) — bu, ayrı
-// proses (extension) tərəfindən tək etibarlı avtomatik çıxış yoludur.
-const _autoRecoverAt = new Map<string, number>();
-export async function autoRecoverIfStuck(root: string, extensionPath: string): Promise<void> {
-  try {
-    if (uniquePendingCount(root) === 0) return; // iş yox
-    if (indexingActivityAgeSec(root) <= DB_NOPROGRESS_SEC) return; // hələ irəliləyir / soyuq yük
-    const last = _autoRecoverAt.get(root) ?? 0;
-    if (Date.now() - last < AUTO_RECOVER_COOLDOWN_MS) return; // churn qoruması
-    _autoRecoverAt.set(root, Date.now());
-    const result = deepRecover(root);
-    vscode.window.showWarningMessage(
-      tr('menu.autoRecover', { pending: result.pending, n: result.killed.length }),
-    );
-    await runAction('reindex', root, extensionPath);
-  } catch {
-    /* best-effort — avtomatik bərpa heç vaxt UI-ı sındırmasın */
-  }
-}
+// Avtomatik recovery (autoRecoverIfStuck) SİLİNDİ (2026-06-19 yenidən-qurma):
+// köhnə davamlı poll-drain + watchdog/self-heal qülləsi getdi → "GIL-donmuş
+// server" halı artıq mövcud deyil, ona görə bar dövründən avtomatik kill+reindex
+// də lazım deyil. Növbə task sonu Stop hook-da (server bağlısa onun soyuq
+// fallback-ı ilə) drenlənir. Manual eskalasiya: aşağıdakı `refresh` (deepRecover)
+// və `reindex` düymələri qalır.
 
 async function runAction(action: MenuItem['action'], root: string, extensionPath: string) {
   const channel = vscode.window.createOutputChannel('MLA Agent');
@@ -819,11 +808,22 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
         );
         await runAction('reindex', root, extensionPath);
       } else if (result.pending > 0) {
-        // Növbə var, amma indeksləmə hələ irəliləyir (soyuq yük / aktiv drain) —
-        // donma deyil, nə öldür nə reindex; sadəcə "gedir" de.
-        vscode.window.showInformationMessage(
-          tr('menu.refreshInProgress', { pending: result.pending }),
-        );
+        // Növbə var, amma donma yox. İki hal:
+        //  - canlı sahib var → server aktiv drenləyir (soyuq yük/aktiv drain),
+        //    nə öldür nə reindex; sadəcə "gedir" de.
+        //  - canlı sahib yox → orfan növbə (server işləmir). İstifadəçi dərin
+        //    bərpa düyməsinə basıb — növbəni özümüz incremental reindex ilə
+        //    drenləyirik (collision yox, çünki canlı indeksləyici yoxdur).
+        if (liveLockHolders(root).length === 0) {
+          vscode.window.showInformationMessage(
+            tr('menu.refreshDraining', { pending: result.pending }),
+          );
+          await runAction('reindex', root, extensionPath);
+        } else {
+          vscode.window.showInformationMessage(
+            tr('menu.refreshInProgress', { pending: result.pending }),
+          );
+        }
       } else if (result.cleared.length > 0) {
         // Növbə boş, amma ölü-proses qalıq kilidləri təmizləndi.
         vscode.window.showInformationMessage(

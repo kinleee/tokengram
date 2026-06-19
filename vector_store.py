@@ -45,55 +45,54 @@ def _canonical_path(p) -> str:
 class CodeEmbeddingFunction:
     """BAAI/bge-small-en-v1.5 ilə ChromaDB-yə uyğun embedding funksiyası.
 
-    33M parametrli standard SentenceTransformer modeli (~130MB).
-    Lokal işləyir, API xərci yoxdur, Windows-da stabildir.
+    fastembed (ONNX Runtime) backend — torch YOX. Eyni 384-ölçülü model,
+    amma ~38% az RAM (514→319 MB) və ~25× sürətli soyuq-start (68s→~3s).
+    fastembed bge üçün L2-normalize vektor qaytarır → Chroma default L2
+    məsafəsi kosinusla eyni sıralayır.
 
-    ⚡ Lazy-of-lazy yükləmə: `__init__`-də model RAM-a alınmır.
-    Yalnız ilk `__call__`-də (real embedding zamanı) yüklənir.
-    Beləcə `count()`/`get()` kimi metadata çağırışları üçün
-    sentence_transformers ümumiyyətlə import olunmur.
+    ⚡ Lazy yükləmə: `__init__`-də model RAM-a alınmır; yalnız ilk real embed
+    çağırışında yüklənir. Beləcə `count()`/`get()` metadata çağırışları üçün
+    fastembed ümumiyyətlə import olunmur.
 
-    ChromaDB ≥ 0.6 EmbeddingFunction protokolu üçün `name()` metodu
-    və `__call__` lazımdır.
+    ChromaDB ≥ 0.6 EmbeddingFunction protokolu üçün `name()` + `__call__` lazımdır.
     """
 
     def __init__(self):
-        # Model yox — ilk __call__-də yüklənəcək
+        # Model yox — ilk embed çağırışında yüklənəcək
         self._model = None
 
     @staticmethod
     def name() -> str:
-        """ChromaDB-nin tələb etdiyi unikal ad."""
-        return "mla-bge-small-en-v1.5"
+        """ChromaDB-nin tələb etdiyi unikal ad (backend dəyişdiyi üçün yeni)."""
+        return "mla-fastembed-bge-small-en-v1.5"
 
     def _ensure_loaded(self):
         """İlk dəfə real embedding lazım olduqda modeli yüklə.
 
-        Reindex `HF_HUB_OFFLINE=1` ilə işləyir (worker online-check hang qarşısı).
-        Əgər model lokal cache-də YOXDURSA offline yükləmə fail olur → köhnə
-        kodda embedding boş keçir, baza boş qalır (səssiz uğursuzluq — testerin
-        12547 chunk "98%" göstərib boş baza problemi). İndi self-heal edirik:
-        offline fail olsa, BİR DƏFƏ online endirməyə cəhd edirik (sonra offline
-        bayraqları geri qoyulur). Beləcə cache-i boş maşınlar özünü sağaldır.
+        Reindex `HF_HUB_OFFLINE=1` ilə işləyir (online-check hang qarşısı).
+        Model lokal cache-də YOXDURSA offline yükləmə fail olur → köhnə kodda
+        embedding boş keçirdi, baza boş qalırdı (səssiz uğursuzluq). Self-heal:
+        offline fail olsa, BİR DƏFƏ təmiz subprocess-də online endirməyə cəhd
+        edirik; beləcə cache-i boş maşınlar özünü sağaldır.
         """
         if self._model is not None:
             return
-        from sentence_transformers import SentenceTransformer
+        from fastembed import TextEmbedding
         os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-        logger.info(f"🔄 Embedding modeli yüklənir: {config.EMBEDDING_MODEL_NAME}")
+        logger.info(f"🔄 Embedding modeli yüklənir (fastembed): {config.EMBEDDING_MODEL_NAME}")
         try:
-            self._model = SentenceTransformer(config.EMBEDDING_MODEL_NAME)
-            logger.info("✅ Embedding modeli yükləndi (cache)")
+            self._model = TextEmbedding(model_name=config.EMBEDDING_MODEL_NAME)
+            logger.info("✅ Embedding modeli yükləndi (fastembed/onnx)")
             return
         except Exception as e:
             logger.warning(
-                f"⚠️ Model offline/cache-dən yüklənmədi ({type(e).__name__}: {e}); "
-                f"təmiz subprocess ilə online endirmə cəhdi edilir..."
+                f"⚠️ fastembed modeli offline/cache-dən yüklənmədi "
+                f"({type(e).__name__}: {e}); təmiz subprocess ilə online endirmə..."
             )
-        # Online endirmə: AYRI subprocess-də. Bu prosesdə `huggingface_hub`/
-        # `transformers` offline bayrağını import zamanı sabitə oxuyub — `os.environ`-i
-        # dəyişmək kifayət etmir. Təmiz env-li yeni proses bayrağı sıfırdan oxuyur,
-        # modeli paylaşılan HF cache-ə endirir; sonra biz cache-dən offline yükləyirik.
+        # Online endirmə AYRI subprocess-də: bu prosesdə `huggingface_hub` offline
+        # bayrağını import zamanı sabitə oxuyub — `os.environ`-i dəyişmək kifayət
+        # etmir. Təmiz env-li yeni proses bayrağı sıfırdan oxuyur, ONNX modeli
+        # paylaşılan cache-ə endirir; sonra biz cache-dən offline yükləyirik.
         import sys as _sys
         import subprocess as _sp
         env = {
@@ -101,10 +100,9 @@ class CodeEmbeddingFunction:
             if k not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
         }
         env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-        env["TRANSFORMERS_VERBOSITY"] = "error"
         dl_code = (
-            "from sentence_transformers import SentenceTransformer;"
-            f"SentenceTransformer({config.EMBEDDING_MODEL_NAME!r})"
+            "from fastembed import TextEmbedding;"
+            f"list(TextEmbedding(model_name={config.EMBEDDING_MODEL_NAME!r}).embed(['warmup']))"
         )
         try:
             _sp.run(
@@ -120,49 +118,33 @@ class CodeEmbeddingFunction:
             )
             raise
         # İndi model cache-dədir → offline (in-process) yüklə
-        self._model = SentenceTransformer(config.EMBEDDING_MODEL_NAME)
-        logger.info("✅ Embedding modeli online endirildi (subprocess) + cache-dən yükləndi")
+        self._model = TextEmbedding(model_name=config.EMBEDDING_MODEL_NAME)
+        logger.info("✅ Embedding modeli online endirildi (subprocess) + yükləndi")
+
+    def _embed(self, texts: List[str]) -> List[List[float]]:
+        """fastembed `.embed()` → generator[np.ndarray]; Chroma list[list[float]] istəyir."""
+        batch = getattr(config, "EMBED_BATCH_SIZE", 128)
+        return [v.tolist() for v in self._model.embed(list(texts), batch_size=batch)]
 
     def __call__(self, input: List[str]) -> List[List[float]]:
-        """Mətnləri embedding vektorlarına çevir.
-
-        Args:
-            input: Embedding ediləcək mətn siyahısı (ChromaDB v0.6+ adıdır)
-
-        Returns:
-            Embedding vektorları siyahısı
-        """
+        """Mətnləri (sənəd) embedding vektorlarına çevir (ChromaDB v0.6+ adı `input`)."""
         self._ensure_loaded()
         # bge sənəd embedding-i üçün prefix istəmir (config-də DOCUMENT_PREFIX="")
         if config.DOCUMENT_PREFIX:
             input = [f"{config.DOCUMENT_PREFIX}{t}" for t in input]
-        embeddings = self._model.encode(
-            input,
-            batch_size=getattr(config, "EMBED_BATCH_SIZE", 128),
-            show_progress_bar=False,
-        )
-        return embeddings.tolist()
+        return self._embed(input)
 
     def embed_query(self, input) -> List[List[float]]:
         """Sorğu üçün ayrı embedding metodu (ChromaDB ≥ 0.6 tələbi).
 
-        ChromaDB v0.6+ bu metodu chromadb-internal collection.query path-ında
-        çağırır və **batch** kimi davranır: input List[str] və ya tək str
-        ola bilər, return həmişə List[List[float]] olmalıdır.
-
-        bge modelləri query üçün xüsusi instruction prefix istəyir.
+        Input str və ya List[str] ola bilər; return həmişə List[List[float]].
+        bge query üçün instruction prefix istəyir (config.QUERY_PREFIX).
         """
         self._ensure_loaded()
-        # Input str və ya List[str] ola bilər
         texts = [input] if isinstance(input, str) else list(input)
         if config.QUERY_PREFIX:
             texts = [f"{config.QUERY_PREFIX}{t}" for t in texts]
-        embeddings = self._model.encode(
-            texts,
-            batch_size=getattr(config, "EMBED_BATCH_SIZE", 128),
-            show_progress_bar=False,
-        )
-        return embeddings.tolist()
+        return self._embed(texts)
 
     def embed_documents(self, input: List[str]) -> List[List[float]]:
         """Sənəd batch-i üçün ayrı embedding metodu (ChromaDB ≥ 0.6 tələbi)."""
@@ -198,11 +180,22 @@ class HashStore:
                 with open(self.store_path, "r", encoding="utf-8") as f:
                     self.hashes = json.load(f)
                 stored_gen = self.hashes.pop("__generation__", None)
+                stored_backend = self.hashes.pop("__embed_backend__", None)
                 live_gen = db_guard.current_generation(config.CHROMA_DB_PATH)
-                if stored_gen is not None and stored_gen != live_gen:
+                live_backend = getattr(config, "EMBED_BACKEND_TAG", "default")
+                gen_mismatch = stored_gen is not None and stored_gen != live_gen
+                # Backend dəyişib (sentence-transformers→fastembed) VƏ YA köhnə,
+                # tagsız hash store (pre-fastembed) — hər ikisində köhnə vektorlar
+                # fərqli normalizasiyadadır → tam re-embed lazımdır. Boş köhnə
+                # store-u (heç fayl yoxdursa) miqrasiya saymırıq.
+                backend_mismatch = (
+                    (stored_backend is not None and stored_backend != live_backend)
+                    or (stored_backend is None and len(self.hashes) > 0)
+                )
+                if gen_mismatch or backend_mismatch:
+                    why = "embed-backend dəyişib" if backend_mismatch else "baza nəsli dəyişib"
                     logger.warning(
-                        "Hash store köhnə baza nəslinə aiddir — sıfırlanır "
-                        "(tam re-index ediləcək)"
+                        f"Hash store köhnəlib ({why}) — sıfırlanır (tam re-index ediləcək)"
                     )
                     self.hashes = {}
                 logger.debug(f"Hash store yükləndi: {len(self.hashes)} fayl")
@@ -222,6 +215,7 @@ class HashStore:
             tmp.parent.mkdir(parents=True, exist_ok=True)
             payload = dict(self.hashes)
             payload["__generation__"] = db_guard.current_generation(config.CHROMA_DB_PATH)
+            payload["__embed_backend__"] = getattr(config, "EMBED_BACKEND_TAG", "default")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2, ensure_ascii=False)
             os.replace(tmp, self.store_path)
@@ -236,6 +230,24 @@ class HashStore:
         """Faylın hash-ini yenilə və diskə yaz."""
         self.hashes[_canonical_path(file_path)] = file_hash
         self._save()
+
+    def bulk_update(self, file_paths) -> int:
+        """Çoxlu faylın hash-ını hesablayıb BİR dəfə yaz (generation stamp daxil).
+
+        Bulk reindex (`index_documents`) bunu çağırır. Əvvəllər index_documents
+        hash store-a HEÇ toxunmurdu → hər tam reindex-dən sonra `.file_hashes.json`
+        köhnə nəsil/boş qalırdı: hər server boot-da "nəsil dəyişib" reset olur,
+        indekslənmiş faylların heç biri qeyd olunmurdu → sonrakı incremental
+        drain dəyişməyən faylı belə yenidən embed edirdi. İndi bir dəfə yazırıq
+        (per-fayl `update`-in 148 ayrı `_save`-i əvəzinə tək yazı)."""
+        updated = 0
+        for fp in file_paths:
+            h = HashStore.compute_hash(fp)
+            if h:
+                self.hashes[_canonical_path(fp)] = h
+                updated += 1
+        self._save()
+        return updated
 
     def remove(self, file_path: str):
         """Faylın hash-ini sil."""
@@ -454,9 +466,30 @@ class ChromaVectorStore:
                 except Exception:
                     pass
 
+        # Hash store-u doldur: generation damğalanır + hər faylın hash-i qeyd
+        # olunur ki, sonrakı incremental drain DƏYİŞMƏYƏN faylı yenidən embed
+        # etməsin və hər boot-da "nəsil dəyişib" reset baş verməsin. (index_documents
+        # əvvəllər hash store-a toxunmurdu — bu, reindex sonrası "hər açılışda
+        # sıfırlanır + təkrar embed" probleminin kökü idi.)
+        try:
+            files = []
+            seen = set()
+            for chunk in chunks:
+                fp = chunk.metadata.get("file_path") if hasattr(chunk, "metadata") else None
+                if fp:
+                    canon = _canonical_path(fp)
+                    if canon not in seen:
+                        seen.add(canon)
+                        files.append(canon)
+            if files:
+                n = self.hash_store.bulk_update(files)
+                logger.info(f"🔑 Hash store damğalandı: {n} fayl (generation stamp)")
+        except Exception as e:
+            logger.warning(f"Hash store bulk yeniləmə xətası: {e}")
+
         logger.info(f"📊 İndeksləmə nəticəsi: {stats}")
         return stats
-    
+
     def index_file(self, file_path: str, chunks: List[CodeChunk]) -> bool:
         """Tək bir faylı indeksləyir (incremental indexing üçün).
 

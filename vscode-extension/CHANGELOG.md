@@ -2,6 +2,42 @@
 
 All notable changes to the Tokengram VS Code extension will be documented here.
 
+## [0.1.65] — 2026-06-19 — ships wheel 0.1.36
+
+### Fixed — hash store now stamped after a full reindex (no more re-embed churn)
+`index_documents` (the bulk `--reindex` path) never touched the hash store — it only upserted chunks to ChromaDB. So after every full reindex, `.file_hashes.json` kept the old DB generation and recorded none of the reindexed files. Result: every server boot logged "hash store stale (db generation changed) — resetting" and started with empty hashes, and the just-reindexed files were not recorded, so the next incremental drain would re-embed unchanged files. `index_documents` now stamps the new generation and records every indexed file's hash in a single write at the end. Subsequent boots match the generation (no reset), and incremental drains correctly skip unchanged files. Builds on the 0.1.64 auto-reindex rebuild below.
+
+## [0.1.64] — 2026-06-19 — ships wheel 0.1.35
+
+### Rebuilt — auto re-index: one reader, task-end trigger (collision-proof)
+The old design ran **two readers** of the same `.mla_pending.txt` queue at once — the MCP server's continuous 2-second poll-drain **and** the Stop hook's cold `flush_queue.py` — both writing to `chroma.sqlite3` with no coordination. That race caused the SQLite stalls, and the entire watchdog / self-heal `os._exit(70)` / leader-election / auto-recover tower was scar tissue grown on top of it.
+
+Now there is **one reader, triggered at task end**:
+- Edits accumulate cheaply in the queue during a task (Claude edits via `queue_change.py`, editor saves via the save listener) — no model load, no draining mid-task.
+- At **task end** the Stop hook drops a `.mla_drain.now` marker; the already-warm MCP server drains the queue once with its in-RAM model (no cold start, no second model in RAM). The hook returns as soon as the server consumes the marker, so Claude never waits on indexing.
+- If **no server is alive**, the Stop hook drains cold itself — behind the `db_guard` drainer lock. This single fallback replaces the whole watchdog/self-heal machinery.
+- Editor saves (outside a Claude task) also drop the marker after the 6 s idle debounce, so they index promptly without continuous polling.
+
+**Removed:** continuous poll-drain, self-heal watchdog, leader-election-for-draining, the server's internal filesystem observer, model warmup, and the status-bar automatic kill+reindex recovery. Two writers can no longer touch ChromaDB simultaneously, so the storm/false-"index was stuck" class of failures is gone by construction.
+
+## [0.1.63] — 2026-06-18 — ships wheel 0.1.33
+
+### Changed — embedding + reranking moved from PyTorch (sentence-transformers) to fastembed (ONNX Runtime)
+The engine no longer depends on `torch` / `transformers` / `sentence-transformers`. Both models — `BAAI/bge-small-en-v1.5` (embedding) and `ms-marco-MiniLM-L-6-v2` (reranker) — now run through fastembed on ONNX Runtime (which ChromaDB already bundles). Same models, same 384-dim vectors, **bit-for-bit identical reranker scores** (verified), so search quality is unchanged. Measured on the dev machine:
+- **Cold start: ~68 s → ~3 s** (≈25× faster model load) — directly fixes the spawn-storm / 30 s MCP-handshake-timeout class of failures.
+- **RAM: ~514 MB → ~319 MB** per warm model (≈38% less).
+- **Disk: −491 MB** (torch removed from the install); fresh-install download drops from ~300 MB to ~80 MB of wheels.
+
+Migration is automatic and safe: the hash store now records the embedding backend, so the first re-index after upgrade detects the switch and re-embeds every file once (upsert overwrites the old vectors in place — no mixed-normalization degradation, no manual `--fresh` needed). Source code is never touched.
+
+## [0.1.62] — 2026-06-18
+
+### Fixed — no more false "index was stuck — auto-recovering (killed 0 frozen process(es))" warning
+The status-bar auto-recovery would pop a scary yellow warning — and spawn an unnecessary re-index — whenever a file had been queued for >120 s with no recent DB activity, **even when nothing was actually frozen**. In practice this fired any time a file was edited while Claude Code (and its MCP server) was not running: the queue just sat waiting for the next server boot, but the extension declared it "stuck", reported "killed 0 frozen process(es)", and cold-loaded a full re-index (~700 MB) purely to drain one file.
+- Root cause: the "stuck" predicate was `pending > 0 && no-progress` and never checked whether a **live** process was actually holding a lock. "killed 0" is the tell — there was no frozen process to kill.
+- Fix: a freeze now requires a **live lock holder** (a real process holding the writer/drainer/leader lock but not progressing). With no live holder, nothing is frozen — the extension stays silent, kills nothing, and spawns no re-index. An orphaned queue with no server is surfaced calmly by the existing `QUEUE STUCK` bar state (after 30 min) and drained on the next server boot. The loud warning now appears **only** when a genuinely frozen process was actually terminated (`killed > 0`).
+- Manual **Refresh Tokengram** (deep recovery) is consistent: it only reports "terminated N frozen process(es)" when N > 0, and if you click it with an orphaned queue (files pending, no live indexer) it now quietly drains the queue itself instead of mislabeling it as a freeze.
+
 ## [0.1.59] — 2026-06-17 — ships wheel 0.1.30
 
 ### Fixed — the per-file index queue (`⟳ N`) now actually starts and drains to zero

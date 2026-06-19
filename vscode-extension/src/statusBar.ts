@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { tr } from './i18n';
 import { effectiveStatus, trialDaysLeft } from './licenseStatus';
-import { autoRecoverIfStuck } from './menu';
 import { findHistoryFile, findProjectRoot, readSavings } from './savingsReader';
 
 const REFRESH_MS = 5_000;
@@ -69,11 +68,11 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     // Hooks `.claude/settings.json`-ın bağlı olduğu kökə yazır — biz də orada axtaraq.
     const projectRoot = findProjectRoot(workspacePath);
     const flagOn = readEnforcement(projectRoot);
-    // İstifadəçi HEÇ düyməyə basmamalıdır: növbə ilişibsə (pending>0 + indeksləmə
-    // no-progress) avtomatik bərpa et — GIL-donmuş server özünü qurtara bilmir,
-    // ona görə xarici proses (bu extension) onu öldürüb reindex ilə drenləyir.
-    // autoRecoverIfStuck ucuz yoxlama + 5dəq cooldown ilə qorunur (churn yox).
-    if (flagOn) void autoRecoverIfStuck(projectRoot, context.extensionPath);
+    // Avtomatik recovery (autoRecoverIfStuck) SİLİNDİ (2026-06-19): köhnə davamlı
+    // poll-drain + watchdog/self-heal qülləsi getdi, ona görə "GIL-donmuş server"
+    // halı artıq yoxdur. Növbə task sonu Stop hook-da (və ya server bağlısa onun
+    // soyuq fallback-ı ilə) drenlənir. queue_stuck bar state-i hələ informativ
+    // qalır; əl ilə "Refresh"/"Re-index" düymələri eskalasiya yoludur.
     const licenseState = effectiveStatus();
     const historyPath =
       findHistoryFile() ??

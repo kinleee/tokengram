@@ -33,6 +33,8 @@ const EN: Messages = {
   'menu.refreshReindexBtn': 'Re-index now',
   'menu.refreshInProgress':
     'Tokengram: indexing in progress — {pending} file(s) still queued.',
+  'menu.refreshDraining':
+    'Tokengram: {pending} queued file(s) found with no active indexer — indexing them now...',
   'menu.autoRecover':
     'Tokengram: index was stuck — auto-recovering {pending} file(s) (killed {n} frozen process(es)). Re-indexing now...',
   'menu.refreshCleared':
@@ -196,6 +198,8 @@ const AZ: Messages = {
   'menu.refreshReindexBtn': 'İndi re-index et',
   'menu.refreshInProgress':
     'Tokengram: indeksləmə davam edir — {pending} fayl hələ növbədə.',
+  'menu.refreshDraining':
+    'Tokengram: {pending} fayl növbədə qalıb, aktiv indeksləyici yoxdur — indi indekslənir...',
   'menu.autoRecover':
     'Tokengram: indeks ilişmişdi — avtomatik bərpa: {pending} fayl ({n} donmuş proses öldürüldü). İndi yenidən indekslənir...',
   'menu.refreshCleared':

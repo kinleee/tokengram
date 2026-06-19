@@ -144,22 +144,42 @@ class Reranker:
         self._is_loaded = False
         
     def _lazy_load(self):
-        """Modeli ilk istifadədə yüklə.
+        """Modeli ilk istifadədə yüklə (fastembed/ONNX — torch YOX).
 
-        CrossEncoder lazy import — module-level olsa MCP server startup
-        ~34s çəkir və Claude Code timeout-unu keçir. Bu lazy import deadlock
-        yaratmır, çünki sentence_transformers onsuz da embedding üçün eyni
-        prosesdə lazy load olunmuşdur — yəni gələndə artıq sys.modules-də
-        cache-dədir, yeni import lock yaranmır.
+        Lazy import: module-level olsa MCP server startup uzanır və Claude Code
+        timeout-unu keçə bilər. fastembed TextCrossEncoder onnxruntime-dan
+        istifadə edir (chromadb onsuz da gətirir) → əlavə ağır asılılıq yox.
+        Model cache-də yoxdursa BİR DƏFƏ təmiz subprocess-də online endirməyə
+        cəhd edir; alınmasa rerank-sız (NO_RERANKER) qrasioz davam edir.
         """
         if self._is_loaded:
             return
         try:
-            from sentence_transformers import CrossEncoder
-            logger.info(f"🔄 Reranker yüklənir: {config.RERANKER_MODEL_NAME}")
-            self.model = CrossEncoder(config.RERANKER_MODEL_NAME, max_length=config.RERANKER_MAX_LENGTH)
+            from fastembed.rerank.cross_encoder import TextCrossEncoder
+            logger.info(f"🔄 Reranker yüklənir (fastembed): {config.RERANKER_MODEL_NAME}")
+            try:
+                self.model = TextCrossEncoder(model_name=config.RERANKER_MODEL_NAME)
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ Reranker offline/cache-dən yüklənmədi ({type(e).__name__}: {e}); "
+                    f"təmiz subprocess ilə online endirmə..."
+                )
+                import sys as _sys, subprocess as _sp
+                env = {
+                    k: v for k, v in os.environ.items()
+                    if k not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+                }
+                env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+                dl = (
+                    "from fastembed.rerank.cross_encoder import TextCrossEncoder;"
+                    f"list(TextCrossEncoder(model_name={config.RERANKER_MODEL_NAME!r})"
+                    ".rerank('warmup', ['doc']))"
+                )
+                _sp.run([_sys.executable, "-c", dl], env=env, timeout=600, check=True,
+                        stdout=_sp.PIPE, stderr=_sp.STDOUT)
+                self.model = TextCrossEncoder(model_name=config.RERANKER_MODEL_NAME)
             self._is_loaded = True
-            logger.info("✅ Reranker yükləndi")
+            logger.info("✅ Reranker yükləndi (fastembed/onnx)")
         except Exception as e:
             logger.error(f"❌ Reranker yüklənə bilmədi: {e}")
     
@@ -181,8 +201,10 @@ class Reranker:
         if not self._is_loaded or self.model is None:
             return candidates[:top_k], "NO_RERANKER"
         try:
-            pairs = [[query, c.content] for c in candidates]
-            raw_scores = self.model.predict(pairs)
+            # fastembed TextCrossEncoder.rerank(query, docs) → raw logit-lər
+            # (torch CrossEncoder.predict ilə bit-bit parity test edilib).
+            docs = [c.content for c in candidates]
+            raw_scores = list(self.model.rerank(query, docs))
             for candidate, raw in zip(candidates, raw_scores):
                 # Sigmoid: -inf -> 0, 0 -> 0.5, +inf -> 1
                 candidate.score = 1.0 / (1.0 + math.exp(-float(raw)))

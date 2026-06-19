@@ -11,11 +11,11 @@ chromadb==1.5.8
 anthropic>=0.42.0
 openai>=1.60.0
 
-# Embedding & Reranking
-sentence-transformers>=3.3.0
-
-# Nomic embedding modelinin custom kodu üçün
-einops>=0.8.0
+# Embedding & Reranking — fastembed (ONNX Runtime), torch YOX.
+# bge-small (embed) + ms-marco (rerank) ONNX modelləri. onnxruntime-i
+# chromadb onsuz da gətirir → fastembed əlavə ağır asılılıq əlavə etmir.
+# (sentence-transformers + torch ~491MB disk + ~38% RAM idi — silindi.)
+fastembed>=0.8.0
 
 # Mətn bölmə (chunking)
 langchain-text-splitters>=0.3.0

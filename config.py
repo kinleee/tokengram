@@ -106,24 +106,36 @@ COLLECTION_NAME = "code_vectors"
 # ============================================
 
 # Embedding modeli: BAAI/bge-small-en-v1.5
-# 33M parametr, ~130MB — standard SentenceTransformer arxitekturası,
-# Windows-da stabil. Custom (trust_remote_code) kod yoxdur.
-# (Nomic versiyası Windows + PyTorch-da segfault verirdi.)
+# 33M parametr, 384-ölçü, ~130MB. fastembed (ONNX Runtime) ilə yüklənir —
+# torch YOX. Eyni model id, eyni vektorlar; sadəcə backend dəyişib:
+# ~38% az RAM, ~25× sürətli soyuq-start (68s → ~3s). fastembed bge üçün
+# L2-normalize olunmuş vektor qaytarır → Chroma-nın default L2 məsafəsi
+# kosinusla eyni sıralayır.
 EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 # bge-en-v1.5: query üçün instruction prefix tövsiyə olunur,
-# sənəd üçün prefix yoxdur.
+# sənəd üçün prefix yoxdur. (fastembed `.embed()`-ə manual veririk ki,
+# köhnə sentence-transformers davranışı ilə tam eyni qalsın.)
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 DOCUMENT_PREFIX = ""
+
+# Embedding backend imzası — HashStore-da saxlanılır. Backend dəyişəndə
+# (sentence-transformers → fastembed) vektor normalizasiyası dəyişir, ona görə
+# köhnə vektorlar yenidən embed olunmalıdır. Bu tag dəyişsə (və ya köhnə, tagsız
+# hash store görünsə) HashStore sıfırlanır → növbəti reindex HƏR faylı yenidən
+# embed edir (upsert köhnə vektoru yerində üzərinə yazır). Səssiz qarışıq-
+# normalizasiya deqradasiyasının qarşısını alır.
+EMBED_BACKEND_TAG = "fastembed-bge-small-en-v1.5-onnx-v1"
 
 # ============================================
 # RERANKER KONFİQURASİYASI
 # ============================================
 
-# Cross-encoder reranker modeli
-# ms-marco-MiniLM-L-6-v2: 22M parametr, ~90MB disk, ~200MB RAM
-# (BAAI/bge-reranker-v2-m3 568M parametr idi, RAM-a sığmadı 8GB sistemdə)
-RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+# Cross-encoder reranker modeli — fastembed (ONNX) ilə yüklənir, torch YOX.
+# Xenova/ms-marco-MiniLM-L-6-v2 = cross-encoder/ms-marco-MiniLM-L-6-v2-nin ONNX
+# eksportu; eyni çəkilər → eyni logit-lər (bit-bit parity test edilib). 22M
+# parametr, ~90MB.
+RERANKER_MODEL_NAME = "Xenova/ms-marco-MiniLM-L-6-v2"
 
 # Reranker üçün maksimum token uzunluğu
 RERANKER_MAX_LENGTH = 512
