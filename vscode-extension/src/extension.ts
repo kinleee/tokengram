@@ -1,11 +1,12 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { startPeriodicRecheck } from './licenseStatus';
 import { registerMenuCommand, registerSetLicenseKeyCommand, killActiveReindexChildren } from './menu';
 import { createStatusBar } from './statusBar';
 import { findProjectRoot } from './savingsReader';
-import { ensureAutoInstall, registerSetupCommand, pinServerUrl, ensureGitignore } from './setupWizard';
+import { ensureAutoInstall, registerSetupCommand, pinServerUrl, ensureGitignore, promptReload } from './setupWizard';
 
 export function activate(context: vscode.ExtensionContext) {
   // Bundled wheel `py3-none-any` taglənib amma daxili .pyd Windows-only.
@@ -35,7 +36,10 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(statusBar);
   context.subscriptions.push(startPeriodicRecheck());
   registerSaveIndexer(context);
-  void ensureAutoInstall(context);
+  // Aktivasiya tick-indən kənara çıxar: `activate()` dərhal qayıtsın ki, VS Code
+  // və digər extension-lar (xüsusən Claude Code-un startup model/storage yükü)
+  // bizim setup yoxlamamızı gözləməsin. ensureAutoInstall onsuz da fire-and-forget-dir.
+  setTimeout(() => void ensureAutoInstall(context), 0);
 }
 
 // VS Code editor-də fayl save olunanda onu indeks növbəsinə (.mla_pending.txt)
@@ -117,10 +121,21 @@ function alreadyQueued(projectRoot: string, filePath: string): boolean {
   return false;
 }
 
+// venv interpreter yolu — növbəni yalnız drenləyə biləcək bir interpreter varsa
+// böyüdürük. Yoxdursa (qırıq/partial venv) növbəyə yazmaq disk-i doldurur, heç
+// nə drenləmir (2026-06-19 partial-venv: 1194 fayl növbədə, 0 indekslənmiş).
+const VENV_PYTHON =
+  process.platform === 'win32'
+    ? path.join(os.homedir(), '.tokengram', 'venv', 'Scripts', 'python.exe')
+    : path.join(os.homedir(), '.tokengram', 'venv', 'bin', 'python');
+
 function registerSaveIndexer(context: vscode.ExtensionContext): void {
   const enqueue = (filePath: string): void => {
     pendingTimers.delete(filePath);
     try {
+      // Drainer (venv python) yoxdursa növbəyə yazma — onsuz da heç kim
+      // indeksləməyəcək, yalnız .mla_pending.txt sonsuz böyüyər.
+      if (!fs.existsSync(VENV_PYTHON)) return;
       const projectRoot = findProjectRoot(path.dirname(filePath));
       // Enforcement OFF olanda növbəni böyütmə (queue_change.py:58 güzgüsü).
       // Fire anında yenidən yoxlayırıq — istifadəçi yazarkən toggle etmiş ola bilər.
@@ -238,8 +253,8 @@ function mirrorParentWorkspaceHooks(): void {
         if (fs.existsSync(parentMcp) && !fs.existsSync(path.join(ws, '.mcp.json'))) {
           fs.copyFileSync(parentMcp, path.join(ws, '.mcp.json'));
         }
-        vscode.window.showInformationMessage(
-          'Tokengram: mirrored parent workspace hooks into this sub-folder. Reload Claude Code to activate.',
+        void promptReload(
+          'Tokengram: mirrored parent workspace hooks into this sub-folder. Reload to activate.',
         );
       } catch {
         // Best-effort — never block activation.

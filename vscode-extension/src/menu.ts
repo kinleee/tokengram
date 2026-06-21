@@ -14,7 +14,7 @@ import {
   startTrial,
 } from './licenseStatus';
 import { findProjectRoot } from './savingsReader';
-import { isInstalling } from './setupWizard';
+import { isInstalling, promptReload, ensureClaudeMdGuidance } from './setupWizard';
 
 interface MenuItem extends vscode.QuickPickItem {
   action:
@@ -31,7 +31,12 @@ interface MenuItem extends vscode.QuickPickItem {
 function venvHasTokengram(): boolean {
   const binDir = process.platform === 'win32' ? 'Scripts' : 'bin';
   const exe = process.platform === 'win32' ? 'tokengram.exe' : 'tokengram';
-  return fs.existsSync(path.join(os.homedir(), '.tokengram', 'venv', binDir, exe));
+  // python.exe-ni də tələb et (setupWizard.venvHasTokengram güzgüsü): interpreter
+  // karantinə düşmüş qalıq venv "sağlam" sayılmasın → setLicenseKey təzə qurulum
+  // təklif etsin (2026-06-19 partial-venv insidenti).
+  const py = process.platform === 'win32' ? 'python.exe' : 'python';
+  const root = path.join(os.homedir(), '.tokengram', 'venv', binDir);
+  return fs.existsSync(path.join(root, exe)) && fs.existsSync(path.join(root, py));
 }
 
 async function setLicenseKey(): Promise<void> {
@@ -166,7 +171,7 @@ async function setLicenseKey(): Promise<void> {
   // Cache the just-validated status so statusBar reflects "valid" immediately.
   await refreshStatus();
 
-  vscode.window.showInformationMessage(tr('license.saved'));
+  void promptReload(tr('license.saved'));
 }
 
 async function ensureLicenseActiveForToggle(): Promise<boolean> {
@@ -786,6 +791,20 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
       break;
     }
     case 'refresh': {
+      // venv interpreter yoxdursa (qırıq/partial venv) bərpa mənasızdır — drenləyən
+      // proses ola bilməz. "İndeksləyirəm..." deyib sonra Setup-a atmaq əvəzinə
+      // dərhal tək aydın mesaj ver (2026-06-19 partial-venv UX).
+      if (!fs.existsSync(VENV_PYTHON)) {
+        const setupBtn = tr('menu.runSetupButton');
+        const action = await vscode.window.showWarningMessage(
+          tr('menu.reindexNoRoot'),
+          setupBtn,
+        );
+        if (action === setupBtn) {
+          await vscode.commands.executeCommand('tokengram.setup');
+        }
+        break;
+      }
       const result = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
@@ -893,6 +912,9 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
         vscode.window.showWarningMessage(tr('menu.reindexHooksMissing'));
       } else {
         ensureProjectHookSettings(root);
+        // search_code-a yönləndirən idarə olunan CLAUDE.md bloku (setupWizard
+        // ilə eyni). Re-index yolu da activation yolu ilə paritet olsun.
+        ensureClaudeMdGuidance(root);
       }
 
       let resolved = resolveMcpServer(root);
@@ -904,7 +926,30 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
         }
         vscode.window.showInformationMessage(tr('menu.reindexCreatedConfig'));
       }
-      const { server, cwd: serverCwd } = resolved;
+      let { server } = resolved;
+      const { cwd: serverCwd } = resolved;
+      // .mcp.json mütləq python.exe yoluna işarə edə bilər, amma o interpreter
+      // fiziki olaraq YOXDUR (venv silinib/yarımçıq qalıb) → cp.spawn xam
+      // "ENOENT" verir, istifadəçi səbəbi anlamır (2026-06-19 tester insidenti).
+      // Spawn-dan ƏVVƏL yoxla: command bir yol (path-separator var) və mövcud
+      // deyilsə, canlı VENV_PYTHON ilə əvəz et; o da yoxdursa Setup-a yönəlt.
+      const cmdIsPath = /[\\/]/.test(server.command);
+      if (cmdIsPath && !fs.existsSync(server.command)) {
+        if (fs.existsSync(VENV_PYTHON)) {
+          // venv var, sadəcə .mcp.json köhnə/yanlış yola baxır — canlı yolla işlət.
+          server = { ...server, command: VENV_PYTHON };
+        } else {
+          const setupBtn = tr('menu.runSetupButton');
+          const action = await vscode.window.showWarningMessage(
+            tr('menu.reindexNoRoot'),
+            setupBtn,
+          );
+          if (action === setupBtn) {
+            await vscode.commands.executeCommand('tokengram.setup');
+          }
+          break;
+        }
+      }
       const serverArgs = server.args ?? [];
       // İncremental (default): yalnız dəyişən faylları yenidən embed edir
       // (dəyişməyənləri hash ilə atlayır). İlk dəfə (boş index) onsuz da hamısını
@@ -940,6 +985,22 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
         void offerTrialIfKeyless();
       } catch (e) {
         const msg = (e as Error).message ?? String(e);
+        // Spawn ENOENT (interpreter yoxdur — pre-check tutmayıbsa, məs. PATH-dakı
+        // `python` tapılmır): xam "ENOENT" əvəzinə aydın Setup yönləndirməsi ver.
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT' || /\bENOENT\b/.test(msg)) {
+          channel.clear();
+          channel.appendLine(msg);
+          channel.show(true);
+          const setupBtn = tr('menu.runSetupButton');
+          const action = await vscode.window.showWarningMessage(
+            tr('menu.reindexNoRoot'),
+            setupBtn,
+          );
+          if (action === setupBtn) {
+            await vscode.commands.executeCommand('tokengram.setup');
+          }
+          break;
+        }
         channel.clear();
         channel.appendLine(msg);
         channel.show(true);
@@ -1079,10 +1140,24 @@ export function registerMenuCommand(
     try {
       await runAction(pick.action, root, context.extensionPath);
     } catch (err) {
+      const m = (err as Error).message ?? String(err);
+      // İstənilən action-da interpreter ENOENT-i (məs. 'sync' → savings_report.py
+      // qırıq venv python ilə): xam "spawn python ENOENT" əvəzinə Setup yönləndir.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT' || /\bENOENT\b/.test(m)) {
+        const setupBtn = tr('menu.runSetupButton');
+        const action = await vscode.window.showWarningMessage(
+          tr('menu.reindexNoRoot'),
+          setupBtn,
+        );
+        if (action === setupBtn) {
+          await vscode.commands.executeCommand('tokengram.setup');
+        }
+        return;
+      }
       vscode.window.showErrorMessage(
         tr('menu.error', {
           action: pick.action,
-          message: (err as Error).message,
+          message: m,
         }),
       );
     }

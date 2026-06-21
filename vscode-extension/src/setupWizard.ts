@@ -36,6 +36,19 @@ interface PythonInfo {
   version: [number, number, number];
 }
 
+// Standart pattern: "əl ilə reload et" demək əvəzinə bir-klik "Reload Now"
+// düyməsi göstər. `workbench.action.reloadWindow` pəncərəni yenidən yükləyir —
+// bu, HƏM extension host-u, HƏM Claude Code MCP serverini təzələyir, yəni
+// istifadəçi VS Code-u "tam bağlayıb açmaq" məcburiyyətində deyil. (Real user
+// üçün manual reload tapşırığı qəbuledilməzdir — yaxşı extension-lar düymə verir.)
+export async function promptReload(message: string): Promise<void> {
+  const reloadBtn = 'Reload Now';
+  const choice = await vscode.window.showInformationMessage(message, reloadBtn);
+  if (choice === reloadBtn) {
+    await vscode.commands.executeCommand('workbench.action.reloadWindow');
+  }
+}
+
 // Track an in-progress install so the status-bar menu can show "please wait"
 // instead of the misleading "not installed yet — open wizard" modal that used
 // to fire when a tester clicked the bar during the first-time download.
@@ -51,7 +64,7 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
     // venv exists, but maybe with a stale wheel. Only short-circuit when the
     // installed wheel version is at least as new as the wheel bundled with
     // this extension. Otherwise we need to upgrade.
-    const installed = installedWheelVersion();
+    const installed = await installedWheelVersion();
     const bundled = bundledWheelVersion(context);
     if (installed && bundled && compareSemver(installed, bundled) >= 0 && !installedTokengramBroken()) {
       // Even when no install is needed, a freshly-opened workspace may still
@@ -63,11 +76,24 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
           writeWorkspaceHooks();
           // Surface the silent config-write so the user knows why their newly-
           // opened project suddenly has .claude/settings.json + .mcp.json.
-          vscode.window.showInformationMessage(
-            'Tokengram: this workspace was wired up — hooks + .mcp.json written. Reload Claude Code so the hooks activate.',
+          void promptReload(
+            'Tokengram: this workspace was wired up — hooks + .mcp.json written. Reload to activate.',
           );
         } catch {
           /* non-fatal — user can re-run setup from the status-bar menu */
+        }
+      } else {
+        // Hook-lar artıq quraşdırılıb — bu layihə onsuz da Tokengram istifadə
+        // edir. search_code yönləndirməsini CLAUDE.md-də də təmin et (idempotent,
+        // yalnız idarə olunan bloku yazır/yeniləyir). Reload lazım deyil: CLAUDE.md
+        // hər sessiyada təzə oxunur. Heç vaxt bloklamır (best-effort).
+        try {
+          const folders = vscode.workspace.workspaceFolders;
+          if (folders && folders.length > 0) {
+            ensureClaudeMdGuidance(folders[0].uri.fsPath);
+          }
+        } catch {
+          /* non-fatal */
         }
       }
       return;
@@ -193,7 +219,7 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
       /* non-fatal — user can still re-run setup or click reindex */
     }
     if (isUpgrade) {
-      vscode.window.showInformationMessage('Tokengram updated. Restart Claude Code to pick up the new version.');
+      void promptReload('Tokengram updated — reload to activate the new version.');
       return;
     }
     // Open the license input directly — testers were previously clicking the
@@ -323,7 +349,15 @@ export function registerSetupCommand(context: vscode.ExtensionContext): vscode.D
 function venvHasTokengram(): boolean {
   const binDir = process.platform === 'win32' ? 'Scripts' : 'bin';
   const exe = process.platform === 'win32' ? 'tokengram.exe' : 'tokengram';
-  return fs.existsSync(path.join(VENV_DIR, binDir, exe));
+  // python.exe-ni DƏ tələb et: antivirus venv-in interpreter-ini karantinə alıb
+  // tokengram.exe-ni saxlaya bilər → köhnə yoxlama "sağlamdır" deyib install-i
+  // upgrade rejiminə salır, upgrade isə qalıq qovluğa qarşı sınır (2026-06-19).
+  // İnterpreter yoxdursa venv ölüdür → təmiz qurulum lazımdır.
+  const py = process.platform === 'win32' ? 'python.exe' : 'python';
+  return (
+    fs.existsSync(path.join(VENV_DIR, binDir, exe)) &&
+    fs.existsSync(path.join(VENV_DIR, binDir, py))
+  );
 }
 
 // `python -m tokengram` (həm MCP server, həm reindex CLI buradan keçir) paketdə
@@ -336,21 +370,33 @@ function installedTokengramBroken(): boolean {
   return !fs.existsSync(path.join(pkgDir, '__main__.py'));
 }
 
-function installedWheelVersion(): string | null {
-  const py = process.platform === 'win32'
-    ? path.join(VENV_DIR, 'Scripts', 'python.exe')
-    : path.join(VENV_DIR, 'bin', 'python');
-  if (!fs.existsSync(py)) return null;
-  try {
-    const out = cp.execFileSync(
+// ƏVVƏL `execFileSync` idi — hər activation-da venv python-u SİNXRON spawn edib
+// bitməsini gözləyirdi (~240 ms isti, soyuq başlanğıcda 1-2 san+). VS Code-da
+// bütün extension-lar tək event loop-da olduğu üçün bu, Claude Code-un startup
+// işini (model siyahısı / storage) dondururdu. İndi asinxron `execFile` —
+// python arxa planda işləyir, event loop azad qalır, `activate()` gözləmir.
+function installedWheelVersion(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const py = process.platform === 'win32'
+      ? path.join(VENV_DIR, 'Scripts', 'python.exe')
+      : path.join(VENV_DIR, 'bin', 'python');
+    if (!fs.existsSync(py)) {
+      resolve(null);
+      return;
+    }
+    cp.execFile(
       py,
       ['-c', "import importlib.metadata as m;print(m.version('tokengram'))"],
       { encoding: 'utf-8', timeout: 5000 },
+      (err, stdout) => {
+        if (err) {
+          resolve(null);
+          return;
+        }
+        resolve(stdout.trim() || null);
+      },
     );
-    return out.trim() || null;
-  } catch {
-    return null;
-  }
+  });
 }
 
 function bundledWheelVersion(context: vscode.ExtensionContext): string | null {
@@ -642,6 +688,20 @@ async function runInstaller(
   });
 }
 
+// Bütün KANONİK hook skriptləri settings.json-da olmalıdır. Yalnız
+// `pre_read_check.py`-ə baxmaq KİFAYƏT DEYİL: köhnə/azaldılmış dəstlə (yalnız
+// Read + Stop) qurulmuş layihə "wired" sayılıb heç vaxt Grep/Bash hook-larına
+// yüksəlmirdi → qənaət sayğacı 0 qalırdı (2026-06-19). Hər hansı biri əskikdirsə
+// writeWorkspaceHooks tam dəsti yenidən yazır (activation-da öz-özünə təmir).
+const REQUIRED_HOOK_SCRIPTS = [
+  'pre_read_check.py',
+  'queue_change.py',
+  'post_grep_check.py',
+  'post_bash_check.py',
+  'savings_report.py',
+  'flush_queue.py',
+];
+
 function workspaceMissingTokengramHooks(): boolean {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) return false;
@@ -649,7 +709,7 @@ function workspaceMissingTokengramHooks(): boolean {
   if (!fs.existsSync(settingsPath)) return true;
   try {
     const raw = fs.readFileSync(settingsPath, 'utf-8');
-    return !raw.includes('pre_read_check.py');
+    return REQUIRED_HOOK_SCRIPTS.some((s) => !raw.includes(s));
   } catch {
     return true;
   }
@@ -672,6 +732,11 @@ export function writeWorkspaceHooks(): boolean {
   const hookCmd = (script: string): string =>
     `"${venvPython}" "${path.join(hooksDir, script)}"`;
 
+  // VAHİD hook dəsti — menu.ts `ensureProjectHookSettings` ilə BAYT-BAYT eyni
+  // olmalıdır. İki setup yolu (activation vs Re-index) fərqli yazanda layihələr
+  // fərqli qənaət göstərirdi: 0.1.49-da burada Grep/Bash çıxarılmışdı, amma
+  // Re-index onları yazmağa davam edirdi → "bir layihə 16k, digəri 0" (2026-06-19
+  // user). Grep qənaətin əsas mənbəyidir (~73%) — bütün layihələrdə sayılmalıdır.
   const hookConfig = {
     hooks: {
       PreToolUse: [
@@ -685,18 +750,21 @@ export function writeWorkspaceHooks(): boolean {
           matcher: 'Edit|Write|MultiEdit',
           hooks: [{ type: 'command', command: hookCmd('queue_change.py') }],
         },
-        // PERF (0.1.49): Grep və Bash PostToolUse hook-ları çıxarıldı. Onlar yalnız
-        // qənaət-analitikası yazırdı (funksional iş yox), amma hər Grep/Bash-a soyuq
-        // Python prosesi (~90ms) əlavə edirdi. Qənaət barı indi YALNIZ search_code
-        // (MCP server, gecikməsiz) + Read (pre_read) event-lərindən hesablanır —
-        // yəni "kod axtarışı/oxuması" üzrə qənaət. savings_report.py riyaziyyatı
-        // dəyişmir: bu event-lər gəlmədikdə onları həm qənaətdən, həm xərcdən
-        // avtomatik çıxarır. (post_grep_check.py / post_bash_check.py faylları
-        // diskdə qalır — yalnız işə salınmır.)
+        {
+          matcher: 'Grep',
+          hooks: [{ type: 'command', command: hookCmd('post_grep_check.py') }],
+        },
+        {
+          matcher: 'Bash',
+          hooks: [{ type: 'command', command: hookCmd('post_bash_check.py') }],
+        },
       ],
       Stop: [
         {
-          hooks: [{ type: 'command', command: hookCmd('savings_report.py') }],
+          hooks: [
+            { type: 'command', command: hookCmd('savings_report.py') },
+            { type: 'command', command: hookCmd('flush_queue.py') },
+          ],
         },
       ],
     },
@@ -751,6 +819,10 @@ export function writeWorkspaceHooks(): boolean {
   // Tokengram bu layihədə chroma_db/, kilidlər, növbə, qənaət tarixçəsi və s.
   // per-machine runtime faylları yaradır — onlar user-in commit-lərinə düşməməlidir.
   ensureGitignore(root);
+  // Agentə "əvvəlcə search_code işlət" deyən idarə olunan CLAUDE.md bloku yaz.
+  // Hook-lar yalnız UÇOT + bloklamayan nudge edir; əsl alət-seçimi yönləndirməsi
+  // sistem-prompt səviyyəsində (CLAUDE.md) gəlir. Bloklamır, redaktəni sındırmır.
+  ensureClaudeMdGuidance(root);
   return true;
 }
 
@@ -801,6 +873,61 @@ export function ensureGitignore(root: string): void {
       '# <<< Tokengram (auto-managed) <<<\n';
     const sep = cur === '' ? '' : cur.endsWith('\n') ? '\n' : '\n\n';
     fs.appendFileSync(giPath, sep + block, 'utf-8');
+  } catch {
+    // Best-effort — heç vaxt setup-u bloklama.
+  }
+}
+
+// Layihənin kök `CLAUDE.md`-nə idarə olunan kiçik blok yazır ki, Claude kod
+// araşdırarkən əvvəlcə `search_code` MCP alətindən istifadə etsin. Bu, alət
+// seçimini yönləndirən YEGANƏ etibarlı mexanizmdir (hook-lar bloklamır, yalnız
+// uçot + bloklamayan nudge edir). İdempotent: marker-lər arasını YENİLƏYİR,
+// user-in qalan məzmununa TOXUNMUR. CLAUDE.md yoxdursa yaradılır. Heç vaxt
+// setup-u bloklamır (best-effort). Bu, qənaət təklifidir, hard-rule deyil.
+const CLAUDE_MD_START =
+  '<!-- >>> Tokengram (auto-managed) — token-saving search guidance >>> -->';
+const CLAUDE_MD_END = '<!-- <<< Tokengram (auto-managed) <<< -->';
+
+export function ensureClaudeMdGuidance(root: string): void {
+  try {
+    const block =
+      CLAUDE_MD_START + '\n' +
+      '## Tokengram — efficient code search\n' +
+      '\n' +
+      'This project is indexed by Tokengram (a semantic code index). To minimise\n' +
+      'token usage when exploring or understanding code:\n' +
+      '\n' +
+      '- **Prefer the `search_code` MCP tool first** for "where is X implemented",\n' +
+      '  "how does Y work", or any concept/behaviour search — it returns only the\n' +
+      '  relevant snippets instead of whole files.\n' +
+      '- Use `Grep` for exact strings/symbols you already know; use `search_code`\n' +
+      '  for conceptual "where/how/what handles…" questions.\n' +
+      '- When opening a large file, use `Read` with a `limit` (and `offset`) to\n' +
+      '  page through it rather than reading the whole file at once.\n' +
+      '- Avoid dumping whole files through the shell (`cat`, `sed`, `Get-Content`,\n' +
+      '  `type`) — that bypasses the index. Use `search_code` or a bounded `Read`.\n' +
+      '\n' +
+      'These are guidelines, not hard rules — if a tool is genuinely the right\n' +
+      'choice for the task, use it.\n' +
+      CLAUDE_MD_END;
+
+    const mdPath = path.join(root, 'CLAUDE.md');
+    let cur = '';
+    if (fs.existsSync(mdPath)) {
+      cur = fs.readFileSync(mdPath, 'utf-8');
+    }
+
+    const s = cur.indexOf(CLAUDE_MD_START);
+    const e = cur.indexOf(CLAUDE_MD_END);
+    if (s !== -1 && e !== -1 && e > s) {
+      // Mövcud idarə olunan bloku yenilə (upgrade-də guidance təzələnsin).
+      const next = cur.slice(0, s) + block + cur.slice(e + CLAUDE_MD_END.length);
+      if (next !== cur) fs.writeFileSync(mdPath, next, 'utf-8');
+      return;
+    }
+
+    const sep = cur === '' ? '' : cur.endsWith('\n') ? '\n' : '\n\n';
+    fs.appendFileSync(mdPath, sep + block + '\n', 'utf-8');
   } catch {
     // Best-effort — heç vaxt setup-u bloklama.
   }

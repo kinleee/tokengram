@@ -260,12 +260,10 @@ def _drain_pending_queue() -> int:
                 # sayılıb başqa proses tərəfindən götürülməsin (iki yazıçı qaçar).
                 if idx % 5 == 0:
                     dlock.touch()
-
-            if (indexed > 0 or deleted > 0) and _engine is not None:
-                try:
-                    _engine.rebuild_bm25()
-                except Exception as e:
-                    logger.warning(f"BM25 yenidən qurma xətası: {e}")
+            # QEYD: BM25 yenidən qurma BURADA EDİLMİR. Əvvəl hər ≤20-fayllıq
+            # batch-dan sonra tam korpus təkrar tokenləşdirilib pickle edilirdi →
+            # 200-fayllıq drain = 10× tam yenidənqurma. İndi `_drain_signal_loop`
+            # bütün batch-lar bitəndən sonra BİR DƏFƏ yenidən qurur (aşağıda).
     finally:
         dlock.release()
 
@@ -308,7 +306,7 @@ def _pending_count() -> int:
     return n
 
 
-def _drain_signal_loop(poll_interval: float = 1.0) -> None:
+def _drain_signal_loop(poll_interval: float = 0.25) -> None:
     """Marker-tetiklemeli drain işçisi — köhnə davamlı poll + watchdog + leader
     qülləsini əvəz edir.
 
@@ -339,12 +337,27 @@ def _drain_signal_loop(poll_interval: float = 1.0) -> None:
                 pass
             # Növbəni tam drenlə (batch-batch). guard = sonsuz-dövrə backstop-u.
             guard = 0
+            did_work = False
             while not _worker_stop_event.is_set() and guard < 1000:
                 guard += 1
-                if _drain_pending_queue() == _DRAIN_YIELDED:
+                r = _drain_pending_queue()
+                if r == _DRAIN_YIELDED:
                     break  # başqa yazıçı işləyir — ona burax (toqquşma yox)
+                if r > 0:
+                    did_work = True
                 if _pending_count() == 0:
                     break
+            # BM25-i bütün batch-lar bitəndən SONRA bir dəfə yenidən qur (hər
+            # batch-da deyil). get_all_texts_with_ids tam korpusu oxuyur +
+            # BM25Okapi qurur + ~3MB pickle yazır — bunu marker başına 1× edirik,
+            # əvvəlki "batch başına N×" əvəzinə. (chroma yazısı deyil → drainer
+            # kilidi lazım deyil; in-process serializasiya üçün _index_lock).
+            if did_work and _engine is not None:
+                try:
+                    with _index_lock:
+                        _engine.rebuild_bm25()
+                except Exception as e:
+                    logger.warning(f"BM25 yenidən qurma xətası: {e}")
         except Exception as e:
             logger.error(f"Drain siqnal dövrü xətası: {e}")
 
@@ -525,6 +538,31 @@ def search_code(
     return response
 
 
+# Fayl token-sayı keşi: (mtime, token_count). search_code çox tez-tez çağrılan
+# isti yoldur; əvvəl _log_search HƏR çağırışda hər nəticə faylını tam oxuyub
+# yenidən tokenləşdirirdi. Eyni fayl bir task ərzində dəfələrlə nəticə gəlir →
+# mtime dəyişməyibsə keşdən qaytarırıq (fayl dəyişəndə avtomatik yenilənir).
+_token_count_cache: dict = {}
+
+
+def _file_token_count(fp: str) -> int:
+    """Faylın token sayını (mtime-keşli) qaytarır. Oxunmazsa 0."""
+    try:
+        mtime = Path(fp).stat().st_mtime
+    except OSError:
+        return 0
+    cached = _token_count_cache.get(fp)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        content = Path(fp).read_text(encoding="utf-8", errors="replace")
+        n = count_tokens(content)
+    except Exception:
+        n = 0
+    _token_count_cache[fp] = (mtime, n)
+    return n
+
+
 def _log_search(query: str, results, response_text: str) -> None:
     """Hər search_code çağırışını analytics üçün qeyd edir.
 
@@ -543,16 +581,12 @@ def _log_search(query: str, results, response_text: str) -> None:
         return
 
     try:
-        # Bu çağırışın nəticəsində hansı unikal fayllar gəldi
+        # Bu çağırışın nəticəsində hansı unikal fayllar gəldi (mtime-keşli sayım)
         unique_files = {}
         for r in results:
             fp = r.metadata.get("file_path")
             if fp and fp not in unique_files:
-                try:
-                    content = Path(fp).read_text(encoding="utf-8", errors="replace")
-                    unique_files[fp] = count_tokens(content)
-                except Exception:
-                    unique_files[fp] = 0
+                unique_files[fp] = _file_token_count(fp)
 
         entry = {
             "ts": time.time(),
@@ -589,7 +623,9 @@ def index_directory(path: str, fresh: bool = False) -> str:
         if fresh:
             store.clear_collection()
 
-        stats = store.index_documents(chunks)
+        # hash_filter=not fresh: "refresh" (fresh=False) yalnız dəyişmiş faylları
+        # yenidən embed edir; fresh=True onsuz da bazanı təmizləyib hamısını qurur.
+        stats = store.index_documents(chunks, hash_filter=not fresh)
 
         # Yeni fayllar gəldi → BM25-i yenidən qur
         if _engine is not None:
@@ -809,11 +845,20 @@ def _cli_reindex(argv: list) -> int:
     # Ala bilməsək belə davam edirik (user-in manual reindex-i bloklanmamalıdır).
     dlock = db_guard.acquire_drainer_lock(config.CHROMA_DB_PATH, wait_sec=30.0)
     if dlock is None:
+        # KORREKTLIK FİX (#8): əvvəl kilid alınmasa belə chroma.sqlite3-ə PARALEL
+        # yazırdı (fon drain ilə eyni anda → SQLite/HNSW yarışı, korrupsiya sinfi).
+        # writer_lock yazı yolunda heç vaxt bağlanmadığı üçün advisory drainer
+        # kilidi yeganə cross-process serializasiyadır. Ala bilmiriksə = CANLI
+        # başqa yazıçı işləyir (ölü/stale sahib db_guard tərəfindən avtomatik
+        # götürülür) → paralel yazmaq əvəzinə "məşğul" qaytarırıq (exit 4, köhnə
+        # `quarantine`/exit 3 deyil — extension bunu "bir az sonra yenidən cəhd"
+        # kimi qəbul edir, korrupsiya alarmı vermir).
         print(
-            "[tokengram] xəbərdarlıq: başqa bulk indeksləmə davam edir — "
-            "paralel davam olunur",
+            "[tokengram] başqa indeksləmə davam edir — bir az sonra yenidən cəhd "
+            "edin (paralel yazma ləğv edildi: korrupsiya riski)",
             file=_sys.stderr, flush=True,
         )
+        return 4
     try:
         with _index_lock:
             store = _get_store()
@@ -824,13 +869,26 @@ def _cli_reindex(argv: list) -> int:
                 f"\n[3/3] 🔢 {len(chunks)} chunk indekslənir...",
                 file=_sys.stderr, flush=True,
             )
-            # progress_cb: hər batch-dan sonra drainer heartbeat-i təzələ ki, uzun
-            # reindex (1377 chunk) ərzində kilid stale sayılıb götürülməsin.
-            _touch = (lambda d, t: dlock.touch()) if dlock is not None else None
-            stats = store.index_documents(chunks, progress_cb=_touch)
+            # progress_cb iki iş görür:
+            #   1) drainer heartbeat-i təzələ ki, uzun reindex (10k+ chunk) ərzində
+            #      kilid stale sayılıb götürülməsin;
+            #   2) hər batch-dan sonra `[3/3] done/total chunk` çap et ki, extension
+            #      progress bar-ı CANLI hərəkət etsin. ÇAP OLMASA bar [3/3]-də donmuş
+            #      görünür → istifadəçi "ilişib" sanıb saatlarla gözləyir (real
+            #      embedding davam etsə belə). 2026-06-19 tester insidenti.
+            def _progress(done, total):
+                dlock.touch()
+                print(
+                    f"[3/3] {done}/{total} chunk",
+                    file=_sys.stderr, flush=True,
+                )
+            # hash_filter=not fresh: "refresh" reindex yalnız dəyişmiş faylları
+            # yenidən embed edir (tam korpus deyil). --fresh hamısını məcbur edir.
+            stats = store.index_documents(
+                chunks, progress_cb=_progress, hash_filter=not fresh
+            )
     finally:
-        if dlock is not None:
-            dlock.release()
+        dlock.release()
 
     indexed = stats.get("indexed", 0)
     errors = stats.get("errors", 0)

@@ -34,6 +34,31 @@ except Exception:
     # vaxt block etmə. Fail open: səssiz icazə ver (exit 0 = allow).
     sys.exit(0)
 
+# Nudge köməkçisi ayrıca try-da: yoxdursa hook normal işləməyə davam etsin.
+try:
+    from nudge import should_nudge, emit
+except Exception:
+    def should_nudge(*_a, **_k):
+        return False
+
+    def emit(*_a, **_k):
+        return None
+
+
+def _nudge_large_read(project_root, file_path, lines, tokens):
+    """Böyük tam Read-də modelə BLOKLAMADAN search_code/chunked məsləhəti çatdır.
+
+    Read onsuz da baş verir (exit 0, permissionDecision yoxdur) — yalnız mətn
+    əlavə olunur. Rate-limited (fayl başına bir dəfə, pəncərə cap-i ilə)."""
+    if should_nudge(project_root, f"read:{file_path}"):
+        emit(
+            f"Tokengram tip: '{file_path.name}' is large (~{int(lines)} lines, "
+            f"~{int(tokens)} tokens). Next time consider the `search_code` MCP "
+            f"tool to jump straight to the relevant section, or Read with a "
+            f"`limit=`/`offset=` to page through it. (Reading it now is fine.)",
+            event="PreToolUse",
+        )
+
 # DİQQƏT: artıq HARD-BLOCK YOXDUR. Əvvəl 50+ sətirlik faylın tam Read-i
 # bloklanırdı (exit 2) → Edit əvvəlcə Read tələb etdiyi üçün redaktə tamamilə
 # sınırdı, istifadəçi /MlaOff-a məcbur olurdu. Bu səhv idi: enforcement-in
@@ -150,6 +175,24 @@ def main():
                lines=int(estimated_line_count), est_tokens=estimated_baseline),
             file=sys.stderr,
         )
+        _nudge_large_read(project_root, file_path, estimated_line_count, estimated_baseline)
+        sys.exit(0)
+
+    # Chunked (limit-bounded) Read BÖYÜK faylda: tam read_bytes() ETMƏ. Bu, MLA-nın
+    # tövsiyə etdiyi əsas yoldur (Read + kiçik `limit`) və daim işləyir; agent
+    # onsuz da faylın yalnız `limit` sətrini istəyir. Əvvəl bütün fayl diskdən
+    # oxunub split edilirdi (5 paralel Read = 5 tam-fayl oxuması → görünən lag +
+    # RAM sıçrayışı). Baseline-i stat ilə, spent-i limit*AVG ilə təxmin edirik —
+    # no-limit budağındakı eyni stat-əsaslı naxış.
+    if isinstance(limit_val, int) and limit_val > 0 and file_size > 200_000:
+        estimated_line_count = max(THRESHOLD_WARN + 1, file_size // AVG_CHARS_PER_LINE)
+        estimated_baseline = estimate_tokens(b"x" * file_size)
+        spent_bytes = min(file_size, max(1, limit_val) * AVG_CHARS_PER_LINE)
+        spent = max(1, estimate_tokens(b"x" * spent_bytes))
+        _log_read_chunked(
+            session_log, file_path, estimated_line_count, limit_val,
+            estimated_baseline, spent,
+        )
         sys.exit(0)
 
     try:
@@ -208,6 +251,7 @@ def main():
             ),
             file=sys.stderr,
         )
+        _nudge_large_read(project_root, file_path, line_count, estimated_baseline)
         sys.exit(0)
 
     # Silent allow (< 30 sətir indexed) — fayl yenə də oxunur, kiçik real spend

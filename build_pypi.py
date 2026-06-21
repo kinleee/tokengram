@@ -65,6 +65,9 @@ HOOK_FILES = [
     "license_gate.py",
     "project_root.py",
     "atomic_write.py",
+    # 2026-06-21: bloklamayan search_code yönləndirməsi (additionalContext nudge).
+    # pre_read/post_grep/post_bash bunu import edir; əskik olsa no-op stub-a düşür.
+    "nudge.py",
 ]
 
 

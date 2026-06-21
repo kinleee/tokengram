@@ -57,6 +57,7 @@ const EN: Messages = {
     'Tokengram: hook scripts could not be installed at ~/.tokengram/hooks. Re-index will run but enforcement/savings hooks may be inactive.',
   'menu.reindexNoRoot':
     'Tokengram: Tokengram is not installed (~/.tokengram/venv missing). Run "Tokengram: Setup" first, then click re-index again.',
+  'menu.runSetupButton': 'Run Setup',
   'menu.reindexFailed': 'Tokengram: re-index failed — {output}',
   'menu.syncDoneFallback': 'Tokengram: sync complete (no new events)',
   'menu.error': 'Tokengram: {action} failed — {message}',
@@ -67,7 +68,7 @@ const EN: Messages = {
   'license.prompt': 'Paste your Tokengram license key',
   'license.placeholder': 'mla_live_xxxxxxxxxxxxxxxxxxxxxxxx',
   'license.invalidFormat': 'License key should start with "mla_live_"',
-  'license.saved': 'License saved. Restart Claude Code to apply.',
+  'license.saved': 'License saved — reload to apply.',
   'license.empty': 'License key is empty',
   'license.validating': 'Validating license key against Tokengram server…',
   'license.invalidByServer':
@@ -222,6 +223,7 @@ const AZ: Messages = {
     'Tokengram: hook skriptləri ~/.tokengram/hooks-a quraşdırıla bilmədi. Re-index işləyəcək, amma enforcement/savings hooks deaktiv ola bilər.',
   'menu.reindexNoRoot':
     'Tokengram qurulmayıb (~/.tokengram/venv yoxdur). Əvvəlcə "Tokengram: Setup" işlət, sonra re-index düyməsinə təkrar bas.',
+  'menu.runSetupButton': 'Setup işlət',
   'menu.reindexFailed': 'Tokengram: re-index uğursuz — {output}',
   'menu.syncDoneFallback': 'Tokengram: sync tamamlandı (yeni hadisə yox idi)',
   'menu.error': 'Tokengram: {action} uğursuz — {message}',
@@ -232,7 +234,7 @@ const AZ: Messages = {
   'license.prompt': 'Tokengram lisenziya açarını paste et',
   'license.placeholder': 'mla_live_xxxxxxxxxxxxxxxxxxxxxxxx',
   'license.invalidFormat': 'Lisenziya açarı "mla_live_" ilə başlamalıdır',
-  'license.saved': 'Lisenziya yadda saxlandı. Claude Code-u yenidən başlat.',
+  'license.saved': 'Lisenziya yadda saxlandı — tətbiq üçün reload et.',
   'license.empty': 'Lisenziya açarı boşdur',
   'license.validating': 'Lisenziya açarı Tokengram server-də yoxlanır…',
   'license.invalidByServer':

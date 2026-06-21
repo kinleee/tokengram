@@ -348,7 +348,9 @@ class ChromaVectorStore:
     def index_documents(self, chunks: List[CodeChunk],
                         batch_size: int = 64,
                         progress_cb=None,
-                        skip_predelete: bool = False) -> Dict[str, int]:
+                        skip_predelete: bool = False,
+                        hash_filter: bool = False,
+                        stamp_hashes: bool = True) -> Dict[str, int]:
         """Chunk-ları ChromaDB-yə upsert ilə əlavə edir.
 
         Eyni ID ilə mövcud chunk varsa, yenilənir (dublikat yoxdur).
@@ -363,6 +365,13 @@ class ChromaVectorStore:
             skip_predelete: True olarsa köhnə chunk silmə tam keçilir. Fresh
                 index-də collection onsuz da boşdur → 634 mənasız delete
                 round-trip-i ləğv olur.
+            hash_filter: True olarsa (bulk "refresh" reindex yolu) DƏYİŞMƏYƏN
+                faylların chunk-ları upsert-dən əvvəl atılır → yalnız redaktə
+                olunmuş fayllar yenidən embed olunur (bütün korpus yox). fresh=True
+                (clear_collection) halında hash store boş olduğu üçün hər şey keçir.
+            stamp_hashes: False olarsa sonda hash store damğalanmır. index_file
+                bunu işlədir — hash-i özü tək `update()` ilə yazır (ikiqat
+                tam-JSON yazısının qarşısı).
 
         Returns:
             Statistika: {"indexed": N, "skipped": N, "errors": N}
@@ -370,6 +379,40 @@ class ChromaVectorStore:
         if not chunks:
             logger.warning("İndekslənəcək chunk yoxdur")
             return {"indexed": 0, "skipped": 0, "errors": 0}
+
+        # İNKREMENTAL HASH-GATE: bulk "refresh" reindex (index_directory/CLI)
+        # əvvəllər HƏR çağırışda BÜTÜN korpusu yenidən embed edirdi (hash
+        # müqayisəsi yox idi) — 1 fayl dəyişsə də ~1390 chunk təkrar embed
+        # olunurdu (watchdog self-heal storm-un kökü). İndi fayl-hash ilə
+        # dəyişməyənləri upsert-dən əvvəl atırıq. index_file bu yoldan keçmir
+        # (skip_predelete=True, hash_filter=False) — o, hash-i özü yoxlayır.
+        skipped_files = 0
+        if hash_filter:
+            by_file: Dict[Optional[str], List] = {}
+            for chunk in chunks:
+                fp = chunk.metadata.get("file_path") if hasattr(chunk, "metadata") else None
+                canon = _canonical_path(fp) if fp else None
+                by_file.setdefault(canon, []).append(chunk)
+            kept: List[CodeChunk] = []
+            for canon, file_chunks in by_file.items():
+                if canon is None:
+                    kept.extend(file_chunks)
+                    continue
+                new_hash = HashStore.compute_hash(canon)
+                old_hash = self.hash_store.get(canon)
+                if new_hash and new_hash == old_hash:
+                    skipped_files += 1
+                    continue
+                kept.extend(file_chunks)
+            if skipped_files:
+                logger.info(
+                    f"⏭️  İnkremental: {skipped_files} dəyişməyən fayl keçildi "
+                    f"(re-embed yoxdur)"
+                )
+            chunks = kept
+            if not chunks:
+                logger.info("İnkremental: heç bir fayl dəyişməyib — re-embed yoxdur")
+                return {"indexed": 0, "skipped": skipped_files, "errors": 0}
 
         # Pre-delete: per-file əvvəlcədən köhnə chunk-ları silmək — fayl
         # edit edilib chunk sayı azalsa (məs. funksiya silindi), köhnə
@@ -399,7 +442,7 @@ class ChromaVectorStore:
                     except Exception as e:
                         logger.debug(f"Batch pre-delete keçildi: {e}")
 
-        stats = {"indexed": 0, "skipped": 0, "errors": 0}
+        stats = {"indexed": 0, "skipped": skipped_files, "errors": 0}
         total = len(chunks)
 
         # Batch-lara böl
@@ -471,6 +514,11 @@ class ChromaVectorStore:
         # etməsin və hər boot-da "nəsil dəyişib" reset baş verməsin. (index_documents
         # əvvəllər hash store-a toxunmurdu — bu, reindex sonrası "hər açılışda
         # sıfırlanır + təkrar embed" probleminin kökü idi.)
+        # stamp_hashes=False olduqda (index_file çağırır) burada damğalamırıq —
+        # çağıran hash-i bir dəfə özü yazır (ikiqat tam-JSON _save qarşısı).
+        if not stamp_hashes:
+            logger.info(f"📊 İndeksləmə nəticəsi: {stats}")
+            return stats
         try:
             files = []
             seen = set()
@@ -518,28 +566,30 @@ class ChromaVectorStore:
         for ch in chunks:
             ch.metadata["file_path"] = canonical
 
-        # Köhnə chunk-ları sil — həm kanonik, həm də mümkün stale variantları
+        # Köhnə chunk-ları sil — kanonik + mümkün stale path variantları.
+        # Əvvəl hər variant üçün AYRI collection.get(where=...) edilirdi (fayl
+        # başına 2-3 SQLite round-trip, biri həmişə boş). İndi tək `$in` sorğusu.
         try:
-            stale_variants = {
+            stale_variants = list({
                 canonical,
                 str(file_path),
                 str(Path(file_path)),
-            }
-            ids_to_delete: List[str] = []
-            for variant in stale_variants:
-                existing = self.collection.get(where={"file_path": variant})
-                if existing and existing.get("ids"):
-                    ids_to_delete.extend(existing["ids"])
+            })
+            existing = self.collection.get(where={"file_path": {"$in": stale_variants}})
+            ids_to_delete = list(existing.get("ids", []) if existing else [])
             if ids_to_delete:
-                self.collection.delete(ids=list(set(ids_to_delete)))
-                logger.debug(f"🗑️  {len(set(ids_to_delete))} köhnə chunk silindi: {canonical}")
+                unique_ids = list(set(ids_to_delete))
+                self.collection.delete(ids=unique_ids)
+                logger.debug(f"🗑️  {len(unique_ids)} köhnə chunk silindi: {canonical}")
         except Exception as e:
             logger.warning(f"Köhnə chunk-ları silmə xətası: {e}")
 
-        # Yeni chunk-ları əlavə et (köhnələri yuxarıda artıq sildik)
-        self.index_documents(chunks, skip_predelete=True)
+        # Yeni chunk-ları əlavə et (köhnələri yuxarıda artıq sildik).
+        # stamp_hashes=False: hash-i index_documents-in tail-i YOX, biz aşağıda
+        # BİR dəfə yazırıq (əvvəl İKİ tam-JSON _save olurdu: bulk_update + update).
+        self.index_documents(chunks, skip_predelete=True, stamp_hashes=False)
 
-        # Hash-i yenilə
+        # Hash-i bir dəfə yenilə (artıq hesablanmış new_hash ilə — təkrar MD5 oxuma yox)
         if new_hash:
             self.hash_store.update(canonical, new_hash)
 
@@ -554,20 +604,18 @@ class ChromaVectorStore:
         """
         canonical = _canonical_path(file_path)
         try:
-            stale_variants = {
+            stale_variants = list({
                 canonical,
                 str(file_path),
                 str(Path(file_path)),
-            }
-            ids_to_delete: List[str] = []
-            for variant in stale_variants:
-                existing = self.collection.get(where={"file_path": variant})
-                if existing and existing.get("ids"):
-                    ids_to_delete.extend(existing["ids"])
+            })
+            existing = self.collection.get(where={"file_path": {"$in": stale_variants}})
+            ids_to_delete = list(existing.get("ids", []) if existing else [])
             if ids_to_delete:
-                self.collection.delete(ids=list(set(ids_to_delete)))
+                unique_ids = list(set(ids_to_delete))
+                self.collection.delete(ids=unique_ids)
                 self.hash_store.remove(canonical)
-                logger.info(f"🗑️  Silindi: {canonical} ({len(set(ids_to_delete))} chunk)")
+                logger.info(f"🗑️  Silindi: {canonical} ({len(unique_ids)} chunk)")
         except Exception as e:
             logger.error(f"Fayl silmə xətası: {e}")
     

@@ -329,7 +329,33 @@ function readHistoryStats(historyPath: string): {
   }
 }
 
-export function readSavings(historyPath: string): SavingsSummary | null {
+// Parse-edilmiş history record-ları (mtime+size) ilə keşlənir. Bar hər 5s
+// tick-də (+ hər watcher event-də) readSavings çağırır; əvvəl bu, heç vaxt
+// rotasiya olunmayan (sonsuz böyüyən) JSONL faylını HƏR DƏFƏ tam oxuyub hər
+// sətri JSON.parse edirdi (UI thread). Fayl dəyişməyibsə keşdən qaytarırıq.
+let _recordsCache: {
+  path: string;
+  mtimeMs: number;
+  size: number;
+  records: SavingsRecord[];
+} | null = null;
+
+function readHistoryRecords(historyPath: string): SavingsRecord[] {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(historyPath);
+  } catch {
+    _recordsCache = null;
+    return [];
+  }
+  if (
+    _recordsCache &&
+    _recordsCache.path === historyPath &&
+    _recordsCache.mtimeMs === st.mtimeMs &&
+    _recordsCache.size === st.size
+  ) {
+    return _recordsCache.records;
+  }
   let data: string;
   try {
     data = fs.readFileSync(historyPath, 'utf-8');
@@ -346,6 +372,12 @@ export function readSavings(historyPath: string): SavingsSummary | null {
       /* skip malformed */
     }
   }
+  _recordsCache = { path: historyPath, mtimeMs: st.mtimeMs, size: st.size, records };
+  return records;
+}
+
+export function readSavings(historyPath: string): SavingsSummary | null {
+  const records: SavingsRecord[] = readHistoryRecords(historyPath);
   const pending = readSessionLog(historyPath);
   const indexingPending = readIndexingPending(historyPath);
   const queueStuckAgeSec = readQueueStuckAge(historyPath);

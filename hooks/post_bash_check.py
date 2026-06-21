@@ -31,11 +31,25 @@ except Exception:
     # Dependency import alınmadı — heç vaxt tool-u block etmə, səssiz çıx.
     sys.exit(0)
 
+# Nudge köməkçisi ayrıca try-da: nudge.py köhnə install-da yoxdursa belə, hook
+# normal log etməyə davam etsin (sadəcə nudge olmaz). Heç vaxt sınmaz.
+try:
+    from nudge import should_nudge, emit
+except Exception:
+    def should_nudge(*_a, **_k):
+        return False
+
+    def emit(*_a, **_k):
+        return None
+
 PROJECT_ROOT = find_project_root()
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 
 THRESHOLD_LINES = 50
+# Yalnız HƏQİQƏTƏN böyük shell-oxumalarında yönləndir (kiçik faylı cat etmək OK).
+NUDGE_LINES = 200
 ESTIMATED_ACTUAL_RATIO = 0.20
+AVG_CHARS_PER_LINE = 80  # böyük faylda stat→sətir təxmini üçün
 
 # Hər seqment (| ; && || ilə ayrılmış) inspeksiya açar sözü üçün skan olunur,
 # sonra qalan token-lərdən birinin indeksli layihə faylı kimi resolve oluna
@@ -155,21 +169,33 @@ def main() -> int:
         return 0
 
     seen = set()
+    nudge_names = []
     for keyword_frag, raw in _iter_inspection_paths(cmd):
         file_path = _resolve_in_project(raw)
         if file_path is None or str(file_path) in seen:
             continue
         seen.add(str(file_path))
 
+        # Böyük faylda tam read_bytes() ETMƏ (komanda başına bir neçə fayl ola
+        # bilər → çoxaldılmış IO). Stat ilə təxmin et; yalnız kiçik faylda real oxu.
         try:
-            content = file_path.read_bytes()
+            file_size = file_path.stat().st_size
         except OSError:
             continue
-        line_count = content.count(b"\n") + (1 if content and not content.endswith(b"\n") else 0)
-        if line_count < THRESHOLD_LINES:
-            continue
 
-        estimated_baseline = estimate_tokens(content)
+        if file_size > 200_000:
+            line_count = max(THRESHOLD_LINES, file_size // AVG_CHARS_PER_LINE)
+            estimated_baseline = estimate_tokens(b"x" * file_size)
+        else:
+            try:
+                content = file_path.read_bytes()
+            except OSError:
+                continue
+            line_count = content.count(b"\n") + (1 if content and not content.endswith(b"\n") else 0)
+            if line_count < THRESHOLD_LINES:
+                continue
+            estimated_baseline = estimate_tokens(content)
+
         estimated_actual = int(estimated_baseline * ESTIMATED_ACTUAL_RATIO)
 
         record = {
@@ -182,6 +208,22 @@ def main() -> int:
             "estimated_actual_tokens": estimated_actual,
         }
         append_atomic(SESSION_LOG, json.dumps(record, ensure_ascii=False))
+
+        # Böyük indeksli faylı shell ilə tam oxumaq — qənaət deşiyinin ən böyüyü.
+        # Modelə BLOKLAMADAN xatırlat (rate-limited, fayl başına bir dəfə).
+        if line_count >= NUDGE_LINES and should_nudge(PROJECT_ROOT, f"bash:{file_path}"):
+            nudge_names.append(file_path.name)
+
+    if nudge_names:
+        names = ", ".join(nudge_names[:3])
+        emit(
+            f"Tokengram tip: you just read large file(s) ({names}) in full via a "
+            f"shell command, which bypasses the index. For source files, the "
+            f"`search_code` MCP tool (semantic search) or the Read tool with a "
+            f"`limit=`/`offset=` returns just the relevant part and saves tokens. "
+            f"(No action needed now — this is guidance for next time.)",
+            event="PostToolUse",
+        )
 
     return 0
 

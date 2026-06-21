@@ -30,17 +30,32 @@ class RouteMode(Enum):
     RAG_FULL = "rag_full"
 
 
+# tiktoken encoder bir dəfə qurulub keşlənir. Əvvəl count_tokens HƏR çağırışda
+# tiktoken.get_encoding("cl100k_base") çağırırdı (encoding cədvəlini sıfırdan
+# qurur) — search_code log yolu hər nəticə faylı üçün bunu təkrar edirdi.
+_TIKTOKEN_ENCODER = None
+_TIKTOKEN_TRIED = False
+
+
 def count_tokens(text: str) -> int:
     """Mətnin təxmini token sayını hesablayır.
 
     tiktoken yüklənmədikdə təxmin: 1 token ≈ 4 simvol.
     """
-    try:
-        import tiktoken
-        encoding = tiktoken.get_encoding("cl100k_base")
-        return len(encoding.encode(text))
-    except Exception:
-        return max(1, len(text) // 4)
+    global _TIKTOKEN_ENCODER, _TIKTOKEN_TRIED
+    if not _TIKTOKEN_TRIED:
+        _TIKTOKEN_TRIED = True
+        try:
+            import tiktoken
+            _TIKTOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _TIKTOKEN_ENCODER = None
+    if _TIKTOKEN_ENCODER is not None:
+        try:
+            return len(_TIKTOKEN_ENCODER.encode(text))
+        except Exception:
+            pass
+    return max(1, len(text) // 4)
 
 
 def estimate_project_tokens(directory: str) -> Tuple[int, int]:

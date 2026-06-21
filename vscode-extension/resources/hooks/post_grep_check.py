@@ -25,11 +25,25 @@ except Exception:
     # Dependency import alınmadı — heç vaxt tool-u block etmə, səssiz çıx.
     sys.exit(0)
 
+# Nudge köməkçisi ayrıca try-da: yoxdursa hook normal işləməyə davam etsin.
+try:
+    from nudge import should_nudge, emit
+except Exception:
+    def should_nudge(*_a, **_k):
+        return False
+
+    def emit(*_a, **_k):
+        return None
+
 PROJECT_ROOT = find_project_root()
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 
 THRESHOLD_LINES = 30
+# Grep çox vaxt DOĞRU alətdir (dəqiq mətn) — ona görə yönləndirmə çox yumşaqdır:
+# yalnız böyük faylda və tək açarla (~30 dəq-də bir dəfə), nudge.py global cap-i ilə.
+NUDGE_LINES = 200
 ESTIMATED_ACTUAL_RATIO = 0.15
+AVG_CHARS_PER_LINE = 80  # böyük faylda stat→sətir təxmini üçün
 
 
 def main() -> int:
@@ -65,16 +79,27 @@ def main() -> int:
     if file_path.suffix.lower() not in INDEXED_EXTS:
         return 0
 
+    # Böyük faylda tam read_bytes() ETMƏ — sadəcə baseline/line təxmini üçün
+    # bütün faylı oxumaq (size cap-siz) hər Grep-də əlavə disk IO idi. Stat ilə
+    # təxmin et; yalnız kiçik fayllarda real oxu (line-threshold qərarı dəqiq olsun).
     try:
-        content = file_path.read_bytes()
+        file_size = file_path.stat().st_size
     except OSError:
         return 0
 
-    line_count = content.count(b"\n") + (1 if content and not content.endswith(b"\n") else 0)
-    if line_count < THRESHOLD_LINES:
-        return 0
+    if file_size > 200_000:
+        line_count = max(THRESHOLD_LINES, file_size // AVG_CHARS_PER_LINE)
+        estimated_baseline = estimate_tokens(b"x" * file_size)
+    else:
+        try:
+            content = file_path.read_bytes()
+        except OSError:
+            return 0
+        line_count = content.count(b"\n") + (1 if content and not content.endswith(b"\n") else 0)
+        if line_count < THRESHOLD_LINES:
+            return 0
+        estimated_baseline = estimate_tokens(content)
 
-    estimated_baseline = estimate_tokens(content)
     estimated_actual = int(estimated_baseline * ESTIMATED_ACTUAL_RATIO)
 
     record = {
@@ -87,6 +112,17 @@ def main() -> int:
         "estimated_actual_tokens": estimated_actual,
     }
     append_atomic(SESSION_LOG, json.dumps(record, ensure_ascii=False))
+
+    # Çox yumşaq xatırlatma (BLOKLAMIR): konseptual/davranış axtarışında
+    # search_code Grep-in qaçırdığı əlaqəli kodu da tapır. Tək açar → ~30 dəq-də
+    # bir dəfə; dəqiq mətn axtarışı üçün Grep onsuz da doğrudur.
+    if line_count >= NUDGE_LINES and should_nudge(PROJECT_ROOT, "grep:any"):
+        emit(
+            "Tokengram tip: Grep is ideal for exact strings. For conceptual or "
+            "\"where/how is X handled\" searches, the `search_code` MCP tool does "
+            "semantic search and often surfaces related code a text Grep misses.",
+            event="PostToolUse",
+        )
     return 0
 
 

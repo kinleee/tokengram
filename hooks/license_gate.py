@@ -26,6 +26,13 @@ _INSTALL_ROOT = Path(__file__).resolve().parent.parent
 # 5 minutes — long enough to shave per-hook cost, short enough that an
 # admin-side subscription cancel propagates quickly.
 _CACHE_TTL_SEC = 300
+# Hard ceiling: keş bundan köhnə olana qədər köhnə dəyəri qaytarırıq (stale-
+# while-revalidate). Soft TTL (300s) ilə hard TTL (900s) arasında tool call
+# inline import + şəbəkə bloku ETMİR — sadəcə keşdən qaytarır. Tam yenidən-
+# yoxlama yalnız hard TTL keçəndə (license.py onsuz da serverlə saatda bir
+# yoxlayır), beləcə per-5dəq ~150-300ms import taksı per-15dəq-ə düşür və
+# bir tool call heç vaxt 10s şəbəkə timeout-unda donmur.
+_CACHE_HARD_TTL = 900
 _CACHE_PATH = Path.home() / ".tokengram" / ".license_gate_cache"
 
 
@@ -125,9 +132,16 @@ def license_valid() -> bool:
         return False
 
     cache = _read_cache()
+    now = time.time()
     if cache is not None:
         ts, valid = cache
-        if time.time() - ts < _CACHE_TTL_SEC:
+        age = now - ts
+        # Soft TTL içində: dərhal keşdən qaytar (O(1) fayl oxuma).
+        if age < _CACHE_TTL_SEC:
+            return valid
+        # Stale-but-present: hard ceiling-ə qədər köhnə dəyəri qaytar — tool
+        # call-da inline import / 10s şəbəkə bloku YOX (stale-while-revalidate).
+        if age < _CACHE_HARD_TTL:
             return valid
 
     lic = _import_license_module()
@@ -137,6 +151,14 @@ def license_valid() -> bool:
     try:
         guard = lic.ensure_license_cached()
     except Exception:
+        # KRİTİK: burada köhnə True-nu SAXLAMA. ensure_license şəbəkə down olsa
+        # belə etibarlı offline JWT keşi varsa guard QAYTARIR (exception atmır) —
+        # yəni bu exception yolu yalnız lisenziya HƏQİQƏTƏN təsdiqlənə bilməyəndə
+        # işə düşür: ya server AÇIQ İMTİNA edib (revocation/cancel →
+        # LicenseServerError), ya da offline grace yoxdur + şəbəkə əlçatmazdır.
+        # Hər iki halda doğru davranış False-dur (fail-open: enforcement söndür +
+        # ləğv ötürülür). Əvvəlki SWR-backoff köhnə True-nu saxlayıb ts təzələyirdi
+        # → ləğv olunmuş istifadəçi əbədi enforcement-active qalırdı (regresiya).
         _write_cache(False)
         return False
     # guard is None means dev_mode (no key file). Treat as unlicensed.

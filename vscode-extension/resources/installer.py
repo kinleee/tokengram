@@ -162,11 +162,19 @@ def create_venv(venv: Path, uv: str | None) -> None:
     if existing == REQUIRED_PY:
         log(f"[3/5] venv already exists at {venv} (Python {existing[0]}.{existing[1]}), reusing")
         return
-    if existing is not None:
-        # Köhnə venv başqa Python ilə yaranıb (məs. user 3.13 ilə əvvəl
-        # install etdi, indi 3.12-yə keçdi). Reuse cəhdi pip-də version
-        # uyğunsuzluğu xətası verir — silib yenidən yaradırıq.
-        log(f"[3/5] Existing venv is Python {existing[0]}.{existing[1]}, rebuilding for {REQUIRED_PY[0]}.{REQUIRED_PY[1]}...")
+    # Yenidən-qurma lazımdır əgər (a) köhnə venv başqa Python ilə yaranıb VƏ YA
+    # (b) venv qovluğu mövcuddur amma python.exe YOXDUR/işləmir (existing is None).
+    # (b) halı KRİTİK: antivirus venv-in python.exe-ni karantinə ala bilər → qovluq
+    # qalır (tokengram.exe + site-packages), python.exe yox. Belə qalıq qovluğa qarşı
+    # `uv venv` exit 2 verir ("A virtual environment already exists ... --clear")
+    # → python.exe HEÇ yaranmır → install hər dəfə eyni yerdə sınır. Qalıq qovluğu
+    # əvvəlcə tam silirik ki, təmiz lövhədən qurulsun (canlı doğrulandı 2026-06-19).
+    if venv.exists() and existing != REQUIRED_PY:
+        reason = (
+            f"Python {existing[0]}.{existing[1]}" if existing is not None
+            else "partial/broken (python.exe missing)"
+        )
+        log(f"[3/5] Existing venv is {reason}, rebuilding for {REQUIRED_PY[0]}.{REQUIRED_PY[1]}...")
         try:
             shutil.rmtree(venv)
         except OSError as e:
@@ -175,10 +183,11 @@ def create_venv(venv: Path, uv: str | None) -> None:
     if uv:
         # uv özü 3.12-ni provision edir (sistemdə yoxdursa standalone endirir) —
         # user-də heç bir Python olmasa belə işləyir. Bu, "Python 3.12 yoxdur"
-        # problemini tamamilə aradan qaldırır.
-        _run([uv, "venv", "--python", "3.12", str(venv)])
+        # problemini tamamilə aradan qaldırır. `--clear`: rmtree kilidli fayl üzündən
+        # alınmasa belə uv qalıq qovluğu özü təmizləsin (idempotent sığorta).
+        _run([uv, "venv", "--clear", "--python", "3.12", str(venv)])
     else:
-        _run([sys.executable, "-m", "venv", str(venv)])
+        _run([sys.executable, "-m", "venv", "--clear", str(venv)])
 
 
 def upgrade_pip(venv: Path, uv: str | None) -> None:

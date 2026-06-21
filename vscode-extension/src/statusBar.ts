@@ -29,6 +29,27 @@ const QUEUE_STUCK_THRESHOLD_SEC = 1800;
 // "yeni başlatma" pəncərəsi; daha köhnəsi yəqin ki uzun-müddətli idle olub.
 const DATA_RESET_FRESH_THRESHOLD_SEC = 3600;
 
+// Project root workspace ömrü boyu sabitdir (yalnız workspace-folder dəyişəndə
+// dəyişir), amma refresh() hər 5s + hər watcher event-də findProjectRoot-u
+// sıfırdan hesablayırdı (worst-case 4×8 stat). Qısa-TTL memo ilə keşləyirik;
+// TTL self-heal verir (məs. setup sonradan .claude yaradanda).
+let _rootMemo: { ws: string; root: string; at: number } | null = null;
+const _ROOT_MEMO_TTL_MS = 30_000;
+
+function cachedProjectRoot(workspacePath: string): string {
+  const now = Date.now();
+  if (
+    _rootMemo &&
+    _rootMemo.ws === workspacePath &&
+    now - _rootMemo.at < _ROOT_MEMO_TTL_MS
+  ) {
+    return _rootMemo.root;
+  }
+  const root = findProjectRoot(workspacePath);
+  _rootMemo = { ws: workspacePath, root, at: now };
+  return root;
+}
+
 function readEnforcement(workspacePath: string): boolean {
   try {
     const flagPath = path.join(workspacePath, '.mla_enforcement.flag');
@@ -66,7 +87,7 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     const workspacePath = folders[0].uri.fsPath;
     // Workspace bəzən project_root-un subfolder-i ola bilər (mono-repo).
     // Hooks `.claude/settings.json`-ın bağlı olduğu kökə yazır — biz də orada axtaraq.
-    const projectRoot = findProjectRoot(workspacePath);
+    const projectRoot = cachedProjectRoot(workspacePath);
     const flagOn = readEnforcement(projectRoot);
     // Avtomatik recovery (autoRecoverIfStuck) SİLİNDİ (2026-06-19): köhnə davamlı
     // poll-drain + watchdog/self-heal qülləsi getdi, ona görə "GIL-donmuş server"

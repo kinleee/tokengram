@@ -36,11 +36,14 @@ QUEUE_FILE = PROJECT_ROOT / ".mla_pending.txt"
 PROCESSING_FILE = PROJECT_ROOT / ".mla_pending.processing"
 DRAIN_MARKER = PROJECT_ROOT / ".mla_drain.now"
 
-# İsti server-ə marker-i istehlak etməyə nə qədər vaxt veririk. Server hər ~1s
-# poll edir; 2.4s = ~2 dövr. Bu müddətdə marker silinsə → server işi götürdü,
-# tez qayıdırıq. Silinməsə → server yoxdur → soyuq fallback.
-_GRACE_SEC = 2.4
-_GRACE_POLL = 0.3
+# İsti server-ə marker-i istehlak etməyə nə qədər vaxt veririk. Server indi hər
+# ~0.25s poll edir (əvvəl 1.0s), ona görə marker adətən ~0.25-0.5s-də silinir.
+# Poll-u 0.1s-ə endirdik ki, marker silinən kimi DƏRHAL qayıdaq — Stop hook
+# HƏR redaktə turunun sonunda işləyir, turun tamamlanması bu hook-u gözləyir,
+# ona görə bu busy-wait birbaşa istifadəçinin gördüyü tur-sonu gecikməsidir.
+# 1.5s tavan = server qısa müddət məşğul olsa belə pəncərə (sonra soyuq fallback).
+_GRACE_SEC = 1.5
+_GRACE_POLL = 0.1
 
 
 def _queue_is_empty() -> bool:
