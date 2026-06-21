@@ -926,8 +926,52 @@ export function ensureClaudeMdGuidance(root: string): void {
       return;
     }
 
+    const isFreshCreate = cur === '';
     const sep = cur === '' ? '' : cur.endsWith('\n') ? '\n' : '\n\n';
     fs.appendFileSync(mdPath, sep + block + '\n', 'utf-8');
+    if (isFreshCreate) {
+      // Bu CLAUDE.md-ni Tokengram SIFIRDAN yaratdı (user məzmunu yox idi) → sırf
+      // alət yönləndirməsidir (yalnız search_code MCP ilə mənalı), paylaşılan
+      // komanda biliyi DEYİL → default git-ə salma. DİQQƏT: user-in öz CLAUDE.md-si
+      // OLAN layihələrdə bu branch işləmir (yuxarıda append/update edilir) → heç
+      // vaxt user-in commit etdiyi faylı gizlətmərik.
+      ensureClaudeMdGitignored(root);
+    }
+  } catch {
+    // Best-effort — heç vaxt setup-u bloklama.
+  }
+}
+
+// Yalnız Tokengram SIFIRDAN yaratdığı CLAUDE.md üçün çağırılır: faylı .gitignore-a
+// idempotent əlavə edir (artıq varsa toxunmur). Git repo deyilsə heç nə etmir.
+// Niyə: bizim yazdığımız guidance maşın/alət-spesifikdir (search_code MCP olmayan
+// komanda üzvü üçün mənasız) → lokal qalmalıdır, user-in repo-suna sızmamalıdır.
+function ensureClaudeMdGitignored(root: string): void {
+  try {
+    const isGitRepo = fs.existsSync(path.join(root, '.git'));
+    const giPath = path.join(root, '.gitignore');
+    if (!isGitRepo && !fs.existsSync(giPath)) return;
+
+    let cur = '';
+    try {
+      cur = fs.readFileSync(giPath, 'utf-8');
+    } catch {
+      cur = '';
+    }
+    // Artıq ignore olunub? (sətir-bə-sətir, ./ və / prefikslərinə dözümlü)
+    const present = cur.split(/\r?\n/).some((l) => {
+      const t = l.trim();
+      return t === 'CLAUDE.md' || t === '/CLAUDE.md' || t === './CLAUDE.md';
+    });
+    if (present) return;
+
+    const note =
+      '# Tokengram auto-created CLAUDE.md (search_code guidance — only meaningful\n' +
+      '# with the Tokengram MCP installed). Kept local. To share it with your team,\n' +
+      '# delete this + the next line and commit CLAUDE.md.\n' +
+      'CLAUDE.md\n';
+    const sep = cur === '' ? '' : cur.endsWith('\n') ? '' : '\n';
+    fs.appendFileSync(giPath, sep + note, 'utf-8');
   } catch {
     // Best-effort — heç vaxt setup-u bloklama.
   }
