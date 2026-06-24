@@ -113,7 +113,7 @@ _index_lock = threading.RLock()
 def _get_store():
     global _store
     if _store is None:
-        logger.info("ChromaDB açılır...")
+        logger.info("Opening ChromaDB...")
         _store = ChromaVectorStore()
     return _store
 
@@ -222,7 +222,7 @@ def _drain_pending_queue() -> int:
     # (`_DRAIN_YIELDED` → `_drain_signal_loop` dövrü dayandırır, işi o yazıçıya buraxır).
     dlock = db_guard.acquire_drainer_lock(config.CHROMA_DB_PATH, wait_sec=0.0)
     if dlock is None:
-        logger.debug("Drainer kilidi məşğul (başqa bulk yazıçı işləyir) — dövr ötürülür")
+        logger.debug("Drainer lock busy (another bulk writer is running) — skipping this cycle")
         return _DRAIN_YIELDED
 
     indexed = 0
@@ -255,7 +255,7 @@ def _drain_pending_queue() -> int:
                     else:
                         skipped += 1
                 except Exception as e:
-                    logger.error(f"Fon yenidən-indeksləmə xətası ({path_str}): {e}")
+                    logger.error(f"Background re-index error ({path_str}): {e}")
                 # Uzun batch-də (8GB RAM paging) heartbeat-i təzələ ki, kilid stale
                 # sayılıb başqa proses tərəfindən götürülməsin (iki yazıçı qaçar).
                 if idx % 5 == 0:
@@ -274,16 +274,16 @@ def _drain_pending_queue() -> int:
                 "\n".join(leftover) + "\n", encoding="utf-8"
             )
         except IOError as e:
-            logger.warning(f"Leftover yazılma xətası: {e}")
+            logger.warning(f"Leftover write error: {e}")
             PROCESSING_QUEUE.unlink(missing_ok=True)
     else:
         PROCESSING_QUEUE.unlink(missing_ok=True)
 
     if indexed or deleted or skipped:
         logger.info(
-            f"📥 Fon dren batch: {indexed} indeks, {deleted} silinmə, "
-            f"{skipped} atlanmış"
-            + (f", {len(leftover)} qalıb" if leftover else "")
+            f"📥 Background drain batch: {indexed} indexed, {deleted} deleted, "
+            f"{skipped} skipped"
+            + (f", {len(leftover)} remaining" if leftover else "")
         )
     return indexed + deleted
 
@@ -357,9 +357,9 @@ def _drain_signal_loop(poll_interval: float = 0.25) -> None:
                     with _index_lock:
                         _engine.rebuild_bm25()
                 except Exception as e:
-                    logger.warning(f"BM25 yenidən qurma xətası: {e}")
+                    logger.warning(f"BM25 rebuild error: {e}")
         except Exception as e:
-            logger.error(f"Drain siqnal dövrü xətası: {e}")
+            logger.error(f"Drain signal loop error: {e}")
 
 
 def _recover_stale_processing_queue() -> None:
@@ -371,7 +371,7 @@ def _recover_stale_processing_queue() -> None:
     try:
         leftover = PROCESSING_QUEUE.read_text(encoding="utf-8")
     except IOError as e:
-        logger.warning(f"Köhnə processing oxunmadı: {e}")
+        logger.warning(f"Could not read stale processing file: {e}")
         return
 
     if not leftover.strip():
@@ -383,9 +383,9 @@ def _recover_stale_processing_queue() -> None:
             out.write(leftover)
         PROCESSING_QUEUE.unlink(missing_ok=True)
         n = sum(1 for line in leftover.splitlines() if line.strip())
-        logger.info(f"🔄 Köhnə processing-dən {n} fayl pending-ə qaytarıldı")
+        logger.info(f"🔄 Requeued {n} files from stale processing to pending")
     except IOError as e:
-        logger.warning(f"Pending-ə qaytarılma xətası: {e}")
+        logger.warning(f"Requeue-to-pending error: {e}")
 
 
 def _start_background_worker() -> None:
@@ -407,7 +407,7 @@ def _start_background_worker() -> None:
         daemon=True,
     )
     _worker_thread.start()
-    logger.info("🧵 Marker-tetiklemeli drain işçisi başladı")
+    logger.info("🧵 Marker-triggered drain worker started")
 
 
 # ============================================
@@ -468,7 +468,7 @@ def _check_license() -> Optional[str]:
         _license.ensure_license_cached()
         return None
     except _license.LicenseError as e:
-        return f"[mla] Lisenziya xətası: {e}. Yoxla: MLA_LICENSE_KEY, MLA_LICENSE_SERVER_URL, MLA_LICENSE_PUBKEY."
+        return f"[mla] License error: {e}. Check: MLA_LICENSE_KEY, MLA_LICENSE_SERVER_URL, MLA_LICENSE_PUBKEY."
 
 
 # ============================================
@@ -482,21 +482,21 @@ def search_code(
     mode: Literal["fast", "semantic", "rerank"] = "fast",
     file_type: Optional[str] = None,
 ) -> str:
-    """Kod bazasında axtarış edir — 3 səviyyəli güc/RAM trade-off ilə.
+    """Searches the code base — with a 3-tier power/RAM trade-off.
 
     Args:
-        query: Axtarış sualı (Azərbaycanca və ya İngiliscə)
-        top_k: Qaytarılacaq nəticə sayı (default 4)
-        mode: Axtarış səviyyəsi (default "fast"):
-          - "fast":     yalnız BM25 keyword. ML yüklənmir. ~50ms.
-                        Funksiya/sinif adı, fayl adı tipli sintaktik sorğulara idealdır.
-          - "semantic": BM25 + embedding semantic. İlk çağırış 30-60s
-                        (embedding modeli RAM-a yüklənir, +400-700 MB).
-                        "Auth necə işləyir" tipli konseptual sorğulara.
-          - "rerank":   semantic + cross-encoder reranker. İlk çağırış +30s
-                        (reranker modeli RAM-a yüklənir, +200 MB).
-                        Maksimum sıralanma keyfiyyəti.
-        file_type: Filtr: ".py", ".sol", ".sql", ".md" və ya None
+        query: Search query (natural language)
+        top_k: Number of results to return (default 4)
+        mode: Search tier (default "fast"):
+          - "fast":     BM25 keyword only. No ML loaded. ~50ms.
+                        Ideal for syntactic queries such as a function/class or file name.
+          - "semantic": BM25 + embedding semantic. First call 30-60s
+                        (embedding model loads into RAM, +400-700 MB).
+                        For conceptual queries like "how does Auth work".
+          - "rerank":   semantic + cross-encoder reranker. First call +30s
+                        (reranker model loads into RAM, +200 MB).
+                        Maximum ranking quality.
+        file_type: Filter: ".py", ".sol", ".sql", ".md" or None
     """
     if (err := _check_license()) is not None:
         return err
@@ -525,12 +525,12 @@ def search_code(
 
     if not results:
         _log_search(query, results, "")
-        return "Heç bir uyğun kod tapılmadı."
+        return "No matching code found."
 
-    blocks = [f"Etibar: {confidence} (mode={mode})\n"]
+    blocks = [f"Confidence: {confidence} (mode={mode})\n"]
     for i, r in enumerate(results, 1):
         blocks.append(
-            f"--- Mənbə #{i}: {r.file_info} (skor: {r.score:.3f}) ---\n"
+            f"--- Source #{i}: {r.file_info} (score: {r.score:.3f}) ---\n"
             f"{r.content}"
         )
     response = "\n\n".join(blocks)
@@ -597,26 +597,26 @@ def _log_search(query: str, results, response_text: str) -> None:
         with open(SESSION_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
-        logger.warning(f"Session log yazıla bilmədi: {e}")
+        logger.warning(f"Could not write session log: {e}")
 
 
 @mcp.tool()
 def index_directory(path: str, fresh: bool = False) -> str:
-    """Verilmiş qovluğu indeksləşdirir.
+    """Indexes the given directory.
 
     Args:
-        path: İndekslənəcək qovluğun mütləq yolu
-        fresh: True olarsa, mövcud baza əvvəl sıfırlanır
+        path: Absolute path of the directory to index
+        fresh: If True, the existing database is reset first
     """
     if (err := _check_license()) is not None:
         return err
     directory = Path(path).resolve()
     if not directory.exists():
-        return f"Xəta: Qovluq tapılmadı: {directory}"
+        return f"Error: Directory not found: {directory}"
 
     chunks = load_directory(str(directory))
     if not chunks:
-        return "Xəbərdarlıq: Heç bir chunk yaradılmadı."
+        return "Warning: No chunks were created."
 
     with _index_lock:
         store = _get_store()
@@ -632,44 +632,44 @@ def index_directory(path: str, fresh: bool = False) -> str:
             _engine.rebuild_bm25()
 
     return (
-        f"İndeksləmə tamamlandı.\n"
-        f"  Qovluq: {directory}\n"
-        f"  Chunk: {stats['indexed']} indekslənmiş, "
-        f"{stats['errors']} xəta\n"
+        f"Indexing complete.\n"
+        f"  Directory: {directory}\n"
+        f"  Chunks: {stats['indexed']} indexed, "
+        f"{stats['errors']} errors\n"
     )
 
 
 @mcp.tool()
 def index_file(path: str) -> str:
-    """Tək faylı incremental indeksləşdirir (hash yoxlaması ilə).
+    """Incrementally indexes a single file (with a hash check).
 
     Args:
-        path: Faylın mütləq yolu
+        path: Absolute path of the file
     """
     if (err := _check_license()) is not None:
         return err
     p = Path(path)
     if not p.exists():
-        return f"Xəta: Fayl tapılmadı: {p}"
+        return f"Error: File not found: {p}"
 
     if p.suffix not in config.SUPPORTED_EXTENSIONS:
-        return f"Atlandı: dəstəklənməyən uzantı ({p.suffix})"
+        return f"Skipped: unsupported extension ({p.suffix})"
 
     if any(part in config.EXCLUDED_DIRS for part in p.parts):
-        return f"Atlandı: istisna edilən qovluqdadır"
+        return f"Skipped: in an excluded directory"
 
     try:
         source = p.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
-        return f"Xəta: oxuma uğursuz: {e}"
+        return f"Error: read failed: {e}"
 
     if not source.strip():
-        return "Atlandı: boş fayl"
+        return "Skipped: empty file"
 
     chunker = _CHUNKER_MAP.get(p.suffix, _fallback_chunk)
     chunks = chunker(source, str(p))
     if not chunks:
-        return "Atlandı: chunk yaradılmadı"
+        return "Skipped: no chunks were created"
 
     with _index_lock:
         store = _get_store()
@@ -679,19 +679,19 @@ def index_file(path: str) -> str:
             _engine.rebuild_bm25()
 
     return (
-        f"{'İndekslənildi' if changed else 'Dəyişiklik yox'}: {p.name} "
+        f"{'Indexed' if changed else 'No change'}: {p.name} "
         f"({len(chunks)} chunk)"
     )
 
 
 @mcp.tool()
 def get_stats() -> str:
-    """Vektor bazası statistikasını qaytarır."""
+    """Returns vector database statistics."""
     if (err := _check_license()) is not None:
         return err
     store = _get_store()
     stats = store.get_stats()
-    lines = ["Baza statistikası:"]
+    lines = ["Database statistics:"]
     for key, value in stats.items():
         lines.append(f"  {key}: {value}")
     return "\n".join(lines)
@@ -699,9 +699,9 @@ def get_stats() -> str:
 
 @mcp.tool()
 def license_status() -> str:
-    """Cari lisenziya vəziyyəti — extension status bar üçün.
+    """Current license status — for the extension status bar.
 
-    Heç vaxt block etmir, sadəcə vəziyyəti qaytarır. JSON format:
+    Never blocks, just returns the status. JSON format:
         {status: "active"|"dev_mode"|"error", days_left, expires_at, ...}
     """
     return json.dumps(_license.license_status(), ensure_ascii=False)
@@ -709,23 +709,23 @@ def license_status() -> str:
 
 @mcp.tool()
 def search_conversation(query: str, top_k: int = 5) -> str:
-    """Keçmiş söhbətlərdə semantic axtarış — reload-dan əvvəlki qərar/kontekst tapmaq üçün.
+    """Semantic search over past conversations — to find a decision/context from before a reload.
 
-    Bu alət `~/.claude/projects/.../*.jsonl` fayllarındakı keçmiş user/assistant
-    turn-lərini indekslədir. Reload-dan sonra və ya uzun sessiyada əvvəlki
-    müzakirələri yenidən söhbət tarixçəsinə yükləmədən tapmaq olar.
+    This tool indexes past user/assistant turns from the
+    `~/.claude/projects/.../*.jsonl` files. After a reload or in a long session
+    you can find earlier discussions without reloading them into the chat history.
 
-    İstifadə nümunələri:
-    - "Niyə Rust-dan vaz keçdik?" → o qərarın səbəbi tapılır
-    - "Polar.sh inteqrasiya planı necə idi?" → əlaqəli müzakirələr
-    - "License server URL-i hansı?" → keçmiş infrastruktur qərarları
+    Usage examples:
+    - "Why did we drop Rust?" → finds the reason for that decision
+    - "What was the Polar.sh integration plan?" → related discussions
+    - "Which is the license server URL?" → past infrastructure decisions
 
     Args:
-        query: Azərbaycan və ya İngilis dilində axtarış sualı
-        top_k: Qaytarılacaq turn sayı (default 5)
+        query: Search query in natural language
+        top_k: Number of turns to return (default 5)
 
     Returns:
-        JSON list: hər biri {timestamp, session_id, snippet, distance}.
+        JSON list: each one {timestamp, session_id, snippet, distance}.
     """
     if (err := _check_license()) is not None:
         return err
@@ -735,10 +735,10 @@ def search_conversation(query: str, top_k: int = 5) -> str:
 
 @mcp.tool()
 def reindex_conversations() -> str:
-    """Söhbət tarixçəsini yenidən indekslə (yeni sessiyalar dahil).
+    """Re-index the conversation history (including new sessions).
 
-    Adətən search_conversation çağırışından əvvəl bir dəfə yetər;
-    yeni sessiyalar əlavə olduqda manuel çağırmaq olar.
+    Usually one call before search_conversation is enough;
+    you can call it manually when new sessions are added.
     """
     if (err := _check_license()) is not None:
         return err
@@ -748,18 +748,18 @@ def reindex_conversations() -> str:
 
 @mcp.tool()
 def route_project(path: str) -> str:
-    """Layihə ölçüsünə əsaslanan rejim tövsiyəsi.
+    """Mode recommendation based on project size.
 
     Args:
-        path: Qiymətləndiriləcək qovluğun mütləq yolu
+        path: Absolute path of the directory to evaluate
     """
     if (err := _check_license()) is not None:
         return err
     router = SmartRouter(path)
     return (
         f"{router.summary()}\n"
-        f"  Tövsiyə olunan parametrlər: {router.search_params()}\n"
-        f"  RAG istifadə: {router.should_use_rag()}"
+        f"  Recommended parameters: {router.search_params()}\n"
+        f"  RAG usage: {router.should_use_rag()}"
     )
 
 
@@ -805,7 +805,7 @@ def _cli_reindex(argv: list) -> int:
 
     directory = Path(target).resolve()
     if not directory.exists() or not directory.is_dir():
-        print(f"[tokengram] xəta: qovluq tapılmadı: {directory}", file=_sys.stderr)
+        print(f"[tokengram] error: directory not found: {directory}", file=_sys.stderr)
         return 1
 
     # Reindex-dən əvvəl ölü-PID qalıq kilidlərini süpür (split-brain orfan lock):
@@ -813,7 +813,7 @@ def _cli_reindex(argv: list) -> int:
     try:
         db_guard.clear_stale_locks(config.CHROMA_DB_PATH)
     except Exception as _e:
-        print(f"[tokengram] xəbərdarlıq: clear_stale_locks: {_e}", file=_sys.stderr)
+        print(f"[tokengram] warning: clear_stale_locks: {_e}", file=_sys.stderr)
 
     # Növbənin BAŞLANĞIC vəziyyətini götür — bu reindex onları əhatə edəcək, ona
     # görə sonda silinəcəklər (bar ilişib qalmasın). Reindex gedərkən gələn yeni
@@ -821,21 +821,21 @@ def _cli_reindex(argv: list) -> int:
     _queue_before = _snapshot_queue()
 
     print(
-        f"\n[1/3] 📁 Fayllar skan edilir: {directory}",
+        f"\n[1/3] 📁 Scanning files: {directory}",
         file=_sys.stderr, flush=True,
     )
     chunks = load_directory(str(directory))
     if not chunks:
         print(
-            "[tokengram] xəbərdarlıq: heç bir indeksə uyğun fayl tapılmadı",
+            "[tokengram] warning: no indexable files found",
             file=_sys.stderr,
         )
         return 0
-    print(f"      ✓ {len(chunks)} chunk hazırlandı", file=_sys.stderr, flush=True)
+    print(f"      ✓ {len(chunks)} chunks prepared", file=_sys.stderr, flush=True)
 
     print(
-        "\n[2/3] 🧠 Embedding modeli hazırlanır "
-        "(ilk dəfə internetdən yüklənir, ~30sn–1dq, sonrakı çağırışlar saniyələr)...",
+        "\n[2/3] 🧠 Preparing embedding model "
+        "(first run downloads from the internet, ~30s–1min, later calls take seconds)...",
         file=_sys.stderr, flush=True,
     )
 
@@ -854,8 +854,8 @@ def _cli_reindex(argv: list) -> int:
         # `quarantine`/exit 3 deyil — extension bunu "bir az sonra yenidən cəhd"
         # kimi qəbul edir, korrupsiya alarmı vermir).
         print(
-            "[tokengram] başqa indeksləmə davam edir — bir az sonra yenidən cəhd "
-            "edin (paralel yazma ləğv edildi: korrupsiya riski)",
+            "[tokengram] another indexing operation is in progress — try again "
+            "shortly (parallel write cancelled: corruption risk)",
             file=_sys.stderr, flush=True,
         )
         return 4
@@ -866,7 +866,7 @@ def _cli_reindex(argv: list) -> int:
                 store.clear_collection()
 
             print(
-                f"\n[3/3] 🔢 {len(chunks)} chunk indekslənir...",
+                f"\n[3/3] 🔢 Indexing {len(chunks)} chunks...",
                 file=_sys.stderr, flush=True,
             )
             # progress_cb iki iş görür:
@@ -879,7 +879,7 @@ def _cli_reindex(argv: list) -> int:
             def _progress(done, total):
                 dlock.touch()
                 print(
-                    f"[3/3] {done}/{total} chunk",
+                    f"[3/3] {done}/{total} chunks",
                     file=_sys.stderr, flush=True,
                 )
             # hash_filter=not fresh: "refresh" reindex yalnız dəyişmiş faylları
@@ -892,9 +892,9 @@ def _cli_reindex(argv: list) -> int:
 
     indexed = stats.get("indexed", 0)
     errors = stats.get("errors", 0)
-    tail = f" ({errors} xəta)" if errors else ""
+    tail = f" ({errors} errors)" if errors else ""
     print(
-        f"\n✓ Hazır: {indexed} chunk indekslendi{tail}",
+        f"\n✓ Ready: {indexed} chunks indexed{tail}",
         file=_sys.stderr, flush=True,
     )
     # Reindex başlayanda növbədə olanları sil → bar ⟳N təmizlənir, fon drain
@@ -913,12 +913,12 @@ def serve() -> int:
     run_mcp_server.main() `mcp_server.serve`-i axtarır; YOXDURSA `mcp.run()`-a
     düşür və fon işçisini HEÇ başlatmır → marker buraxılsa belə növbə drenlənmir.
     Bütün fon servisləri buradan qaldırılır ki, hər iki giriş yolu eyni olsun."""
-    logger.info("MLA Agent MCP server başladı (stdio)")
+    logger.info("MLA Agent MCP server started (stdio)")
     # Ölü prosesin qalıq kilid fayllarını (kanonik + köhnə paket qovluğu) süpür.
     try:
         db_guard.clear_stale_locks(config.CHROMA_DB_PATH)
     except Exception as _e:
-        logger.warning(f"clear_stale_locks (start) xətası: {_e}")
+        logger.warning(f"clear_stale_locks (start) error: {_e}")
     # KRİTİK (2026-06-17): ƏSAS thread-də HEÇ NƏ ağır işləməməlidir mcp.run()-dan
     # əvvəl. Model lazy şəkildə vector_store._ensure_loaded-da drain thread-ində
     # (REAL drain lazım olanda) yüklənir — əsas thread mcp.run()-a ~2-3s-də çatır,

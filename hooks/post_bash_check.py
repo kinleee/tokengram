@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""PostToolUse hook — Bash inspection komandalarını izlənir.
-İndeksli layihə faylı üzərində call olduqda 'bash_inspect' entry session_log-a yazılır.
+"""PostToolUse hook — tracks Bash inspection commands.
+When called on an indexed project file, a 'bash_inspect' entry is written to session_log.
 
-Tutulan komandalar:
+Commands caught:
   POSIX:      cat, head, tail, wc, less, more, awk, sed
   Windows:    type (cmd), findstr
   PowerShell: gc, Get-Content, Select-String, sls
   Git:        git show <ref>:<path>
 
 baseline = lines * 10
-actual   ≈ 20% baseline (heuristik subset)
+actual   ≈ 20% baseline (heuristic subset)
 """
 import json
 import os
@@ -28,11 +28,11 @@ try:
     from project_root import find_project_root
     from atomic_write import append_atomic
 except Exception:
-    # Dependency import alınmadı — heç vaxt tool-u block etmə, səssiz çıx.
+    # A dependency import failed — never block the tool, exit silently.
     sys.exit(0)
 
-# Nudge köməkçisi ayrıca try-da: nudge.py köhnə install-da yoxdursa belə, hook
-# normal log etməyə davam etsin (sadəcə nudge olmaz). Heç vaxt sınmaz.
+# The nudge helper is in a separate try: even if nudge.py is missing in an old
+# install, the hook keeps logging normally (just no nudge). It never breaks.
 try:
     from nudge import should_nudge, emit
 except Exception:
@@ -46,24 +46,24 @@ PROJECT_ROOT = find_project_root()
 SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 
 THRESHOLD_LINES = 50
-# Yalnız HƏQİQƏTƏN böyük shell-oxumalarında yönləndir (kiçik faylı cat etmək OK).
+# Only redirect on TRULY large shell-reads (cat-ing a small file is OK).
 NUDGE_LINES = 200
 ESTIMATED_ACTUAL_RATIO = 0.20
-AVG_CHARS_PER_LINE = 80  # böyük faylda stat→sətir təxmini üçün
+AVG_CHARS_PER_LINE = 80  # for the stat→line estimate on a large file
 
-# Hər seqment (| ; && || ilə ayrılmış) inspeksiya açar sözü üçün skan olunur,
-# sonra qalan token-lərdən birinin indeksli layihə faylı kimi resolve oluna
-# biləcəyi yoxlanır. Bu yanaşma argument-order variasiyalarını avtomatik tutur:
-#   cat foo.py            | foo.py keyword-dən sonra
-#   Select-String x foo.py| eyni
-#   findstr "x" foo.py    | pattern quoted, foo.py yenə token-dir
+# Each segment (split by | ; && ||) is scanned for an inspection keyword,
+# then it's checked whether one of the remaining tokens resolves to an indexed
+# project file. This approach automatically catches argument-order variations:
+#   cat foo.py            | foo.py after the keyword
+#   Select-String x foo.py| same
+#   findstr "x" foo.py    | pattern quoted, foo.py is still a token
 INSPECT_KEYWORD_RE = re.compile(
     r"\b(cat|head|tail|wc|less|more|awk|sed|type|findstr|gc|Get-Content|Select-String|sls|git\s+show)\b",
     re.IGNORECASE,
 )
 SEGMENT_SPLIT_RE = re.compile(r"\|\||&&|[|;]")
 TOKEN_RE = re.compile(r"[^\s|;&<>]+")
-# `git show HEAD:path/to/file.py` — ref:path birlikdə bir token-dir.
+# `git show HEAD:path/to/file.py` — ref:path together form a single token.
 GIT_REF_PATH_RE = re.compile(r"\S+:([^\s|;&<>]+)")
 
 
@@ -100,11 +100,11 @@ def _resolve_in_project(raw: str):
 
 
 def _iter_inspection_paths(cmd: str):
-    """Yields (keyword_fragment, raw_path) seqment-bə-seqment.
+    """Yields (keyword_fragment, raw_path) segment by segment.
 
-    Hər `| ; && ||` ilə ayrılmış seqmentdə inspect açar sözü axtarır;
-    tapsa, açar sözündən sonra gələn token-ləri path namizədi kimi qaytarır.
-    `git show ref:path` xüsusi tutulur.
+    In each segment split by `| ; && ||` it looks for an inspect keyword;
+    if found, it returns the tokens after the keyword as path candidates.
+    `git show ref:path` is handled specially.
     """
     for segment in SEGMENT_SPLIT_RE.split(cmd):
         m = INSPECT_KEYWORD_RE.search(segment)
@@ -126,10 +126,10 @@ def _iter_inspection_paths(cmd: str):
 
 
 def _log_bash_output(tool_response) -> None:
-    """Bash stdout+stderr-i real_spent bucket-ə salır.
+    """Puts Bash stdout+stderr into the real_spent bucket.
 
-    Bütün Bash çağırışları üçün — npm/vsce/ls/git və s. uzun output verən
-    komandalar tracker-dan kənarda qalmasın deyə.
+    For all Bash calls — so commands that produce long output like npm/vsce/ls/git
+    etc. don't fall outside the tracker.
     """
     if not isinstance(tool_response, dict):
         return
@@ -176,8 +176,8 @@ def main() -> int:
             continue
         seen.add(str(file_path))
 
-        # Böyük faylda tam read_bytes() ETMƏ (komanda başına bir neçə fayl ola
-        # bilər → çoxaldılmış IO). Stat ilə təxmin et; yalnız kiçik faylda real oxu.
+        # On a large file DON'T do a full read_bytes() (there can be several files
+        # per command → multiplied IO). Estimate with stat; do a real read only on a small file.
         try:
             file_size = file_path.stat().st_size
         except OSError:
@@ -209,8 +209,8 @@ def main() -> int:
         }
         append_atomic(SESSION_LOG, json.dumps(record, ensure_ascii=False))
 
-        # Böyük indeksli faylı shell ilə tam oxumaq — qənaət deşiyinin ən böyüyü.
-        # Modelə BLOKLAMADAN xatırlat (rate-limited, fayl başına bir dəfə).
+        # Reading a large indexed file in full via the shell — the biggest savings hole.
+        # Remind the model WITHOUT BLOCKING (rate-limited, once per file).
         if line_count >= NUDGE_LINES and should_nudge(PROJECT_ROOT, f"bash:{file_path}"):
             nudge_names.append(file_path.name)
 

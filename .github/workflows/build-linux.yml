@@ -1,0 +1,126 @@
+name: Build Linux artifacts
+
+# Builds the Linux-native engine (.so), a platform-tagged Linux wheel, and a
+# linux-x64 VS Code extension (.vsix) that bundles that wheel. None of this can
+# be produced on the Windows dev machine — Cython needs a Linux toolchain to
+# emit Linux .so files — so it runs here on an Ubuntu runner.
+#
+# This workflow is ADDITIVE: it never touches the Windows release path. The
+# Windows wheel/VSIX are still built and published exactly as before.
+#
+# Trigger manually from the Actions tab (workflow_dispatch) or on a version tag.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    name: Build Linux wheel + linux-x64 VSIX
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      # pyproject.toml pins requires-python to >=3.12,<3.13, so the engine must
+      # be compiled and verified against CPython 3.12 specifically.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build cython setuptools wheel auditwheel
+
+      # The verify step inside build_pypi.py imports the compiled engine in a
+      # clean process. That import pulls in the full runtime dependency tree, so
+      # those deps must be present here. Installing them also means the verify
+      # step doubles as a real "do the Linux .so files load?" smoke test — if a
+      # module fails to import on Linux, the build goes red instead of shipping a
+      # broken VSIX.
+      - name: Install runtime dependencies (for the import smoke test)
+        run: |
+          python -m pip install \
+            "chromadb==1.5.8" \
+            "anthropic>=0.42.0" \
+            "openai>=1.60.0" \
+            "fastembed>=0.8.0" \
+            "langchain-text-splitters>=0.3.0" \
+            "rank-bm25>=0.2.2" \
+            "watchdog>=6.0.0" \
+            "python-dotenv>=1.0.0" \
+            "tiktoken>=0.8.0" \
+            "mcp>=1.0.0" \
+            "pyjwt[crypto]>=2.8.0" \
+            "cryptography>=41.0.0" \
+            "requests>=2.31.0" \
+            "py-machineid>=0.6.0"
+
+      # Compiles every business-logic module to a Linux .so next to its source
+      # (e.g. mcp_server.cpython-312-x86_64-linux-gnu.so). Same script used on
+      # Windows; Cython emits the right extension for the host platform.
+      - name: Compile engine to Linux .so
+        run: python setup_cython.py build_ext --inplace
+
+      # Assembles tokengram/ from the freshly built .so + hooks + messages and
+      # builds the wheel. With setup.py's BinaryDistribution shim the wheel is
+      # tagged cp312-cp312-linux_x86_64 (not the old misleading py3-none-any).
+      # build_pypi.py also runs its clean-process import verification here.
+      - name: Build + verify Linux wheel
+        run: python build_pypi.py --skip-compile-check
+
+      - name: Show built wheel
+        run: ls -la dist/
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install extension dependencies
+        working-directory: vscode-extension
+        run: npm install
+
+      - name: Build extension bundle
+        working-directory: vscode-extension
+        run: npm run build:prod
+
+      # Bundle ONLY the Linux wheel into the linux-x64 VSIX. Any committed
+      # Windows wheel is removed first so the setup wizard cannot pick the wrong
+      # platform's wheel (it selects by version, not by platform tag).
+      - name: Stage Linux wheel into extension resources
+        run: |
+          rm -f vscode-extension/resources/tokengram-*.whl
+          cp dist/tokengram-*.whl vscode-extension/resources/
+          ls -la vscode-extension/resources/*.whl
+
+      # --target linux-x64 stamps the VSIX so the Marketplace serves it only to
+      # x64 Linux editors and never to Windows/macOS users.
+      - name: Package linux-x64 VSIX
+        working-directory: vscode-extension
+        run: npx vsce package --target linux-x64 -o tokengram-linux-x64.vsix
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokengram-linux-x64
+          path: |
+            dist/tokengram-*.whl
+            vscode-extension/tokengram-linux-x64.vsix
+          if-no-files-found: error
+
+# Follow-ups (not blocking the first Linux release):
+#   - linux-arm64: add a matrix arch + QEMU (docker/setup-qemu-action) or an
+#     arm runner, then `vsce package --target linux-arm64`.
+#   - PyPI: the wheel is tagged linux_x86_64, which PyPI rejects. Run auditwheel
+#     (`auditwheel repair`) to produce a manylinux wheel before any twine upload.
+#     The bundled-in-VSIX install path does NOT need this — uv installs the
+#     linux_x86_64 wheel by file path on a matching host.

@@ -1,38 +1,38 @@
-"""Mərkəzi extension/qovluq/fayl filtrləri.
+"""Central extension/directory/file filters.
 
-`config.py`, `document_loader.py` və bütün `hooks/*.py` skriptləri bu fayldan
-import edir — siyahıların 5 yerdə drift olmaması üçün tək mənbə.
+`config.py`, `document_loader.py` and all `hooks/*.py` scripts import from this
+file — a single source so the lists don't drift across 5 places.
 
-Heç bir 3rd-party asılılığı yoxdur (dotenv, chromadb yoxdur), hooks bunu sürətlə
-yükləyə bilir (~5ms cold import).
+No 3rd-party dependencies (no dotenv, no chromadb), so hooks can load it quickly
+(~5ms cold import).
 """
 
-# İndekslənən fayl uzantıları. Hooks (pre_read_check, post_grep_check,
-# post_bash_check) bu siyahıya əsasən block/log qərarı verir.
+# Indexed file extensions. Hooks (pre_read_check, post_grep_check,
+# post_bash_check) make block/log decisions based on this list.
 SUPPORTED_EXTENSIONS = {
-    # Python ekosistemi (orijinal)
+    # Python ecosystem (original)
     ".py", ".sol", ".sql", ".md",
     # TypeScript / JavaScript
     ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-    # Sistem dillər
+    # System languages
     ".go", ".rs", ".java", ".kt", ".cs",
     ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp",
-    # Dinamik dillər
+    # Dynamic languages
     ".rb", ".php", ".swift", ".dart",
     # Markup / config
     ".html", ".css", ".scss",
     ".json", ".yaml", ".yml", ".toml",
-    # Skript / infra
+    # Script / infra
     ".sh", ".bash", ".ps1", ".tf",
 }
 
-# İndeksləmə zamanı tam istisna olunan qovluqlar.
+# Directories fully excluded during indexing.
 EXCLUDED_DIRS = {
-    # Baza & cache
+    # Database & cache
     "chroma_db", "__pycache__", ".git", ".svn", ".hg",
     "models_cache", ".fastembed_cache",  # HF/fastembed model cache (tokenizer.json = 700+ chunk noise)
-    # Package manager / vendor (asılılıq qovluqları — semantik dəyər yox,
-    # layihəni nəhəng göstərir: Laravel vendor/ = 12k+ fayl)
+    # Package manager / vendor (dependency directories — no semantic value,
+    # make the project look huge: Laravel vendor/ = 12k+ files)
     "node_modules", "venv", ".venv", "env", ".env",
     "site-packages", "vendor", "bower_components",
     ".gradle", ".m2", "Pods", ".dart_tool", ".pub-cache", ".terraform",
@@ -42,7 +42,7 @@ EXCLUDED_DIRS = {
     # Cache / coverage
     ".cache", ".parcel-cache", ".turbo",
     "coverage", "htmlcov", ".nyc_output",
-    # Laravel runtime (storage/framework/views compiled blade və s.)
+    # Laravel runtime (storage/framework/views compiled blade etc.)
     "storage",
     # IDE / agent state
     ".idea", ".vscode",
@@ -51,25 +51,25 @@ EXCLUDED_DIRS = {
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox",
 }
 
-# Fayl-səviyyəli ad uyğunluqları — `name.startswith(pattern)` ilə yoxlanır.
-# Həm MLA internal state-i, həm package manager lock faylları (10K+ sətir, sıfır
-# semantik dəyər) buradadır.
+# File-level name matches — checked with `name.startswith(pattern)`.
+# Both MLA internal state and package manager lock files (10K+ lines, zero
+# semantic value) are here.
 EXCLUDED_FILE_PATTERNS = (
     # MLA internal state
     ".mla_pending", ".mla_session_log", ".file_hashes",
-    # Test prompt / fixture noise — keyword spam BM25-i aldadır,
-    # konseptual sorğularda real koddan üstün gəlir.
+    # Test prompt / fixture noise — keyword spam fools BM25,
+    # outranks real code in conceptual queries.
     "TEST_PROMPT", "test_prompt",
     "PROMPT_", "prompts.",
     "FIXTURE_", "fixture_",
-    # Package manager lock faylları
+    # Package manager lock files
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "Cargo.lock", "go.sum", "composer.lock", "Gemfile.lock",
     "poetry.lock", "uv.lock", "bun.lockb",
-    # Secret / credential fayllar — chromadb-yə düşməməlidir.
-    # Tokengram "local · private" iddia edir, lakin chroma_db-yə əli çatan
-    # hər kəs (backup, paylaşılan disk) secret-ləri görə bilər.
-    # `name.startswith(pattern)` ilə yoxlanır.
+    # Secret / credential files — must not end up in chromadb.
+    # Tokengram claims "local · private", but anyone with access to chroma_db
+    # (backup, shared disk) could see the secrets.
+    # Checked with `name.startswith(pattern)`.
     ".env",                 # .env, .env.local, .env.production, ...
     "secrets.",             # secrets.json, secrets.yaml
     "credentials.",         # credentials.json, credentials.yaml
@@ -79,8 +79,8 @@ EXCLUDED_FILE_PATTERNS = (
     "google-services.json",
 )
 
-# Fayl adının suffix-i bunlardan biri ilə bitirsə skip — minified bundle-lar,
-# generated kod, source map-lar.
+# Skip if the file name ends with one of these suffixes — minified bundles,
+# generated code, source maps.
 EXCLUDED_FILE_SUFFIXES = (
     ".min.js", ".min.css",
     ".bundle.js", ".bundle.css",
@@ -91,24 +91,24 @@ EXCLUDED_FILE_SUFFIXES = (
     ".generated.ts", ".generated.go",
 )
 
-# Tək fayl ölçü tavanı (bayt). 1 MB ~ 30K sətir — normal kod fayllarından çox
-# böyükdür. Bundan iri fayllar (data dump, vendor bundle) indeksdən kənar.
+# Single file size ceiling (bytes). 1 MB ~ 30K lines — much larger than normal
+# code files. Files bigger than this (data dumps, vendor bundles) stay out of the index.
 MAX_FILE_SIZE_BYTES = 1_000_000
 
-# Token estimation helper — bütün hook-larda baseline hesablamaq üçün.
-# `lines × 10` heuristikasını əvəz edir (kobud, JSON/MD-də 2-3x səhvə düşür).
+# Token estimation helper — used to compute a baseline in all hooks.
+# Replaces the `lines × 10` heuristic (crude, off by 2-3x for JSON/MD).
 #
-# `len(text) // CHARS_PER_TOKEN` daha dəqiqdir, çünki:
-#   - Düz mətn/markdown:  ~4 chars/token
-#   - Kod (Python/JS):     ~3-4 chars/token
-#   - Minified JSON:       ~2-3 chars/token (səhv tərəfdə qoyuruq, konservativ)
-# Real tiktoken-dən ~10-15% səhvlik, lakin tiktoken hər hook-da load etmək
-# 100-200ms cold start əlavə edərdi — hook tələbat-əleyhinə olar.
+# `len(text) // CHARS_PER_TOKEN` is more accurate, because:
+#   - Plain text/markdown:  ~4 chars/token
+#   - Code (Python/JS):     ~3-4 chars/token
+#   - Minified JSON:        ~2-3 chars/token (we err on the conservative side)
+# About ~10-15% error vs real tiktoken, but loading tiktoken in every hook
+# would add 100-200ms of cold start — that would defeat the purpose of a hook.
 CHARS_PER_TOKEN = 4
 
 
 def estimate_tokens(text) -> int:
-    """Mətn/bayt → təxmini token sayı. Heç vaxt 0 qaytarmır (≥1)."""
+    """Text/bytes → approximate token count. Never returns 0 (≥1)."""
     if text is None:
         return 1
     if isinstance(text, (bytes, bytearray)):

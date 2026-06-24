@@ -36,7 +36,7 @@ const prodOptions = {
 
 (async () => {
   if (prod) {
-    // Silinməli köhnə sourcemap qalmasın (əvvəlki dev build-dən qala bilər)
+    // Remove any stale sourcemap left over from a previous dev build
     const mapFile = path.join(__dirname, 'dist', 'extension.js.map');
     if (fs.existsSync(mapFile)) fs.unlinkSync(mapFile);
 

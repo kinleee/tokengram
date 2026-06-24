@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Status bar widget-i indi yenilə — history faylının mtime-ını yenilə.
+"""Refresh the status bar widget now — bump the history file's mtime.
 
-Extension `.mla_savings_history.jsonl` faylını FileSystemWatcher ilə izləyir.
-Bu skript mtime-ı yeniləyir, ekstension dərhal refresh çağırır.
+The extension watches `.mla_savings_history.jsonl` with a FileSystemWatcher.
+This script bumps the mtime so the extension refreshes immediately.
 """
 import os
 import sys
@@ -15,7 +15,7 @@ from project_root import find_project_root
 def main():
     history = find_project_root() / ".mla_savings_history.jsonl"
     history.touch(exist_ok=True)
-    # macOS FSEvents identical-mtime touch-ları debounce edir; forced utime.
+    # macOS FSEvents debounces identical-mtime touches; forced utime.
     try:
         now = os.path.getmtime(history) + 0.001
         os.utime(history, (now, now))

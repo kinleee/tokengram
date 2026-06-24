@@ -7,15 +7,15 @@ import * as vscode from 'vscode';
 const TOKENGRAM_DIR = path.join(os.homedir(), '.tokengram');
 const LEGACY_DIR = path.join(os.homedir(), '.mla');
 
-// Oxumalar əvvəl canonical ~/.tokengram-a, sonra legacy ~/.mla-ya baxır (rebrand).
-// Yazmalar həmişə canonical-a gedir ki, mənbə tək olsun.
+// Reads look at canonical ~/.tokengram first, then legacy ~/.mla (rebrand).
+// Writes always go to canonical so there is a single source of truth.
 function readDirFirst(filename: string): string | null {
   for (const d of [TOKENGRAM_DIR, LEGACY_DIR]) {
     try {
       const t = fs.readFileSync(path.join(d, filename), 'utf-8').trim();
       if (t) return t;
     } catch {
-      /* növbəti qovluğa keç */
+      /* move on to the next directory */
     }
   }
   return null;
@@ -27,8 +27,8 @@ const HTTP_TIMEOUT_MS = 10_000;
 
 export type EffectiveState =
   | 'valid'
-  | 'trialing'       // açar trial açarıdır və hələ aktivdir — bar normal işləyir + "N gün" badge
-  | 'trial_expired'  // trial açarı bitib — CTA state (heç nə sınmır, qənaət dayanır)
+  | 'trialing'       // key is a trial key and still active — bar works normally + "N days" badge
+  | 'trial_expired'  // trial key has expired — CTA state (nothing breaks, savings stop)
   | 'invalid'
   | 'no_key'
   | 'stale';
@@ -82,10 +82,10 @@ function writeCachedStatus(r: CheckResult): void {
 }
 
 /**
- * JWT public key-i license server-dən endirib ~/.tokengram/pubkey.pem-ə yazır.
- * license.from_env() bu faylı oxuyaraq imzalanmış token-ləri verify edir —
- * fayl olmasa MCP server hər validation-da xəta atır və təmiz install heç vaxt
- * "valid" ola bilməz. Açar saxlanmazdan əvvəl bir dəfə çağırılır.
+ * Downloads the JWT public key from the license server and writes it to ~/.tokengram/pubkey.pem.
+ * license.from_env() reads this file to verify signed tokens — without the
+ * file the MCP server throws on every validation and a clean install can never
+ * be "valid". Called once before the key is saved.
  */
 export async function fetchPubkey(serverUrl: string): Promise<boolean> {
   const url = `${serverUrl.replace(/\/+$/, '')}/pubkey`;
@@ -296,13 +296,13 @@ export function effectiveStatus(): EffectiveState {
   if (cached.valid) {
     return cached.status === 'trialing' || isTrialKey ? 'trialing' : 'valid';
   }
-  // Bitmiş trial "etibarsız açar" deyil — gözlənilən lifecycle hadisəsidir.
-  // Ayrı state: bar qırmızı INVALID əvəzinə konversiya CTA-sı göstərir.
+  // An expired trial is not an "invalid key" — it is an expected lifecycle event.
+  // Separate state: the bar shows a conversion CTA instead of a red INVALID.
   if (isTrialKey && cached.reason === 'no_active_subscription') return 'trial_expired';
   return 'invalid';
 }
 
-/** Trialın bitməsinə qalan günlər (yuvarlaqlaşdırma yuxarı). Trial deyilsə null. */
+/** Days left until the trial expires (rounded up). null if not a trial. */
 export function trialDaysLeft(): number | null {
   const key = readKey();
   if (!key || !key.startsWith(TRIAL_KEY_PREFIX)) return null;
@@ -318,10 +318,10 @@ export type TrialOutcome =
   | { ok: false; reason: 'network_error' | 'unknown'; detail?: string };
 
 /**
- * Serverdən 30 günlük trial istə və lokal state-i yaz (license_key.txt,
- * server_url.txt, pubkey.pem, last_check.json). Server fingerprint-başına
- * bir trial verir — lokal faylları silmək reset vermir, mövcud trial hələ
- * aktivdirsə eyni açar yenidən qaytarılır (reinstall halı).
+ * Requests a 30-day trial from the server and writes local state (license_key.txt,
+ * server_url.txt, pubkey.pem, last_check.json). The server grants one trial
+ * per fingerprint — deleting local files does not reset it; if an existing trial
+ * is still active the same key is returned again (reinstall case).
  */
 export async function startTrial(serverUrl: string): Promise<TrialOutcome> {
   let fingerprint: string;

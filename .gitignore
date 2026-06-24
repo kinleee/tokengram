@@ -142,3 +142,7 @@ chroma_db.corrupt-*/
 .tokengram.*.lock.tmp.*
 *.quarantine_pending
 # <<< Tokengram (auto-managed) <<<
+# Tokengram auto-created CLAUDE.md (search_code guidance — only meaningful
+# with the Tokengram MCP installed). Kept local. To share it with your team,
+# delete this + the next line and commit CLAUDE.md.
+CLAUDE.md

@@ -1,31 +1,32 @@
 """
 ============================================
-hooks/flush_queue.py — Stop hook (task-sonu drain trigger)
+hooks/flush_queue.py — Stop hook (end-of-task drain trigger)
 ============================================
-DİZAYN (2026-06-19 yenidən-qurma): tək oxuyucu, task-sonu trigger.
+DESIGN (2026-06-19 rebuild): single reader, end-of-task trigger.
 
-Claude task gedişində dəyişən fayllar `queue_change.py` (PostToolUse) tərəfindən
-`.mla_pending.txt`-ə YIĞILIR — modeli yükləmir, ucuzdur. Task BİTƏNDƏ bu Stop
-hook işə düşür və növbəni BİR DƏFƏ drenləyir.
+Files changed during a Claude task are ACCUMULATED into `.mla_pending.txt` by
+`queue_change.py` (PostToolUse) — it doesn't load the model, it's cheap. When the
+task FINISHES, this Stop hook runs and drains the queue ONCE.
 
-İKİ YOL (toqquşma drainer kilidi ilə fiziki olaraq qarşısı alınır):
-  1. İSTİ (norma): `.mla_drain.now` marker-ini buraxırıq. İşləyən MCP server
-     onu görüb növbəni öz isti modeli ilə drenləyir (soyuq-start yox, RAM-da
-     ikinci model yox). Server marker-i siləndə biz onu görüb TEZ qayıdırıq —
-     Claude donmur. İndeksləmə hook qayıtdıqdan SONRA fonda davam edir.
-  2. SOYUQ (fallback): server işləmirsə (marker silinmir), drainer kilidini
-     alıb növbəni ELƏ BURADA soyuq drenləyirik. Bu, köhnə watchdog/self-heal
-     qülləsini əvəz edən YEGANƏ self-heal mexanizmidir.
+TWO PATHS (collision is physically prevented by the drainer lock):
+  1. WARM (the norm): we drop a `.mla_drain.now` marker. A running MCP server
+     sees it and drains the queue with its already-warm model (no cold-start, no
+     second model in RAM). When the server deletes the marker we see that and
+     return QUICKLY — Claude doesn't freeze. Indexing continues in the background
+     AFTER the hook returns.
+  2. COLD (fallback): if the server isn't running (the marker isn't deleted), we
+     acquire the drainer lock and drain the queue cold RIGHT HERE. This is the
+     ONLY self-heal mechanism, replacing the old watchdog/self-heal tower.
 
-Köhnə dizayn: bu hook HƏMİŞƏ soyuq indeksləyirdi (hər task ~3s + ikinci model)
-VƏ eyni anda MCP server davamlı poll-drain edirdi → iki yazıçı yarışı.
+Old design: this hook ALWAYS indexed cold (every task ~3s + a second model)
+AND the MCP server continuously poll-drained at the same time → a two-writer race.
 """
 
 import sys
 import time
 from pathlib import Path
 
-# Import path-larını həm install root, həm hook-un yanına əlavə et.
+# Add the import paths for both the install root and next to the hook.
 _INSTALL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_INSTALL_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -36,12 +37,12 @@ QUEUE_FILE = PROJECT_ROOT / ".mla_pending.txt"
 PROCESSING_FILE = PROJECT_ROOT / ".mla_pending.processing"
 DRAIN_MARKER = PROJECT_ROOT / ".mla_drain.now"
 
-# İsti server-ə marker-i istehlak etməyə nə qədər vaxt veririk. Server indi hər
-# ~0.25s poll edir (əvvəl 1.0s), ona görə marker adətən ~0.25-0.5s-də silinir.
-# Poll-u 0.1s-ə endirdik ki, marker silinən kimi DƏRHAL qayıdaq — Stop hook
-# HƏR redaktə turunun sonunda işləyir, turun tamamlanması bu hook-u gözləyir,
-# ona görə bu busy-wait birbaşa istifadəçinin gördüyü tur-sonu gecikməsidir.
-# 1.5s tavan = server qısa müddət məşğul olsa belə pəncərə (sonra soyuq fallback).
+# How long we give the warm server to consume the marker. The server now polls
+# every ~0.25s (previously 1.0s), so the marker is usually deleted in ~0.25-0.5s.
+# We lowered the poll to 0.1s so we return IMMEDIATELY once the marker is deleted —
+# the Stop hook runs at the end of EVERY edit turn, the turn's completion waits on
+# this hook, so this busy-wait is directly the end-of-turn delay the user sees.
+# 1.5s ceiling = a window in case the server is briefly busy (then cold fallback).
 _GRACE_SEC = 1.5
 _GRACE_POLL = 0.1
 
@@ -57,10 +58,10 @@ def _queue_is_empty() -> bool:
 
 
 def _read_queue_paths() -> list:
-    """Pending + processing-i oxu, dedup et, sıranı qoru."""
+    """Read pending + processing, dedup, preserve order."""
     seen = set()
     paths = []
-    for qf in (PROCESSING_FILE, QUEUE_FILE):  # processing əvvəl (köhnə qalıq)
+    for qf in (PROCESSING_FILE, QUEUE_FILE):  # processing first (old leftover)
         try:
             raw = qf.read_text(encoding="utf-8")
         except OSError:
@@ -83,22 +84,23 @@ def _clear_queue() -> None:
 
 
 def _cold_drain() -> int:
-    """Server işləmir — növbəni ELƏ BURADA soyuq drenlə (drainer kilidi altında)."""
+    """The server isn't running — drain the queue cold RIGHT HERE (under the drainer lock)."""
     paths = _read_queue_paths()
     if not paths:
         _clear_queue()
         DRAIN_MARKER.unlink(missing_ok=True)
         return 0
 
-    # Ağır importlar — yalnız soyuq fallback lazım olanda.
-    # Installed (wheel) layout bu modulları YALNIZ `tokengram` paketi altında
-    # quraşdırır — top-level `config`/`vector_store` tapılmır. `import tokengram`
-    # paket qovluğunu sys.path-a qoyur (tokengram/__init__._ensure_pkg_dir...),
-    # ondan sonra top-level adlar işləyir. Dev (top-level mənbə) layout-unda
-    # `import tokengram` zərərsiz fail olur, adlar repo kökündən gəlir.
+    # Heavy imports — only when the cold fallback is needed.
+    # The installed (wheel) layout installs these modules ONLY under the
+    # `tokengram` package — top-level `config`/`vector_store` aren't found.
+    # `import tokengram` puts the package directory on sys.path
+    # (tokengram/__init__._ensure_pkg_dir...), after which the top-level names
+    # work. In the dev (top-level source) layout, `import tokengram` fails
+    # harmlessly and the names come from the repo root.
     try:
         try:
-            import tokengram  # noqa: F401  (yan təsir: pkg dir-i sys.path-a salır)
+            import tokengram  # noqa: F401  (side effect: puts the pkg dir on sys.path)
         except ImportError:
             pass
         from vector_store import ChromaVectorStore
@@ -106,16 +108,17 @@ def _cold_drain() -> int:
         import config
         import db_guard
     except ImportError as e:
-        sys.stderr.write(f"[tokengram flush] import xətası: {e}\n")
+        sys.stderr.write(f"[tokengram flush] import error: {e}\n")
         return 0
 
-    # Drainer kilidi: işləyən server və ya manual reindex eyni anda chroma-ya
-    # yazmasın. Sahib ölü/stale-dirsə db_guard avtomatik götürür (self-heal).
+    # Drainer lock: prevent a running server or a manual reindex from writing to
+    # chroma at the same time. If the owner is dead/stale, db_guard takes it over
+    # automatically (self-heal).
     dlock = db_guard.acquire_drainer_lock(config.CHROMA_DB_PATH, wait_sec=3.0)
     if dlock is None:
-        # Canlı bir yazıçı (server/reindex) kilidi tutur — o, işi görəcək.
-        # Növbəyə TOXUNMURUQ (itki olmasın); marker-i də saxlayırıq ki, server
-        # hələ görməyibsə növbəti poll-da götürsün.
+        # A live writer (server/reindex) holds the lock — it will do the work.
+        # We DON'T TOUCH the queue (so nothing is lost); we also keep the marker
+        # so the server picks it up on the next poll if it hasn't seen it yet.
         return 0
 
     indexed = deleted = skipped = errors = 0
@@ -151,9 +154,9 @@ def _cold_drain() -> int:
                 sys.stderr.write(f"[tokengram flush] {p.name}: {e}\n")
                 errors += 1
             if i % 5 == 0:
-                dlock.touch()  # uzun drain-də kilid stale sayılmasın
+                dlock.touch()  # so the lock isn't considered stale during a long drain
     except Exception as e:
-        sys.stderr.write(f"[tokengram flush] ChromaDB xətası: {e}\n")
+        sys.stderr.write(f"[tokengram flush] ChromaDB error: {e}\n")
         return 0
     finally:
         dlock.release()
@@ -161,40 +164,40 @@ def _cold_drain() -> int:
     _clear_queue()
     DRAIN_MARKER.unlink(missing_ok=True)
     sys.stderr.write(
-        f"[tokengram] re-index (soyuq): {indexed} yenilik, {deleted} silinmə, "
-        f"{skipped} keçildi, {errors} xəta\n"
+        f"[tokengram] re-index (cold): {indexed} updated, {deleted} deleted, "
+        f"{skipped} skipped, {errors} errors\n"
     )
     return 0
 
 
 def main() -> int:
-    # Stdin oxuyub atırıq — Stop hook-da maraqlı bir şey yoxdur.
+    # We read and discard stdin — there's nothing interesting in the Stop hook.
     try:
         sys.stdin.read()
     except Exception:
         pass
 
-    # Görüləsi iş yoxdursa dərhal çıx (marker da buraxma).
+    # If there's no work to do, exit immediately (don't even drop the marker).
     if _queue_is_empty():
         return 0
 
-    # İSTİ YOL: marker burax, işləyən server-ə bir neçə poll-luq fürsət ver.
+    # WARM PATH: drop the marker, give the running server a few polls' chance.
     try:
         DRAIN_MARKER.write_text("", encoding="utf-8")
     except OSError:
-        # Marker yazıla bilmir — birbaşa soyuq drenlə.
+        # The marker can't be written — drain cold directly.
         return _cold_drain()
 
     deadline = time.time() + _GRACE_SEC
     while time.time() < deadline:
         time.sleep(_GRACE_POLL)
         if not DRAIN_MARKER.exists():
-            # Server marker-i istehlak etdi → o, isti modeli ilə drenləyir.
-            # Tez qayıdırıq; indeksləmə fonda davam edir (Claude donmur).
+            # The server consumed the marker → it's draining with its warm model.
+            # We return quickly; indexing continues in the background (Claude doesn't freeze).
             return 0
 
-    # Marker hələ də qalır → marker-i istehlak edən işləyən server yoxdur.
-    # SOYUQ fallback: özümüz drenləyirik (server ölübsə yeganə self-heal yolu).
+    # The marker still remains → there's no running server consuming the marker.
+    # COLD fallback: we drain ourselves (the only self-heal path if the server died).
     return _cold_drain()
 
 

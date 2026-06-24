@@ -26,12 +26,13 @@ _INSTALL_ROOT = Path(__file__).resolve().parent.parent
 # 5 minutes — long enough to shave per-hook cost, short enough that an
 # admin-side subscription cancel propagates quickly.
 _CACHE_TTL_SEC = 300
-# Hard ceiling: keş bundan köhnə olana qədər köhnə dəyəri qaytarırıq (stale-
-# while-revalidate). Soft TTL (300s) ilə hard TTL (900s) arasında tool call
-# inline import + şəbəkə bloku ETMİR — sadəcə keşdən qaytarır. Tam yenidən-
-# yoxlama yalnız hard TTL keçəndə (license.py onsuz da serverlə saatda bir
-# yoxlayır), beləcə per-5dəq ~150-300ms import taksı per-15dəq-ə düşür və
-# bir tool call heç vaxt 10s şəbəkə timeout-unda donmur.
+# Hard ceiling: until the cache is older than this we return the old value
+# (stale-while-revalidate). Between the soft TTL (300s) and the hard TTL (900s)
+# a tool call does NOT do an inline import + network block — it just returns
+# from the cache. A full re-validation happens only once the hard TTL passes
+# (license.py checks with the server hourly anyway), so the per-5min ~150-300ms
+# import tax drops to per-15min and a single tool call never freezes on a 10s
+# network timeout.
 _CACHE_HARD_TTL = 900
 _CACHE_PATH = Path.home() / ".tokengram" / ".license_gate_cache"
 
@@ -102,14 +103,15 @@ def _import_license_module():
 
 
 def _key_present() -> bool:
-    """Açar faylının mövcudluğu — ucuz, şəbəkəsiz yoxlama.
+    """Whether the key file exists — a cheap, network-free check.
 
-    0.1.26-dan license.ensure_license_cached() açarsız halda serverə trial
-    sorğusu göndərir (10-20s ola bilər). Hook yolunda buna yer yoxdur:
-    açar yoxdursa enforcement onsuz da OFF-dur, ona görə şəbəkəyə çıxmadan
-    dərhal False qaytarırıq. Trial-ı MCP server (ilk tool çağırışında) və ya
-    extension başladır; açar faylı yaranan kimi hooks növbəti çağırışda
-    (cache yazmırıq) normal yoxlama yoluna qayıdır.
+    Since 0.1.26 license.ensure_license_cached() sends a trial request to the
+    server when there's no key (which can take 10-20s). There's no room for that
+    on the hook path: if there's no key, enforcement is OFF anyway, so we return
+    False immediately without going to the network. The trial is started by the
+    MCP server (on the first tool call) or by the extension; as soon as the key
+    file appears, on the next call the hooks (we don't write the cache) return to
+    the normal validation path.
     """
     if os.environ.get("MLA_LICENSE_KEY"):
         return True
@@ -136,11 +138,11 @@ def license_valid() -> bool:
     if cache is not None:
         ts, valid = cache
         age = now - ts
-        # Soft TTL içində: dərhal keşdən qaytar (O(1) fayl oxuma).
+        # Within the soft TTL: return from the cache immediately (O(1) file read).
         if age < _CACHE_TTL_SEC:
             return valid
-        # Stale-but-present: hard ceiling-ə qədər köhnə dəyəri qaytar — tool
-        # call-da inline import / 10s şəbəkə bloku YOX (stale-while-revalidate).
+        # Stale-but-present: return the old value up to the hard ceiling — NO
+        # inline import / 10s network block on the tool call (stale-while-revalidate).
         if age < _CACHE_HARD_TTL:
             return valid
 
@@ -151,14 +153,15 @@ def license_valid() -> bool:
     try:
         guard = lic.ensure_license_cached()
     except Exception:
-        # KRİTİK: burada köhnə True-nu SAXLAMA. ensure_license şəbəkə down olsa
-        # belə etibarlı offline JWT keşi varsa guard QAYTARIR (exception atmır) —
-        # yəni bu exception yolu yalnız lisenziya HƏQİQƏTƏN təsdiqlənə bilməyəndə
-        # işə düşür: ya server AÇIQ İMTİNA edib (revocation/cancel →
-        # LicenseServerError), ya da offline grace yoxdur + şəbəkə əlçatmazdır.
-        # Hər iki halda doğru davranış False-dur (fail-open: enforcement söndür +
-        # ləğv ötürülür). Əvvəlki SWR-backoff köhnə True-nu saxlayıb ts təzələyirdi
-        # → ləğv olunmuş istifadəçi əbədi enforcement-active qalırdı (regresiya).
+        # CRITICAL: do NOT keep the old True here. Even when the network is down,
+        # ensure_license RETURNS a guard (no exception) if there is a valid offline
+        # JWT cache — so this exception path only fires when the license genuinely
+        # cannot be verified: either the server EXPLICITLY DENIED it (revocation/cancel
+        # -> LicenseServerError), or there is no offline grace + the network is
+        # unreachable. In both cases the correct behavior is False (fail-open:
+        # disable enforcement + let the revocation through). The previous SWR-backoff
+        # kept the old True and refreshed ts -> a revoked user stayed
+        # enforcement-active forever (regression).
         _write_cache(False)
         return False
     # guard is None means dev_mode (no key file). Treat as unlicensed.
@@ -168,10 +171,10 @@ def license_valid() -> bool:
 
 
 def project_root_from_env() -> Path:
-    # Bütün digər hook-lar (və status bar) `project_root.find_project_root()`
-    # walk-up işlədir. Eyni mənbə olsun deyə biz də ona delegate edirik —
-    # əks halda monorepo subfolder-də enforcement flag fərqli qovluqdan oxunub
-    # səssiz söndürülə bilərdi. Import alınmasa təhlükəsiz cwd fallback.
+    # All other hooks (and the status bar) use `project_root.find_project_root()`
+    # walk-up. To keep a single source of truth we delegate to it as well —
+    # otherwise in a monorepo subfolder the enforcement flag could be read from a
+    # different directory and silently disabled. Safe cwd fallback if import fails.
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from project_root import find_project_root

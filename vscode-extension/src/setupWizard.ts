@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 
 const TOKENGRAM_HOME = path.join(os.homedir(), '.tokengram');
 const VENV_DIR = path.join(TOKENGRAM_HOME, 'venv');
-// Wheel cp312-only; cp313 hələ yoxdur, ona görə EXACT 3.12 tələbi.
+// Wheel is cp312-only; cp313 doesn't exist yet, hence the EXACT 3.12 requirement.
 const REQUIRED_PYTHON = [3, 12] as const;
 
 // Canonical license-server URL. Pinned into ~/.tokengram/server_url.txt on every
@@ -36,11 +36,11 @@ interface PythonInfo {
   version: [number, number, number];
 }
 
-// Standart pattern: "əl ilə reload et" demək əvəzinə bir-klik "Reload Now"
-// düyməsi göstər. `workbench.action.reloadWindow` pəncərəni yenidən yükləyir —
-// bu, HƏM extension host-u, HƏM Claude Code MCP serverini təzələyir, yəni
-// istifadəçi VS Code-u "tam bağlayıb açmaq" məcburiyyətində deyil. (Real user
-// üçün manual reload tapşırığı qəbuledilməzdir — yaxşı extension-lar düymə verir.)
+// Standard pattern: instead of telling the user to "reload manually", show a
+// one-click "Reload Now" button. `workbench.action.reloadWindow` reloads the
+// window — this refreshes BOTH the extension host AND the Claude Code MCP
+// server, so the user is not forced to "fully close and reopen" VS Code. (For a
+// real user a manual reload task is unacceptable — good extensions give a button.)
 export async function promptReload(message: string): Promise<void> {
   const reloadBtn = 'Reload Now';
   const choice = await vscode.window.showInformationMessage(message, reloadBtn);
@@ -55,6 +55,96 @@ export async function promptReload(message: string): Promise<void> {
 let installInFlight = false;
 export function isInstalling(): boolean {
   return installInFlight;
+}
+
+// --- Cross-window install lock -------------------------------------------------
+// Every VS Code window shares ONE ~/.tokengram/venv. If two windows upgrade the
+// wheel at once — or one upgrades while another's MCP server is live — pip can't
+// overwrite the loaded .pyd files and dies with "os error 32 (file in use)".
+// This lock makes a single window own the install; the marker it drops is the
+// same file run_mcp_server.py's _wait_for_install_unlock() watches so respawned
+// servers hold off on loading the .pyd until the upgrade finishes.
+const INSTALL_LOCK = path.join(TOKENGRAM_HOME, 'install.lock');
+// An install can't legitimately run longer than this; an older marker is from a
+// crashed window and may be stolen. Kept in sync with the Python barrier's
+// stale_after (600s) so neither side hangs forever on a dead installer.
+const INSTALL_LOCK_STALE_MS = 10 * 60_000;
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e: unknown) {
+    // ESRCH → no such process. EPERM → exists but not ours (treat as alive).
+    return (e as NodeJS.ErrnoException)?.code === 'EPERM';
+  }
+}
+
+// Claim the install lock. Returns true if THIS window may install (caller MUST
+// releaseInstallLock in finally). Returns false when another LIVE window already
+// holds it — caller should skip. Fails OPEN (returns true) if the lock dir can't
+// be used, so a filesystem quirk never blocks a genuine first install.
+function acquireInstallLock(): boolean {
+  try {
+    fs.mkdirSync(TOKENGRAM_HOME, { recursive: true });
+  } catch {
+    /* ignore — openSync below will surface a real problem */
+  }
+  const payload = JSON.stringify({ pid: process.pid, ts: Date.now() });
+  try {
+    // Atomic exclusive create — wins the race against a sibling window.
+    const fd = fs.openSync(INSTALL_LOCK, 'wx');
+    fs.writeSync(fd, payload);
+    fs.closeSync(fd);
+    return true;
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException)?.code !== 'EEXIST') {
+      return true; // can't create lock at all → fail open
+    }
+  }
+  // Lock exists — steal it only if stale or its owner process is gone.
+  try {
+    const st = fs.statSync(INSTALL_LOCK);
+    let ownerDead = false;
+    try {
+      const j = JSON.parse(fs.readFileSync(INSTALL_LOCK, 'utf-8')) as { pid?: number };
+      if (typeof j.pid === 'number') ownerDead = !isPidAlive(j.pid);
+    } catch {
+      /* unreadable → fall back to age */
+    }
+    if (Date.now() - st.mtimeMs > INSTALL_LOCK_STALE_MS || ownerDead) {
+      fs.writeFileSync(INSTALL_LOCK, payload);
+      return true;
+    }
+  } catch {
+    // stat/read raced with the holder releasing — try one clean exclusive create.
+    try {
+      const fd = fs.openSync(INSTALL_LOCK, 'wx');
+      fs.writeSync(fd, payload);
+      fs.closeSync(fd);
+      return true;
+    } catch {
+      /* still held */
+    }
+  }
+  return false; // another live window owns it
+}
+
+function refreshInstallLock(): void {
+  try {
+    const now = new Date();
+    fs.utimesSync(INSTALL_LOCK, now, now);
+  } catch {
+    /* ignore — best effort heartbeat */
+  }
+}
+
+function releaseInstallLock(): void {
+  try {
+    fs.rmSync(INSTALL_LOCK, { force: true });
+  } catch {
+    /* ignore */
+  }
 }
 
 // Silent auto-install on activation. No webview. License key is collected
@@ -83,10 +173,10 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
           /* non-fatal — user can re-run setup from the status-bar menu */
         }
       } else {
-        // Hook-lar artıq quraşdırılıb — bu layihə onsuz da Tokengram istifadə
-        // edir. search_code yönləndirməsini CLAUDE.md-də də təmin et (idempotent,
-        // yalnız idarə olunan bloku yazır/yeniləyir). Reload lazım deyil: CLAUDE.md
-        // hər sessiyada təzə oxunur. Heç vaxt bloklamır (best-effort).
+        // Hooks are already installed — this project is already using Tokengram.
+        // Also ensure the search_code guidance in CLAUDE.md (idempotent, only
+        // writes/updates the managed block). No reload needed: CLAUDE.md is read
+        // fresh every session. Never blocks (best-effort).
         try {
           const folders = vscode.workspace.workspaceFolders;
           if (folders && folders.length > 0) {
@@ -101,9 +191,24 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
     // fall through — installer with --upgrade swaps the wheel in-place
   }
 
-  // uv özü Python 3.12-ni provision edir — artıq sistemdə 3.12 axtarmırıq.
-  // "Python 3.12 yoxdur" problemi bununla aradan qalxır (testerlərdə əsas fail).
+  // uv provisions Python 3.12 itself — we no longer look for 3.12 on the system.
+  // This eliminates the "no Python 3.12" problem (the main failure on testers).
   const isUpgrade = venvHasTokengram();
+
+  // Cross-window guard: only ONE window may run pip against the shared venv at a
+  // time. A sibling already upgrading would race us into the "os error 32"
+  // file-lock failure. If another live window holds the lock, skip silently —
+  // it will finish the upgrade for the whole machine; this window just reloads.
+  if (!acquireInstallLock()) {
+    void vscode.window.showInformationMessage(
+      'Tokengram is updating in another window — it will be ready shortly. Reload this window once it finishes.',
+    );
+    return;
+  }
+  // Heartbeat: keep the marker fresh so neither a sibling window nor the Python
+  // spawn-barrier mistakes a long (first-time ~300 MB) install for a dead one.
+  const lockHeartbeat = setInterval(refreshInstallLock, 20_000);
+
   installInFlight = true;
   try {
     await vscode.window.withProgress(
@@ -125,8 +230,8 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
           tracker.jumpTo(7, 'MCP server stopped — starting upgrade...');
         }
 
-        // uv-ni təmin et (yoxdursa bir dəfə endir + cache). uv sonra Python
-        // 3.12-ni provision edəcək — user-də heç bir Python olmasa belə.
+        // Ensure uv (download once + cache if missing). uv will then provision
+        // Python 3.12 — even if the user has no Python at all.
         tracker.jumpTo(isUpgrade ? 8 : 1, 'Preparing runtime (uv)...');
         const uvPath = await ensureUv((m) => progress.report({ message: m }));
         tracker.jumpTo(isUpgrade ? 10 : 3, 'Launching installer...');
@@ -253,6 +358,10 @@ export async function ensureAutoInstall(context: vscode.ExtensionContext): Promi
     );
   } finally {
     installInFlight = false;
+    clearInterval(lockHeartbeat);
+    // Release the marker so respawned MCP servers (now safe to load the freshly
+    // written .pyd) stop waiting and other windows can install future upgrades.
+    releaseInstallLock();
   }
 }
 
@@ -349,10 +458,11 @@ export function registerSetupCommand(context: vscode.ExtensionContext): vscode.D
 function venvHasTokengram(): boolean {
   const binDir = process.platform === 'win32' ? 'Scripts' : 'bin';
   const exe = process.platform === 'win32' ? 'tokengram.exe' : 'tokengram';
-  // python.exe-ni DƏ tələb et: antivirus venv-in interpreter-ini karantinə alıb
-  // tokengram.exe-ni saxlaya bilər → köhnə yoxlama "sağlamdır" deyib install-i
-  // upgrade rejiminə salır, upgrade isə qalıq qovluğa qarşı sınır (2026-06-19).
-  // İnterpreter yoxdursa venv ölüdür → təmiz qurulum lazımdır.
+  // ALSO require python.exe: antivirus can quarantine the venv's interpreter
+  // while leaving tokengram.exe behind → the old check would say "healthy" and
+  // put the install into upgrade mode, and the upgrade then fails against the
+  // leftover directory (2026-06-19). If the interpreter is missing the venv is
+  // dead → a clean install is required.
   const py = process.platform === 'win32' ? 'python.exe' : 'python';
   return (
     fs.existsSync(path.join(VENV_DIR, binDir, exe)) &&
@@ -360,21 +470,23 @@ function venvHasTokengram(): boolean {
   );
 }
 
-// `python -m tokengram` (həm MCP server, həm reindex CLI buradan keçir) paketdə
-// `__main__.py` TƏLƏB edir. Bəzi köhnə wheel-lər onsuz ship olunmuşdu → "No
-// module named tokengram.__main__" və həm server, həm reindex sınırdı. Versiya
-// müqayisəsi "güncəldir" desə belə, bu sınıq vəziyyəti aşkar edib təmir edirik.
+// `python -m tokengram` (both the MCP server and the reindex CLI go through it)
+// REQUIRES `__main__.py` in the package. Some older wheels shipped without it →
+// "No module named tokengram.__main__" and both server and reindex failed. Even
+// if the version comparison says "up to date", we detect and repair this broken
+// state.
 function installedTokengramBroken(): boolean {
   const pkgDir = path.join(VENV_DIR, 'Lib', 'site-packages', 'tokengram');
-  if (!fs.existsSync(pkgDir)) return false; // paket yoxdursa "sınıq" demə
+  if (!fs.existsSync(pkgDir)) return false; // if the package is missing, don't call it "broken"
   return !fs.existsSync(path.join(pkgDir, '__main__.py'));
 }
 
-// ƏVVƏL `execFileSync` idi — hər activation-da venv python-u SİNXRON spawn edib
-// bitməsini gözləyirdi (~240 ms isti, soyuq başlanğıcda 1-2 san+). VS Code-da
-// bütün extension-lar tək event loop-da olduğu üçün bu, Claude Code-un startup
-// işini (model siyahısı / storage) dondururdu. İndi asinxron `execFile` —
-// python arxa planda işləyir, event loop azad qalır, `activate()` gözləmir.
+// PREVIOUSLY this was `execFileSync` — every activation SYNCHRONOUSLY spawned
+// the venv python and waited for it to finish (~240 ms warm, 1-2 s+ on a cold
+// start). Because all extensions in VS Code share a single event loop, this
+// froze Claude Code's startup work (model list / storage). NOW it's an async
+// `execFile` — python runs in the background, the event loop stays free, and
+// `activate()` doesn't wait.
 function installedWheelVersion(): Promise<string | null> {
   return new Promise((resolve) => {
     const py = process.platform === 'win32'
@@ -453,9 +565,9 @@ async function detectPython(context: vscode.ExtensionContext): Promise<PythonInf
   const override = vscode.workspace.getConfiguration('tokengram').get<string>('pythonPath');
   const candidates: string[] = [];
   if (override) candidates.push(override);
-  // Yalnız 3.12 axtarırıq. `py -3.13` və ya plain `python` (3.13 ola bilər)
-  // namizədləri çıxardıq — wheel cp312-only-dir, 3.13 venv-də install fail edir
-  // (`Package 'tokengram' requires a different Python: 3.13.x not in '<3.13,>=3.12'`).
+  // We only look for 3.12. We dropped the `py -3.13` and plain `python` (could
+  // be 3.13) candidates — the wheel is cp312-only, and install fails in a 3.13
+  // venv (`Package 'tokengram' requires a different Python: 3.13.x not in '<3.13,>=3.12'`).
   if (process.platform === 'win32') {
     candidates.push('py -3.12');
   } else {
@@ -499,17 +611,27 @@ function satisfies(actual: [number, number, number], min: readonly [number, numb
   return actual[1] >= min[1];
 }
 
-const UV_EXE = path.join(TOKENGRAM_HOME, 'uv.exe');
-const UV_URL =
-  'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip';
+const UV_BINARY = process.platform === 'win32' ? 'uv.exe' : 'uv';
+const UV_EXE = path.join(TOKENGRAM_HOME, UV_BINARY);
 
-// uv-ni təmin et: ~/.tokengram/uv.exe varsa onu qaytar, yoxdursa bir dəfə endir
-// (retry-lı) + Expand-Archive ilə çıxar + cache et. uv tək binary-dir (Python
-// tələb etmir) və sonra Python 3.12-ni özü provision edir.
+// astral-sh/uv ships one self-contained binary per platform (it needs no Python
+// and then provisions Python 3.12 itself). We reference only the platforms the
+// extension supports — Windows + Linux x64; macOS is gated off in activate().
+// Windows ships a .zip (uv.exe at the root); Linux ships a .tar.gz that expands
+// to a release folder containing the `uv` binary.
+const UV_URL =
+  process.platform === 'win32'
+    ? 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip'
+    : 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz';
+
+// Ensure uv: if ~/.tokengram/uv(.exe) exists return it, otherwise download once
+// (with retries) + extract + cache it. uv is a single binary (requires no
+// Python) and then provisions Python 3.12 itself.
 async function ensureUv(onMsg: (m: string) => void): Promise<string> {
   if (fs.existsSync(UV_EXE)) return UV_EXE;
   fs.mkdirSync(TOKENGRAM_HOME, { recursive: true });
-  const zipPath = path.join(TOKENGRAM_HOME, 'uv-download.zip');
+  const isWin = process.platform === 'win32';
+  const archivePath = path.join(TOKENGRAM_HOME, isWin ? 'uv-download.zip' : 'uv-download.tar.gz');
   onMsg('Downloading uv (one-time, ~24 MB)...');
 
   let lastErr: unknown = null;
@@ -542,10 +664,10 @@ async function ensureUv(onMsg: (m: string) => void): Promise<string> {
             );
           }
         }
-        fs.writeFileSync(zipPath, Buffer.concat(chunks));
+        fs.writeFileSync(archivePath, Buffer.concat(chunks));
       } else {
         // No streamable body (shouldn't happen on Node fetch) — fall back.
-        fs.writeFileSync(zipPath, Buffer.from(await res.arrayBuffer()));
+        fs.writeFileSync(archivePath, Buffer.from(await res.arrayBuffer()));
       }
       lastErr = null;
       break;
@@ -563,33 +685,64 @@ async function ensureUv(onMsg: (m: string) => void): Promise<string> {
   }
 
   onMsg('Extracting uv...');
-  await new Promise<void>((resolve, reject) => {
-    const ps = cp.spawn(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${TOKENGRAM_HOME}' -Force`,
-      ],
-      { shell: false },
-    );
-    let err = '';
-    ps.stderr.on('data', (d) => (err += d.toString()));
-    ps.on('error', reject);
-    ps.on('close', (code) =>
-      code === 0
-        ? resolve()
-        : reject(new Error(`Expand-Archive failed (${code}): ${err.trim()}`)),
-    );
-  });
+  if (isWin) {
+    // Windows: the .zip holds uv.exe at its root → lands at ~/.tokengram/uv.exe.
+    await new Promise<void>((resolve, reject) => {
+      const ps = cp.spawn(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `Expand-Archive -LiteralPath '${archivePath}' -DestinationPath '${TOKENGRAM_HOME}' -Force`,
+        ],
+        { shell: false },
+      );
+      let err = '';
+      ps.stderr.on('data', (d) => (err += d.toString()));
+      ps.on('error', reject);
+      ps.on('close', (code) =>
+        code === 0
+          ? resolve()
+          : reject(new Error(`Expand-Archive failed (${code}): ${err.trim()}`)),
+      );
+    });
+  } else {
+    // Linux: the .tar.gz expands to a release folder
+    // (uv-x86_64-unknown-linux-gnu/) containing the uv binary. Extract with tar,
+    // move uv up to ~/.tokengram/uv, then ensure it is executable.
+    await new Promise<void>((resolve, reject) => {
+      const tar = cp.spawn('tar', ['-xzf', archivePath, '-C', TOKENGRAM_HOME], { shell: false });
+      let err = '';
+      tar.stderr.on('data', (d) => (err += d.toString()));
+      tar.on('error', reject);
+      tar.on('close', (code) =>
+        code === 0
+          ? resolve()
+          : reject(new Error(`tar extraction failed (${code}): ${err.trim()}`)),
+      );
+    });
+    const extractedDir = path.join(TOKENGRAM_HOME, 'uv-x86_64-unknown-linux-gnu');
+    const extractedUv = path.join(extractedDir, 'uv');
+    if (fs.existsSync(extractedUv)) {
+      // Same filesystem (both under ~/.tokengram) → rename is atomic and keeps
+      // the +x bit from the archive.
+      fs.renameSync(extractedUv, UV_EXE);
+      fs.rmSync(extractedDir, { recursive: true, force: true });
+    }
+    try {
+      fs.chmodSync(UV_EXE, 0o755);
+    } catch {
+      /* best-effort — rename usually preserves the executable bit anyway */
+    }
+  }
   try {
-    fs.unlinkSync(zipPath);
+    fs.unlinkSync(archivePath);
   } catch {
     /* ignore cleanup failure */
   }
   if (!fs.existsSync(UV_EXE)) {
-    throw new Error('uv.exe not found after extracting the uv archive.');
+    throw new Error(`uv binary not found after extracting the uv archive (${UV_EXE}).`);
   }
   return UV_EXE;
 }
@@ -608,8 +761,8 @@ async function runInstaller(
     // a fresh install never depends on PyPI availability or version sync.
     // Falls back to PyPI only when no bundled wheel is present.
     const resourcesDir = path.join(context.extensionPath, 'resources');
-    // readdirSync sırası FS-asılıdır; alphabetic "0.1.10" < "0.1.9" (ASCII).
-    // Bütün wheel-ləri tap, semver ilə descending sort, ən yenisini seç.
+    // readdirSync order is FS-dependent; alphabetically "0.1.10" < "0.1.9" (ASCII).
+    // Find all wheels, sort descending by semver, pick the newest.
     const wheels = fs.existsSync(resourcesDir)
       ? fs.readdirSync(resourcesDir).filter((f) => f.startsWith('tokengram-') && f.endsWith('.whl'))
       : [];
@@ -618,9 +771,9 @@ async function runInstaller(
       return m?.[1] ?? '0.0.0';
     };
     wheels.sort((a, b) => compareSemver(wheelVersion(b), wheelVersion(a)));
-    // `uv run --python 3.12` installer.py-ni uv-nin provision etdiyi 3.12 ilə
-    // işə salır (sistemdə 3.12 yoxdursa avtomatik endirir). --no-project/--no-config
-    // cwd-dəki yad pyproject.toml/uv.toml-un götürülməsinin qarşısını alır.
+    // `uv run --python 3.12` runs installer.py with the 3.12 that uv provisions
+    // (auto-downloads it if there's no 3.12 on the system). --no-project/--no-config
+    // prevents picking up a foreign pyproject.toml/uv.toml in the cwd.
     const args = [
       'run',
       '--python',
@@ -639,8 +792,9 @@ async function runInstaller(
     const child = cp.spawn(uvPath, args, {
       shell: false,
       cwd: TOKENGRAM_HOME,
-      // installer.py Azərbaycan hərfli log yazır; pipe-da default cp1252
-      // UnicodeEncodeError verir. UTF-8 məcbur et (installer özü də reconfigure edir).
+      // installer.py writes logs with Azerbaijani characters; on a pipe the
+      // default cp1252 throws UnicodeEncodeError. Force UTF-8 (the installer also
+      // reconfigures itself).
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
     });
     const buffer = { stdout: '', stderr: '' };
@@ -688,11 +842,11 @@ async function runInstaller(
   });
 }
 
-// Bütün KANONİK hook skriptləri settings.json-da olmalıdır. Yalnız
-// `pre_read_check.py`-ə baxmaq KİFAYƏT DEYİL: köhnə/azaldılmış dəstlə (yalnız
-// Read + Stop) qurulmuş layihə "wired" sayılıb heç vaxt Grep/Bash hook-larına
-// yüksəlmirdi → qənaət sayğacı 0 qalırdı (2026-06-19). Hər hansı biri əskikdirsə
-// writeWorkspaceHooks tam dəsti yenidən yazır (activation-da öz-özünə təmir).
+// ALL the CANONICAL hook scripts must be present in settings.json. Checking
+// only `pre_read_check.py` is NOT ENOUGH: a project set up with an old/reduced
+// set (Read + Stop only) was treated as "wired" and never upgraded to the
+// Grep/Bash hooks → the savings counter stayed at 0 (2026-06-19). If any of them
+// is missing, writeWorkspaceHooks rewrites the full set (self-repair on activation).
 const REQUIRED_HOOK_SCRIPTS = [
   'pre_read_check.py',
   'queue_change.py',
@@ -732,11 +886,12 @@ export function writeWorkspaceHooks(): boolean {
   const hookCmd = (script: string): string =>
     `"${venvPython}" "${path.join(hooksDir, script)}"`;
 
-  // VAHİD hook dəsti — menu.ts `ensureProjectHookSettings` ilə BAYT-BAYT eyni
-  // olmalıdır. İki setup yolu (activation vs Re-index) fərqli yazanda layihələr
-  // fərqli qənaət göstərirdi: 0.1.49-da burada Grep/Bash çıxarılmışdı, amma
-  // Re-index onları yazmağa davam edirdi → "bir layihə 16k, digəri 0" (2026-06-19
-  // user). Grep qənaətin əsas mənbəyidir (~73%) — bütün layihələrdə sayılmalıdır.
+  // UNIFIED hook set — must be BYTE-FOR-BYTE identical to menu.ts's
+  // `ensureProjectHookSettings`. When the two setup paths (activation vs Re-index)
+  // wrote different sets, projects showed different savings: in 0.1.49 Grep/Bash
+  // were removed here, but Re-index kept writing them → "one project 16k, another
+  // 0" (2026-06-19 user). Grep is the main source of savings (~73%) — it must be
+  // counted in all projects.
   const hookConfig = {
     hooks: {
       PreToolUse: [
@@ -792,8 +947,8 @@ export function writeWorkspaceHooks(): boolean {
     env: {
       PYTHONUNBUFFERED: '1',
       PYTHONIOENCODING: 'utf-8',
-      // sentence-transformers/HF online check işçi thread-i hang edir (queue_stuck).
-      // Offline məcburi olmasa indexing dayanır — bu üç var mütləqdir.
+      // sentence-transformers/HF online check hangs the worker thread (queue_stuck).
+      // Unless offline is forced, indexing stalls — these three vars are mandatory.
       HF_HUB_OFFLINE: '1',
       TRANSFORMERS_OFFLINE: '1',
       ANONYMIZED_TELEMETRY: 'False',
@@ -816,21 +971,24 @@ export function writeWorkspaceHooks(): boolean {
   mcpConfig.mcpServers['tokengram'] = tokengramEntry;
   fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2), 'utf-8');
 
-  // Tokengram bu layihədə chroma_db/, kilidlər, növbə, qənaət tarixçəsi və s.
-  // per-machine runtime faylları yaradır — onlar user-in commit-lərinə düşməməlidir.
+  // In this project Tokengram creates per-machine runtime files — chroma_db/,
+  // locks, the queue, savings history, etc. — that must not end up in the user's
+  // commits.
   ensureGitignore(root);
-  // Agentə "əvvəlcə search_code işlət" deyən idarə olunan CLAUDE.md bloku yaz.
-  // Hook-lar yalnız UÇOT + bloklamayan nudge edir; əsl alət-seçimi yönləndirməsi
-  // sistem-prompt səviyyəsində (CLAUDE.md) gəlir. Bloklamır, redaktəni sındırmır.
+  // Write the managed CLAUDE.md block that tells the agent to "use search_code
+  // first". Hooks only do ACCOUNTING + non-blocking nudges; the real tool-choice
+  // steering comes at the system-prompt level (CLAUDE.md). It doesn't block and
+  // doesn't break edits.
   ensureClaudeMdGuidance(root);
   return true;
 }
 
-// Layihənin .gitignore-una Tokengram bloku əlavə et ki, per-machine artefaktlar
-// (chroma_db/, .tokengram.*.lock, .mla_*, .bm25_index.pkl, ...) git-ə getməsin.
-// Idempotent: sentinel comment təkrar yazılmanın qarşısını alır. Setup action-ına
-// (writeWorkspaceHooks) bağlıdır — activation-da səssiz yazı DEYİL. Git layihəsi
-// deyilsə (nə .git, nə .gitignore var) toxunmuruq — boş qovluğa fayl atmırıq.
+// Add a Tokengram block to the project's .gitignore so per-machine artifacts
+// (chroma_db/, .tokengram.*.lock, .mla_*, .bm25_index.pkl, ...) don't go into git.
+// Idempotent: the sentinel comment prevents writing it twice. Tied to a setup
+// action (writeWorkspaceHooks) — NOT a silent write on activation. If it's not a
+// git project (neither .git nor .gitignore exist) we don't touch it — we don't
+// drop a file into an empty folder.
 export function ensureGitignore(root: string): void {
   const SENTINEL = '# >>> Tokengram (auto-managed) — runtime artifacts, do not commit >>>';
   try {
@@ -845,7 +1003,7 @@ export function ensureGitignore(root: string): void {
     } catch {
       cur = '';
     }
-    if (cur.includes('# >>> Tokengram (auto-managed)')) return; // artıq yazılıb
+    if (cur.includes('# >>> Tokengram (auto-managed)')) return; // already written
 
     const block =
       SENTINEL + '\n' +
@@ -874,16 +1032,17 @@ export function ensureGitignore(root: string): void {
     const sep = cur === '' ? '' : cur.endsWith('\n') ? '\n' : '\n\n';
     fs.appendFileSync(giPath, sep + block, 'utf-8');
   } catch {
-    // Best-effort — heç vaxt setup-u bloklama.
+    // Best-effort — never block setup.
   }
 }
 
-// Layihənin kök `CLAUDE.md`-nə idarə olunan kiçik blok yazır ki, Claude kod
-// araşdırarkən əvvəlcə `search_code` MCP alətindən istifadə etsin. Bu, alət
-// seçimini yönləndirən YEGANƏ etibarlı mexanizmdir (hook-lar bloklamır, yalnız
-// uçot + bloklamayan nudge edir). İdempotent: marker-lər arasını YENİLƏYİR,
-// user-in qalan məzmununa TOXUNMUR. CLAUDE.md yoxdursa yaradılır. Heç vaxt
-// setup-u bloklamır (best-effort). Bu, qənaət təklifidir, hard-rule deyil.
+// Writes a small managed block into the project root `CLAUDE.md` so that Claude
+// uses the `search_code` MCP tool first when exploring code. This is the ONLY
+// reliable mechanism for steering tool choice (hooks do not block, they only
+// account + emit non-blocking nudges). Idempotent: it UPDATES the content between
+// the markers and does NOT TOUCH the rest of the user's content. CLAUDE.md is
+// created if absent. Never blocks setup (best-effort). This is a savings
+// suggestion, not a hard rule.
 const CLAUDE_MD_START =
   '<!-- >>> Tokengram (auto-managed) — token-saving search guidance >>> -->';
 const CLAUDE_MD_END = '<!-- <<< Tokengram (auto-managed) <<< -->';
@@ -920,7 +1079,7 @@ export function ensureClaudeMdGuidance(root: string): void {
     const s = cur.indexOf(CLAUDE_MD_START);
     const e = cur.indexOf(CLAUDE_MD_END);
     if (s !== -1 && e !== -1 && e > s) {
-      // Mövcud idarə olunan bloku yenilə (upgrade-də guidance təzələnsin).
+      // Update the existing managed block (so guidance refreshes on upgrade).
       const next = cur.slice(0, s) + block + cur.slice(e + CLAUDE_MD_END.length);
       if (next !== cur) fs.writeFileSync(mdPath, next, 'utf-8');
       return;
@@ -930,22 +1089,22 @@ export function ensureClaudeMdGuidance(root: string): void {
     const sep = cur === '' ? '' : cur.endsWith('\n') ? '\n' : '\n\n';
     fs.appendFileSync(mdPath, sep + block + '\n', 'utf-8');
     if (isFreshCreate) {
-      // Bu CLAUDE.md-ni Tokengram SIFIRDAN yaratdı (user məzmunu yox idi) → sırf
-      // alət yönləndirməsidir (yalnız search_code MCP ilə mənalı), paylaşılan
-      // komanda biliyi DEYİL → default git-ə salma. DİQQƏT: user-in öz CLAUDE.md-si
-      // OLAN layihələrdə bu branch işləmir (yuxarıda append/update edilir) → heç
-      // vaxt user-in commit etdiyi faylı gizlətmərik.
+      // Tokengram created this CLAUDE.md FROM SCRATCH (there was no user content) → it is
+      // purely tool guidance (only meaningful with the search_code MCP), NOT shared
+      // team knowledge → by default keep it out of git. NOTE: in projects that DO HAVE
+      // the user's own CLAUDE.md this branch does not run (we append/update above) → we
+      // never hide a file the user has committed.
       ensureClaudeMdGitignored(root);
     }
   } catch {
-    // Best-effort — heç vaxt setup-u bloklama.
+    // Best-effort — never block setup.
   }
 }
 
-// Yalnız Tokengram SIFIRDAN yaratdığı CLAUDE.md üçün çağırılır: faylı .gitignore-a
-// idempotent əlavə edir (artıq varsa toxunmur). Git repo deyilsə heç nə etmir.
-// Niyə: bizim yazdığımız guidance maşın/alət-spesifikdir (search_code MCP olmayan
-// komanda üzvü üçün mənasız) → lokal qalmalıdır, user-in repo-suna sızmamalıdır.
+// Called only for a CLAUDE.md that Tokengram created FROM SCRATCH: idempotently adds
+// the file to .gitignore (no-op if already present). Does nothing if not a git repo.
+// Why: the guidance we write is machine/tool-specific (meaningless to a team member
+// without the search_code MCP) → it should stay local and not leak into the user's repo.
 function ensureClaudeMdGitignored(root: string): void {
   try {
     const isGitRepo = fs.existsSync(path.join(root, '.git'));
@@ -958,7 +1117,7 @@ function ensureClaudeMdGitignored(root: string): void {
     } catch {
       cur = '';
     }
-    // Artıq ignore olunub? (sətir-bə-sətir, ./ və / prefikslərinə dözümlü)
+    // Already ignored? (line-by-line, tolerant of ./ and / prefixes)
     const present = cur.split(/\r?\n/).some((l) => {
       const t = l.trim();
       return t === 'CLAUDE.md' || t === '/CLAUDE.md' || t === './CLAUDE.md';
@@ -973,7 +1132,7 @@ function ensureClaudeMdGitignored(root: string): void {
     const sep = cur === '' ? '' : cur.endsWith('\n') ? '' : '\n';
     fs.appendFileSync(giPath, sep + note, 'utf-8');
   } catch {
-    // Best-effort — heç vaxt setup-u bloklama.
+    // Best-effort — never block setup.
   }
 }
 

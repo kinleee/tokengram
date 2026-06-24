@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Savings history-i sıfırla. Köhnəsi backup-a köçürülür."""
+"""Reset the savings history. The old one is moved to a backup."""
 import os
 import shutil
 import sys
@@ -18,7 +18,7 @@ def main():
         print("Savings history already empty.")
         return
 
-    # Nanosecond-precision suffix: eyni saniyədə 2 reset üzərinə yazmasın.
+    # Nanosecond-precision suffix: so two resets in the same second don't overwrite.
     ts = time.strftime("%Y%m%d_%H%M%S") + f"_{time.time_ns() % 1_000_000_000:09d}"
     backup = history.parent / f".mla_savings_history.jsonl.bak.{ts}"
 
@@ -26,10 +26,10 @@ def main():
     history.write_text("", encoding="utf-8")
     print(f"Savings history reset. Backup: {backup.name}")
 
-    # Köhnə backup-ları təmizlə — yalnız ən təzə 2-ni saxla. Əvvəl hər reset yeni
-    # .bak yaradırdı, heç vaxt silmirdi → qovluqda onlarla .bak yığılırdı
-    # (səliqəsiz, useri qorxudur). Backup sırf "səhvən sıfırladım" üçün təhlükəsizlik
-    # toru olduğundan 2 nüsxə kifayətdir.
+    # Clean up old backups — keep only the 2 most recent. Previously every reset
+    # created a new .bak and never deleted any → dozens of .bak files piled up in
+    # the folder (messy, scares the user). Since the backup is purely a safety net
+    # for "I reset by mistake", 2 copies are enough.
     backups = sorted(
         history.parent.glob(".mla_savings_history.jsonl.bak.*"),
         key=lambda p: p.stat().st_mtime,

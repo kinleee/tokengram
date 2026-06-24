@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MLA Read-enforcement state-i .mla_enforcement.flag fayl ilə dəyişir."""
+"""Toggle the MLA Read-enforcement state via the .mla_enforcement.flag file."""
 import os
 import sys
 from pathlib import Path
@@ -16,7 +16,7 @@ def main():
 
     state = sys.argv[1].lower()
     flag = find_project_root() / ".mla_enforcement.flag"
-    # Atomic write: read-during-write race-də license_gate yarımçıq oxuya bilməsin.
+    # Atomic write: so license_gate can't read a partial value in a read-during-write race.
     write_atomic(flag, state)
     print(f"MLA enforcement: {state.upper()}")
 

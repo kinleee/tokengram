@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Auto-generated arch doc-u stdout-a yaz (slash command üçün)."""
+"""Write the auto-generated arch doc to stdout (for the slash command)."""
 import sys
 from pathlib import Path
 
-# Windows-un default stdout encoding-i cp1252-dir, Azərbaycan hərfləri
-# print-də UnicodeEncodeError verir və skript exit 1 ilə yıxılır. UTF-8-ə force.
+# Windows' default stdout encoding is cp1252; non-ASCII letters raise a
+# UnicodeEncodeError in print and the script crashes with exit 1. Force UTF-8.
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from i18n import tr
 from project_root import find_project_root
 
-# ARCH_DOC layihə kökündə yaranır (arch_doc.py orada yazır).
-# Path(__file__).parent.parent paket qovluğuna düşürdü — heç vaxt match etmirdi.
+# ARCH_DOC is created in the project root (arch_doc.py writes it there).
+# Path(__file__).parent.parent pointed at the package folder — never matched.
 ARCH_DOC = find_project_root() / ".mla_arch.md"
 
 

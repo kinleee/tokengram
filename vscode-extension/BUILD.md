@@ -53,3 +53,56 @@ vsce publish minor     # 0.1.0 → 0.2.0
 - [ ] `package.json` → `repository.url` points to a real public GitHub repo
 - [ ] Tested install of the `.vsix` on a fresh VS Code profile
 - [ ] Setup wizard runs end-to-end on a clean machine (no `~/.tokengram/` present)
+
+## Cross-platform builds (Windows + Linux)
+
+Tokengram ships **platform-specific** extensions: each `.vsix` bundles a wheel
+compiled for one platform, and the Marketplace serves the right one to each
+user automatically (no runtime download logic on our side).
+
+### How the wheel is tagged
+
+`setup.py` marks the distribution as platform-specific (`has_ext_modules()`),
+so `python build_pypi.py` now produces a correctly-tagged wheel instead of the
+old misleading `py3-none-any`:
+
+| Platform | Built on | Wheel tag |
+|----------|----------|-----------|
+| Windows  | local (this machine) | `tokengram-X.Y.Z-cp312-cp312-win_amd64.whl` |
+| Linux x64 | GitHub Actions (Ubuntu) | `tokengram-X.Y.Z-cp312-cp312-linux_x86_64.whl` |
+| macOS    | not built yet (roadmap) | — |
+
+### Windows (unchanged)
+
+The Windows flow is exactly as documented above (`make_distribution.py` →
+`build_pypi.py` → `vsce package` → `publish_release.ps1`). The only difference
+is the wheel filename now carries the `cp312-cp312-win_amd64` tag.
+
+### Linux (CI only — cannot be built on the Windows dev machine)
+
+Cython must compile against a Linux toolchain to emit `.so` files, so the Linux
+wheel + `linux-x64` VSIX are built in CI:
+
+1. Push a `v*` tag, or run **Actions → "Build Linux artifacts" → Run workflow**.
+2. The workflow ([.github/workflows/build-linux.yml](../.github/workflows/build-linux.yml))
+   compiles the engine to `.so`, builds + import-verifies the Linux wheel, then
+   packages `tokengram-linux-x64.vsix` (bundling only the Linux wheel).
+3. Download the `tokengram-linux-x64` artifact.
+4. Publish it the same way as Windows — `vsce` reads the target from the VSIX:
+
+   ```powershell
+   npx vsce publish --packagePath tokengram-linux-x64.vsix --pat $env:VSCE_PAT
+   ```
+
+### Roadmap (not blocking the first Linux release)
+
+- **linux-arm64**: add an arch to the CI matrix (QEMU or an arm runner) and
+  `vsce package --target linux-arm64`.
+- **PyPI for Linux**: the wheel is tagged `linux_x86_64`, which PyPI rejects.
+  Run `auditwheel repair` to produce a `manylinux` wheel before any twine
+  upload. The bundled-in-VSIX install path does NOT need this (uv installs the
+  wheel by file path on a matching host).
+- **macOS**: build `.so`/`.dylib` on `macos-13` (Intel) + `macos-14` (Apple
+  Silicon), package `darwin-x64` / `darwin-arm64`, then open the activation gate
+  for `darwin` in `src/extension.ts`. Watch for Gatekeeper quarantine of the
+  unsigned `.so` inside a downloaded VSIX.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Stop hook (1-ci sira): .mla_arch.md auto-maintained architecture doc.
+"""Stop hook (first in order): .mla_arch.md auto-maintained architecture doc.
 
-`savings_report.py`-dən ƏVVƏL işləməlidir, çünki session_log-u oxuyur.
-State `.mla_arch_state.json`-da saxlanır, hər run-da render olunur.
+Must run BEFORE `savings_report.py`, because it reads the session_log.
+State is stored in `.mla_arch_state.json`, rendered on every run.
 """
 import json
 import os
@@ -10,8 +10,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Windows-da gələcəkdə stderr-ə Azərbaycanca log yazsaq, savings_report
-# ilə eyni cp1252 escape problemi olmasın. Defensive default.
+# On Windows, in case we later write non-ASCII logs to stderr, avoid the same
+# cp1252 escape problem as savings_report. Defensive default.
 if sys.platform == "win32":
     try:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -61,8 +61,8 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    # Atomic: kill -9 və ya power loss-da `.mla_arch_state.json` korrupt qalmasın
-    # (load_state silent reset edirdi — bütün files/recent_searches itirdik).
+    # Atomic: don't let `.mla_arch_state.json` stay corrupt on kill -9 or power loss
+    # (load_state used to silently reset — we lost all files/recent_searches).
     write_atomic(ARCH_STATE, json.dumps(state, ensure_ascii=False, indent=2))
 
 
@@ -126,7 +126,7 @@ def main() -> int:
     except Exception:
         pass
 
-    # MLA OFF → arch doc-u yeniləmə, heç nə etmə
+    # MLA OFF → don't update the arch doc, do nothing
     if not enforcement_active(PROJECT_ROOT):
         return 0
 
@@ -148,9 +148,9 @@ def main() -> int:
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        # Yalnız search_code event-ləri arch doc-a düşür — read_block /
-        # grep_search / bash_inspect / read_pass arch-da yer tutmasın
-        # (əvvəl recent_searches boş "no results" sətirləri ilə dolurdu).
+        # Only search_code events go into the arch doc — read_block /
+        # grep_search / bash_inspect / read_pass should not take up space in arch
+        # (recent_searches used to fill up with empty "no results" lines).
         if entry.get("type", "search_code") != "search_code":
             continue
 

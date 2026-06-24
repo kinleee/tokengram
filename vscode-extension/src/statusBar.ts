@@ -7,32 +7,32 @@ import { findHistoryFile, findProjectRoot, readSavings } from './savingsReader';
 
 const REFRESH_MS = 5_000;
 
-// Bar state machine — visual ayrı, behavior ayrı.
-// Bütün "license problemləri" hooks işləmir demək deyil; tooltip-də göstərilir.
+// Bar state machine — visual separate, behavior separate.
+// Not all "license problems" mean hooks stop working; this is shown in the tooltip.
 type BarState =
   | 'no_project'
   | 'no_key'
   | 'invalid'
-  | 'trial_expired' // trial bitdi — konversiya CTA (heç nə sınmır, qənaət dayanır)
+  | 'trial_expired' // trial ended — conversion CTA (nothing breaks, savings stop)
   | 'stale'
   | 'off'
-  | 'queue_stuck'   // background worker dayanıb, yeni indekslə baş tutmur
-  | 'data_reset'    // history son 1 saatda 0 byte-a sıfırlanıb
+  | 'queue_stuck'   // background worker stalled, new indexing not completing
+  | 'data_reset'    // history reset to 0 bytes within the last 1 hour
   | 'idle'
   | 'active'
   | 'live';
 
-// `.mla_pending.processing` faylının yaşı bu eşikdən böyük olarsa, worker
-// crash sayılır. 30 dəq — adi indekslə kifayət edən ən uzun reallıq vaxtı.
+// If the `.mla_pending.processing` file's age exceeds this threshold, the worker
+// is considered crashed. 30 min — the longest realistic time a normal index takes.
 const QUEUE_STUCK_THRESHOLD_SEC = 1800;
-// History sıfırdırsa, reset yeni olmuşsa user-ə deyirik. 1 saat — natural
-// "yeni başlatma" pəncərəsi; daha köhnəsi yəqin ki uzun-müddətli idle olub.
+// If history is empty, we tell the user when the reset is recent. 1 hour — a natural
+// "fresh start" window; anything older has probably just been idle for a long time.
 const DATA_RESET_FRESH_THRESHOLD_SEC = 3600;
 
-// Project root workspace ömrü boyu sabitdir (yalnız workspace-folder dəyişəndə
-// dəyişir), amma refresh() hər 5s + hər watcher event-də findProjectRoot-u
-// sıfırdan hesablayırdı (worst-case 4×8 stat). Qısa-TTL memo ilə keşləyirik;
-// TTL self-heal verir (məs. setup sonradan .claude yaradanda).
+// The project root is constant for the workspace's lifetime (it changes only when the
+// workspace folder changes), but refresh() was recomputing findProjectRoot from scratch
+// every 5s + on every watcher event (worst-case 4×8 stat). We cache it with a short-TTL
+// memo; the TTL provides self-heal (e.g. when setup creates .claude later).
 let _rootMemo: { ws: string; root: string; at: number } | null = null;
 const _ROOT_MEMO_TTL_MS = 30_000;
 
@@ -85,15 +85,15 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     }
 
     const workspacePath = folders[0].uri.fsPath;
-    // Workspace bəzən project_root-un subfolder-i ola bilər (mono-repo).
-    // Hooks `.claude/settings.json`-ın bağlı olduğu kökə yazır — biz də orada axtaraq.
+    // The workspace can sometimes be a subfolder of project_root (mono-repo).
+    // Hooks write to the root that `.claude/settings.json` is bound to — so we look there too.
     const projectRoot = cachedProjectRoot(workspacePath);
     const flagOn = readEnforcement(projectRoot);
-    // Avtomatik recovery (autoRecoverIfStuck) SİLİNDİ (2026-06-19): köhnə davamlı
-    // poll-drain + watchdog/self-heal qülləsi getdi, ona görə "GIL-donmuş server"
-    // halı artıq yoxdur. Növbə task sonu Stop hook-da (və ya server bağlısa onun
-    // soyuq fallback-ı ilə) drenlənir. queue_stuck bar state-i hələ informativ
-    // qalır; əl ilə "Refresh"/"Re-index" düymələri eskalasiya yoludur.
+    // Automatic recovery (autoRecoverIfStuck) was REMOVED (2026-06-19): the old continuous
+    // poll-drain + watchdog/self-heal tower is gone, so the "GIL-frozen server"
+    // case no longer exists. The queue is drained at the end of a task in the Stop hook
+    // (or, if the server is down, by its cold fallback). The queue_stuck bar state still
+    // remains informative; the manual "Refresh"/"Re-index" buttons are the escalation path.
     const licenseState = effectiveStatus();
     const historyPath =
       findHistoryFile() ??
@@ -124,12 +124,12 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       summary.historyEmpty &&
       summary.historyMtimeAgeSec < DATA_RESET_FRESH_THRESHOLD_SEC &&
       summary.pendingActivityCount === 0 &&
-      // Yalnız sistem HƏQİQƏTƏN sakit olanda "reset" sarı xəbərdarlığı göstər.
-      // Əks halda: Stop hook hər task bitəndə session log-u boşaldır →
-      // pendingActivityCount bir anda 0 olur → bar data_reset(sarı) ↔ live(yaşıl)
-      // arasında hər neçə saniyədən bir titrəyir (user "nəsə sınıb" sanır).
-      // İndekslənmə gedirsə və ya son 24s-də task olubsa, bu reset deyil, normal
-      // işdir → yaşıl active/idle göstər.
+      // Only show the "reset" yellow warning when the system is TRULY quiet.
+      // Otherwise: the Stop hook empties the session log at the end of every task →
+      // pendingActivityCount momentarily becomes 0 → the bar flickers between
+      // data_reset (yellow) ↔ live (green) every few seconds (the user thinks "something broke").
+      // If indexing is running, or there was a task in the last 24s, this is not a reset but normal
+      // work → show green active/idle.
       summary.indexingPending === 0 &&
       summary.recent24hTasks === 0
     )
@@ -151,7 +151,7 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
         color = new vscode.ThemeColor('charts.red');
         break;
       case 'trial_expired':
-        // Qırmızı yox — trial bitməsi xəta deyil, gözlənilən lifecycle anıdır.
+        // Not red — trial expiry is not an error, it's an expected lifecycle moment.
         icon = '$(clock)';
         color = new vscode.ThemeColor('charts.yellow');
         break;
@@ -190,8 +190,8 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       return;
     }
     if (state === 'trial_expired') {
-      // Konversiya anı: qənaət rəqəmi burada ən güclü arqumentdir —
-      // "bu ay X qənaət etdin, davam etmək üçün lisenziya al".
+      // Conversion moment: the savings number is the strongest argument here —
+      // "you saved X this month, buy a license to keep going".
       const savedTotalK = summary ? (summary.savedTokens24h / 1000).toFixed(1) : '0.0';
       item.text = tr('bar.cta.trial_expired', { icon });
       item.tooltip = tr('bar.tip.trial_expired', { savedK: savedTotalK });
@@ -259,9 +259,9 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
             count: safeSummary.pendingActivityCount,
           })
         : '';
-    // İstənilən pending fayl (1 belə) spinner+sayğac göstərsin — əvvəl `>= 5`
-    // idi, ona görə kiçik edit-lər (1-3 fayl) heç vaxt görünmürdü. İndi fayl
-    // edit olan kimi "⟳ N" çıxır, drain bitəndə itir.
+    // Any pending file (even 1) should show the spinner+counter — it used to be `>= 5`,
+    // so small edits (1-3 files) were never visible. Now "⟳ N" appears as soon as a file
+    // is edited, and disappears when the drain finishes.
     const indexingBadge =
       safeSummary.indexingPending > 0
         ? tr('bar.indexingBadge', { n: safeSummary.indexingPending })
@@ -272,8 +272,8 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     // it for power users.
     const calibrating = safeSummary.savedPct24h < 0;
     const pctFull = calibrating ? tr('bar.calibrating') : `${safeSummary.savedPct24h.toFixed(1)}%`;
-    // Aktiv trial: bar normal işləyir, amma qalan günlər həmişə görünür —
-    // "qalan gün + öz qənaət rəqəmin" cütlüyü konversiyanın əsas alətidir.
+    // Active trial: the bar works normally, but the remaining days are always visible —
+    // the "days left + your own savings number" pair is the main conversion tool.
     const trialDays = licenseState === 'trialing' ? trialDaysLeft() : null;
     const trialBadge = trialDays !== null ? tr('bar.trialBadge', { days: trialDays }) : '';
     const tail = [liveBadge, indexingBadge, trialBadge].filter(Boolean).join(' ');
@@ -281,7 +281,7 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       + (tail ? ' ' + tail : '');
     item.color = color;
 
-    // Stale lisenziya keşi — bar 'active' olsa belə tooltip-də xəbər ver.
+    // Stale license cache — notify in the tooltip even if the bar is 'active'.
     const staleNote =
       licenseState === 'stale'
         ? '\n' + tr('bar.tip.staleNote')
@@ -321,9 +321,9 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
   refresh();
   let interval: NodeJS.Timeout | null = setInterval(refresh, REFRESH_MS);
 
-  // Fokus olmayan window-da hər 5s 32 sync stat → SMB drive-də UI laggy.
-  // Pəncərə blur olduqda timer-i dayandırırıq; focus qayıdanda bir dəfə
-  // refresh + interval-ı yenidən qururuq.
+  // In an unfocused window, 32 sync stats every 5s → laggy UI on SMB drives.
+  // When the window is blurred we stop the timer; when focus returns we run a single
+  // refresh and re-establish the interval.
   const focusListener = vscode.window.onDidChangeWindowState((state) => {
     if (state.focused) {
       if (interval === null) {
@@ -339,8 +339,8 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
 
   const folders = vscode.workspace.workspaceFolders;
   if (folders && folders.length > 0) {
-    // FS watcher base = real project_root (workspace deyil). String pattern
-    // istifadə edirik ki, base workspace-dən kənar ola bilsin.
+    // FS watcher base = real project_root (not the workspace). We use a string
+    // pattern so the base can be outside the workspace.
     const projectRoot = findProjectRoot(folders[0].uri.fsPath);
 
     const watcherFiles = [
@@ -348,9 +348,9 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       '.mla_savings_history.jsonl',
       '.mla_session_log.jsonl',
       '.mla_pending.txt',
-      // Drain başlayanda (.txt → .processing) və bitəndə (.processing silinir)
-      // bar dərhal yenilənsin ki, spinner+sayğac vaxtında çıxsın/itsin —
-      // əks halda yalnız 5s interval-ı gözləyirdi.
+      // When the drain starts (.txt → .processing) and finishes (.processing is deleted)
+      // the bar should refresh immediately so the spinner+counter appears/disappears on time —
+      // otherwise it only waited for the 5s interval.
       '.mla_pending.processing',
     ];
     for (const name of watcherFiles) {

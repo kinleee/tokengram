@@ -20,13 +20,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Wheel cp312-only kompayl olunub; cp313 .pyd hazır olana qədər EXACT 3.12.
-# 3.13 install üçün ayrı cp313 .pyd build pipeline-i lazımdır.
+# Wheel is compiled cp312-only; EXACT 3.12 until a cp313 .pyd is ready.
+# A separate cp313 .pyd build pipeline is needed for 3.13 installs.
 REQUIRED_PY = (3, 12)
 
-# Windows-da stdout/stderr pipe olunanda default cp1252 olur; Azərbaycan hərfli
-# log sətirləri ('ə' və s.) UnicodeEncodeError ilə bütün install-i çökdürür.
-# UTF-8-ə keçir (hooks-da olduğu kimi) — yoxsa migrate/log sətirləri fail edir.
+# On Windows, stdout/stderr default to cp1252 when piped; log lines with
+# non-ASCII characters crash the whole install with UnicodeEncodeError.
+# Switch to UTF-8 (as the hooks do) — otherwise migrate/log lines fail.
 if sys.platform == "win32":
     for _stream in (sys.stdout, sys.stderr):
         try:
@@ -35,9 +35,10 @@ if sys.platform == "win32":
             pass
 
 
-# Persistent transcript — tester-in maşınında xəta ötəri output channel-da
-# itməsin deyə HƏR install bütün stdout + pip stderr-i bura yazır. "Setup did
-# not complete" olanda tester bu faylı göndərir → real səbəb dəqiqləşir.
+# Persistent transcript — so that an error on the tester's machine isn't lost
+# in the transient output channel, EVERY install writes all stdout + pip stderr
+# here. When "Setup did not complete" happens, the tester sends this file → the
+# real cause becomes clear.
 _LOG_FH = None
 _LOG_PATH = None
 
@@ -85,9 +86,10 @@ def fail(msg: str, code: int = 1) -> None:
 
 
 def _run(args: list, timeout: int | None = None) -> None:
-    """Subprocess-i işə sal; birləşmiş stdout+stderr-i HƏM stdout-a (extension
-    progress oxuyur) HƏM install.log-a ötür. Non-zero exit-də CalledProcessError
-    atır ki, main()-in handler-i bildirsin. Pip-in əsl xətası beləcə log-da qalır.
+    """Run a subprocess; forward the combined stdout+stderr BOTH to stdout (the
+    extension reads progress) AND to install.log. Raises CalledProcessError on a
+    non-zero exit so that main()'s handler reports it. Pip's real error thus
+    stays in the log.
     """
     printable = " ".join(str(a) for a in args)
     _log_raw(f"$ {printable}")
@@ -142,8 +144,59 @@ def venv_pip(venv: Path) -> Path:
     return venv / "bin" / "pip"
 
 
+def _site_packages(venv: Path) -> Path | None:
+    """The venv's site-packages directory (Windows: Lib\\site-packages, POSIX:
+    lib/pythonX.Y/site-packages)."""
+    win = venv / "Lib" / "site-packages"
+    if win.is_dir():
+        return win
+    for cand in venv.glob("lib/python*/site-packages"):
+        return cand
+    return None
+
+
+def _wheel_version_from_name(source: str | None) -> str | None:
+    """Extract the version from the bundled wheel path: tokengram-0.1.41-py3-...whl -> 0.1.41."""
+    if not source:
+        return None  # PyPI mode — version not known from the file name
+    parts = Path(source).name.split("-")
+    if len(parts) >= 2 and parts[0] == "tokengram":
+        return parts[1]
+    return None
+
+
+def _installed_pkg_version(venv: Path) -> str | None:
+    """Read the installed tokengram version from the dist-info directory name."""
+    site = _site_packages(venv)
+    if site is None:
+        return None
+    try:
+        for d in site.glob("tokengram-*.dist-info"):
+            return d.name[len("tokengram-"):-len(".dist-info")]
+    except OSError:
+        pass
+    return None
+
+
+def _install_is_healthy(venv: Path) -> bool:
+    """A healthy install where reinstall can be skipped: the package entry
+    point (`__main__.py`) EXISTS AND there is a RECORD in dist-info. If RECORD
+    is missing, the previous install was interrupted (pip/uv will force a
+    destructive reinstall next time) — don't treat it as "ready"."""
+    site = _site_packages(venv)
+    if site is None:
+        return False
+    if not (site / "tokengram" / "__main__.py").exists():
+        return False
+    try:
+        dist_infos = list(site.glob("tokengram-*.dist-info"))
+    except OSError:
+        return False
+    return bool(dist_infos) and any((d / "RECORD").exists() for d in dist_infos)
+
+
 def _venv_python_version(venv: Path) -> tuple[int, int] | None:
-    """Mövcud venv-in Python major.minor-unu qaytar; mövcud deyilsə None."""
+    """Return the existing venv's Python major.minor; None if it doesn't exist."""
     py = venv_python(venv)
     if not py.exists():
         return None
@@ -162,13 +215,15 @@ def create_venv(venv: Path, uv: str | None) -> None:
     if existing == REQUIRED_PY:
         log(f"[3/5] venv already exists at {venv} (Python {existing[0]}.{existing[1]}), reusing")
         return
-    # Yenidən-qurma lazımdır əgər (a) köhnə venv başqa Python ilə yaranıb VƏ YA
-    # (b) venv qovluğu mövcuddur amma python.exe YOXDUR/işləmir (existing is None).
-    # (b) halı KRİTİK: antivirus venv-in python.exe-ni karantinə ala bilər → qovluq
-    # qalır (tokengram.exe + site-packages), python.exe yox. Belə qalıq qovluğa qarşı
-    # `uv venv` exit 2 verir ("A virtual environment already exists ... --clear")
-    # → python.exe HEÇ yaranmır → install hər dəfə eyni yerdə sınır. Qalıq qovluğu
-    # əvvəlcə tam silirik ki, təmiz lövhədən qurulsun (canlı doğrulandı 2026-06-19).
+    # A rebuild is needed if (a) the old venv was created with a different Python
+    # OR (b) the venv directory exists but python.exe is MISSING/broken (existing
+    # is None). Case (b) is CRITICAL: antivirus can quarantine the venv's
+    # python.exe → the directory remains (tokengram.exe + site-packages) but no
+    # python.exe. Against such a leftover directory `uv venv` returns exit 2
+    # ("A virtual environment already exists ... --clear") → python.exe NEVER
+    # gets created → the install fails in the same spot every time. We fully
+    # remove the leftover directory first so it's built from a clean slate
+    # (verified live 2026-06-19).
     if venv.exists() and existing != REQUIRED_PY:
         reason = (
             f"Python {existing[0]}.{existing[1]}" if existing is not None
@@ -181,18 +236,19 @@ def create_venv(venv: Path, uv: str | None) -> None:
             fail(f"could not remove old venv at {venv}: {e}. Close VS Code and try again.")
     log(f"[3/5] Creating venv at {venv}...")
     if uv:
-        # uv özü 3.12-ni provision edir (sistemdə yoxdursa standalone endirir) —
-        # user-də heç bir Python olmasa belə işləyir. Bu, "Python 3.12 yoxdur"
-        # problemini tamamilə aradan qaldırır. `--clear`: rmtree kilidli fayl üzündən
-        # alınmasa belə uv qalıq qovluğu özü təmizləsin (idempotent sığorta).
+        # uv provisions 3.12 itself (downloads a standalone build if not on the
+        # system) — works even when the user has no Python at all. This fully
+        # eliminates the "Python 3.12 missing" problem. `--clear`: even if rmtree
+        # failed because of a locked file, let uv clean the leftover directory
+        # itself (idempotent safeguard).
         _run([uv, "venv", "--clear", "--python", "3.12", str(venv)])
     else:
         _run([sys.executable, "-m", "venv", "--clear", str(venv)])
 
 
 def upgrade_pip(venv: Path, uv: str | None) -> None:
-    # uv rejimində venv-də pip yoxdur (uv pip öz resolver-i ilə işləyir) —
-    # pip upgrade lazım deyil və mənasızdır.
+    # In uv mode there is no pip in the venv (uv pip works with its own
+    # resolver) — a pip upgrade is neither needed nor meaningful.
     if uv:
         return
     # Don't pass --quiet here: the wizard listens for progress lines, and a
@@ -203,29 +259,30 @@ def upgrade_pip(venv: Path, uv: str | None) -> None:
 
 
 _PIP_NET_FLAGS = ["--retries", "5", "--timeout", "60"]
-_PIP_TIMEOUT_SEC = 900  # 15 dəq — uzun depend tree + slow proxy üçün
+_PIP_TIMEOUT_SEC = 900  # 15 min — for a long dependency tree + slow proxy
 
 
 def _pip_run(args: list[str]) -> None:
-    """Pip-i timeout + retry flag-ləri ilə çağır.
+    """Call pip with timeout + retry flags.
 
-    --retries 5 --timeout 60 → şəbəkə qısa kəsilməsində avtomatik retry.
-    process timeout=900 → tam hang olsa user-i 15 dəq sonra azad et.
+    --retries 5 --timeout 60 → automatic retry on a brief network drop.
+    process timeout=900 → if it hangs completely, free the user after 15 min.
     """
     _run(args + _PIP_NET_FLAGS, timeout=_PIP_TIMEOUT_SEC)
 
 
-# Fresh install-da deps (chromadb + onnxruntime + fastembed + mcp + asılılıqlar)
-# venv-ə təxminən bu qədər bayt yazır. torch + transformers + sentence-transformers
-# (~491MB torch + asılılıqlar) SİLİNDİ → fastembed onnxruntime-i təkrar istifadə
-# edir; venv böyüməsi ~1.25 GB-dan ~600 MB-a düşür. Yalnız barın dolma sürətini
-# kalibrləyir — az/çox təxmin düzgünlüyü pozmur.
+# On a fresh install, deps (chromadb + onnxruntime + fastembed + mcp +
+# dependencies) write roughly this many bytes to the venv. torch + transformers
+# + sentence-transformers (~491MB torch + deps) were REMOVED → fastembed reuses
+# onnxruntime; venv growth drops from ~1.25 GB to ~600 MB. This only calibrates
+# the bar's fill rate — an over/under estimate doesn't break correctness.
 _DEPS_TARGET_BYTES = 600_000_000
 
 
 def _dir_size(path: Path) -> int:
-    """Qovluğun ümumi ölçüsü (rekursiv, symlink-siz). Xətalar səssiz keçilir —
-    install gedərkən fayllar yaranıb-silindiyi üçün race normaldır."""
+    """Total size of the directory (recursive, no symlinks). Errors are silently
+    ignored — a race is normal because files are created/deleted during the
+    install."""
     total = 0
     stack = [str(path)]
     while stack:
@@ -246,10 +303,11 @@ def _dir_size(path: Path) -> int:
 
 
 def _monitor_deps_progress(venv: Path, stop: threading.Event) -> None:
-    """Arxa fonda: uv deps yığarkən venv-in disk böyüməsini ölçüb hər ~0.8s-də
-    `[DL] <yazılan_bayt> <hədəf_bayt>` sətri yazır. Extension bunu real faizə
-    çevirir (vaxta görə təxmin deyil). Səhvlər install-i pozmamalıdır → hamısı
-    səssiz tutulur, thread daemon-dur."""
+    """In the background: while uv collects deps, measure the venv's disk growth
+    and write a `[DL] <written_bytes> <target_bytes>` line every ~0.8s. The
+    extension converts this into a real percentage (not a time-based estimate).
+    Errors must not break the install → everything is caught silently, the
+    thread is a daemon."""
     try:
         base = _dir_size(venv)
     except Exception:
@@ -267,17 +325,31 @@ def _monitor_deps_progress(venv: Path, stop: threading.Event) -> None:
 
 
 def install_tokengram(venv: Path, source: str | None, uv: str | None) -> None:
+    # Idempotent skip (for both modes): if EXACTLY this version is already
+    # healthily installed in the shared venv, do NOT do a destructive reinstall.
+    # A reinstall overwrites the .pyd; if another window's live (or re-spawned)
+    # MCP server has the file locked, pip fails with "os error 32 (file in
+    # use)". On the same version nothing changes → not touching the file is both
+    # faster and eliminates the multi-window install race at the root. If it is
+    # NOT healthy (e.g. RECORD missing) we don't skip — the install is cleaned
+    # up under lock+barrier (self-heal).
+    tgt_ver = _wheel_version_from_name(source)
+    if tgt_ver and _installed_pkg_version(venv) == tgt_ver and _install_is_healthy(venv):
+        log(f"[4/5] tokengram {tgt_ver} is already installed and healthy — skipping reinstall")
+        return
+
     if uv:
         vpy = str(venv_python(venv))
         target = source if source else "tokengram"
         label = Path(source).name if source else "tokengram (PyPI)"
         log(f"[4/5] Installing tokengram package: {label}")
         log("[4/5] Resolving and downloading dependencies (~300 MB on first install)...")
-        # uv pip wheel + bütün asılılıqları bir əmrdə resolve+install edir;
-        # pip-dən xeyli sürətli və 300MB timeout riskini azaldır. --reinstall
-        # köhnə .pyd-in qalmasının qarşısını alır.
-        # Yan thread venv böyüməsini ölçüb `[DL]` sətirləri yazır ki, wizard
-        # real faiz göstərsin (uv pipe-da per-bayt progress vermir).
+        # uv pip resolves+installs the wheel + all dependencies in one command;
+        # much faster than pip and reduces the 300MB timeout risk. --reinstall
+        # prevents an old .pyd from surviving.
+        # A side thread measures venv growth and writes `[DL]` lines so the
+        # wizard shows a real percentage (uv gives no per-byte progress on the
+        # pipe).
         stop = threading.Event()
         monitor = threading.Thread(
             target=_monitor_deps_progress, args=(venv, stop), daemon=True
@@ -298,14 +370,14 @@ def install_tokengram(venv: Path, source: str | None, uv: str | None) -> None:
     # on Windows (file-lock + caching edge cases) cannot survive into the new
     # install. The fresh install below puts every file back from the wheel.
     log("[4/5] Removing any previous tokengram install...")
-    # Uninstall: stderr ayrıca tut ki, "not installed" ilə real "in use" lock
-    # error-larını fərqləndirə bilək (köhnə kod hər iki halı silentd örtürdü).
+    # Uninstall: keep stderr separately so we can distinguish "not installed"
+    # from real "in use" lock errors (the old code silently covered both cases).
     try:
         _run([pip, "uninstall", "tokengram", "-y"], timeout=120)
     except subprocess.CalledProcessError as e:
-        log(f"[4/5] uninstall exited with {e.returncode} (ehtimal: yox idi) — install-ə davam")
+        log(f"[4/5] uninstall exited with {e.returncode} (likely: not present) — continuing install")
     except subprocess.TimeoutExpired:
-        log("[4/5] uninstall timeout — install-ə davam (file-lock ola bilər)")
+        log("[4/5] uninstall timeout — continuing install (may be a file-lock)")
 
     if source:
         log(f"[4/5] Installing tokengram package from bundled wheel: {Path(source).name}")
@@ -323,26 +395,27 @@ def install_tokengram(venv: Path, source: str | None, uv: str | None) -> None:
 
 
 def predownload_embedding_model(venv: Path) -> None:
-    """Embedding modelini setup zamanı ONLINE endir (HF cache-ə yaz).
+    """Download the embedding model ONLINE during setup (write to HF cache).
 
-    Reindex runtime-da `HF_HUB_OFFLINE=1` ilə işləyir (worker hang qarşısı) —
-    yəni model əvvəlcədən cache-də OLMALIDIR, yoxsa embedding boş keçir və
-    baza boş qalır (səssiz uğursuzluq). Burada online endiririk.
+    Reindex runs at runtime with `HF_HUB_OFFLINE=1` (to prevent worker hangs) —
+    meaning the model MUST already be in the cache, otherwise embedding silently
+    produces nothing and the database stays empty (silent failure). Here we
+    download it online.
 
-    Symlink xəbərdarlığı söndürülür (Windows-da Developer Mode yoxdursa HF
-    copy ilə işləyir — symlink lazım deyil). Uğursuz olsa install dayanmır:
-    runtime-da `_ensure_loaded` ehtiyat online fallback edir.
+    The symlink warning is suppressed (without Developer Mode on Windows, HF
+    works with copies — no symlink needed). If it fails, install does not stop:
+    at runtime `_ensure_loaded` performs an online fallback.
     """
     log("[5/5] Pre-downloading embed + rerank models (~220 MB, one-time)...")
     py = str(venv_python(venv))
     env = dict(os.environ)
-    # Online məcburi (offline bayraqlarını sil) + symlink xəbərdarlığını sus
+    # Force online (remove offline flags) + silence the symlink warning
     env.pop("HF_HUB_OFFLINE", None)
     env.pop("TRANSFORMERS_OFFLINE", None)
     env["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     env["TRANSFORMERS_VERBOSITY"] = "error"
-    # fastembed (ONNX) — hər iki modeli cache-ə endir: bge-small (embed) +
-    # ms-marco (rerank). torch YOX → endirmə də, RAM da xeyli azdır.
+    # fastembed (ONNX) — download both models to cache: bge-small (embed) +
+    # ms-marco (rerank). NO torch → smaller download and far less RAM.
     code = (
         "from tokengram import config;"
         "from fastembed import TextEmbedding;"
@@ -358,8 +431,8 @@ def predownload_embedding_model(venv: Path) -> None:
         )
         log("[5/5] Embed + rerank models cached OK")
     except Exception as e:
-        # Non-fatal: runtime fallback modeli ilk reindex-də endirəcək.
-        log(f"[5/5] Model pre-download keçildi (runtime fallback edəcək): {e}")
+        # Non-fatal: the runtime fallback will download the model on the first reindex.
+        log(f"[5/5] Model pre-download skipped (runtime fallback will handle it): {e}")
 
 
 def install_hooks_locally(venv: Path, home: Path) -> None:
@@ -392,11 +465,11 @@ def install_hooks_locally(venv: Path, home: Path) -> None:
     shutil.copytree(src_hooks, dst_hooks)
     log(f"[5/5] Hooks copied to {dst_hooks}")
 
-    # Hooks `mla_constants` / `i18n`-i top-level modul kimi ~/.tokengram/-dan
-    # import edir (sys.path-ə hooks/-un parent-ını əlavə edirlər). Wheel-də
-    # bunlar yalnız paket içində compiled .pyd kimi olur — ona görə onları
-    # (və i18n-in runtime-da oxuduğu messages/ qovluğunu) hooks/-un yanına
-    # köçürürük. Bu olmasa təmiz maşında hər hook ModuleNotFoundError ilə çökür.
+    # Hooks import `mla_constants` / `i18n` as top-level modules from
+    # ~/.tokengram/ (they add the parent of hooks/ to sys.path). In the wheel
+    # these only exist as compiled .pyd inside the package — so we copy them
+    # (and the messages/ directory that i18n reads at runtime) next to hooks/.
+    # Without this, every hook crashes with ModuleNotFoundError on a clean machine.
     for stem in ("mla_constants", "i18n"):
         copied = False
         for match in pkg_root.glob(f"{stem}.*"):
@@ -415,21 +488,22 @@ def install_hooks_locally(venv: Path, home: Path) -> None:
 
 
 def migrate_legacy_mla_dir(home: Path) -> None:
-    """Köhnə ~/.mla/ qovluğundan license key / pubkey / server_url-i
-    yeni ~/.tokengram/-a köçür (rebrand birləşməsi).
+    """Migrate license key / pubkey / server_url from the old ~/.mla/ directory
+    to the new ~/.tokengram/ (rebrand merge).
 
-    Yalnız hədəf fayl yoxdursa kopyalanır — user-in son yenilədiyi fayl
-    silinmir. Source fayl bütöv qalır (manual cleanup user-ın seçimi).
+    Copied only if the target file does not exist — the file the user last
+    updated is not overwritten. The source file stays intact (manual cleanup is
+    the user's choice).
     """
     legacy = Path.home() / ".mla"
     if not legacy.exists() or legacy.resolve() == home.resolve():
         return
     home.mkdir(parents=True, exist_ok=True)
     moved = []
-    # Yalnız açarı köçür. server_url.txt + pubkey.pem köhnə ~/.mla-da çox vaxt
-    # ölü serverə (park olunmuş domen / stale Cloudflare worker) işarə edir və
-    # düzgün default-u əzərdi → activation "network_error/rejected" verirdi.
-    # Onlar cari serverə qarşı yenidən yazılır (write_server_url + fetchPubkey).
+    # Migrate the key only. In the old ~/.mla, server_url.txt + pubkey.pem often
+    # point to a dead server (parked domain / stale Cloudflare worker) and would
+    # override the correct default → activation returned "network_error/rejected".
+    # They are rewritten against the current server (write_server_url + fetchPubkey).
     for name in ("license_key.txt",):
         src = legacy / name
         dst = home / name
@@ -440,21 +514,21 @@ def migrate_legacy_mla_dir(home: Path) -> None:
             except OSError:
                 pass
     if moved:
-        log(f"[migrate] Köhnə ~/.mla/-dan köçürüldü: {', '.join(moved)}")
+        log(f"[migrate] Migrated from old ~/.mla/: {', '.join(moved)}")
 
 
-# Lisenziya serverinin canonical URL-i. Tək mənbə — extension/MCP heç vaxt köhnə
-# ~/.mla dəyərinə və ya səhv default-a düşməsin deyə hər install bunu yazır.
+# Canonical URL of the license server. Single source — every install writes this
+# so the extension/MCP never falls back to the old ~/.mla value or a wrong default.
 LICENSE_SERVER_URL = "https://tokengram.click"
 
 
 def write_server_url(home: Path) -> None:
-    """~/.tokengram/server_url.txt-i canonical URL-ə sabitlə (köhnə/stale dəyəri əz)."""
+    """Pin ~/.tokengram/server_url.txt to the canonical URL (override any old/stale value)."""
     try:
         (home / "server_url.txt").write_text(LICENSE_SERVER_URL, encoding="utf-8")
         log(f"[setup] server_url.txt -> {LICENSE_SERVER_URL}")
     except OSError as e:
-        log(f"[setup] server_url.txt yazıla bilmədi: {e}")
+        log(f"[setup] server_url.txt could not be written: {e}")
 
 
 def write_marker(home: Path) -> None:
@@ -524,7 +598,7 @@ if __name__ == "__main__":
         fail(f"step timed out after {e.timeout:.0f}s — slow/blocked network or stuck download: {e.cmd}")
     except urllib.error.URLError as e:
         fail(f"network error: {e}")
-    except Exception as e:  # son qalxan: hər hal log-a düşsün
+    except Exception as e:  # last resort: make sure everything reaches the log
         import traceback
 
         _log_raw(traceback.format_exc())

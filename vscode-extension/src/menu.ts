@@ -31,9 +31,9 @@ interface MenuItem extends vscode.QuickPickItem {
 function venvHasTokengram(): boolean {
   const binDir = process.platform === 'win32' ? 'Scripts' : 'bin';
   const exe = process.platform === 'win32' ? 'tokengram.exe' : 'tokengram';
-  // python.exe-ni də tələb et (setupWizard.venvHasTokengram güzgüsü): interpreter
-  // karantinə düşmüş qalıq venv "sağlam" sayılmasın → setLicenseKey təzə qurulum
-  // təklif etsin (2026-06-19 partial-venv insidenti).
+  // Also require python.exe (mirrors setupWizard.venvHasTokengram): a leftover
+  // venv with a quarantined interpreter must not be considered "healthy" →
+  // setLicenseKey should propose a fresh setup (2026-06-19 partial-venv incident).
   const py = process.platform === 'win32' ? 'python.exe' : 'python';
   const root = path.join(os.homedir(), '.tokengram', 'venv', binDir);
   return fs.existsSync(path.join(root, exe)) && fs.existsSync(path.join(root, py));
@@ -157,14 +157,15 @@ async function setLicenseKey(): Promise<void> {
     encoding: 'utf-8',
   });
 
-  // JWT public key-i endir — license.from_env() onu ~/.tokengram/pubkey.pem-dən
-  // oxuyur. Fayl olmasa MCP server hər validation-da xəta atır (təmiz install
-  // heç vaxt "valid" olmaz). Best-effort: alınmasa istifadəçiyə xəbər ver.
+  // Download the JWT public key — license.from_env() reads it from
+  // ~/.tokengram/pubkey.pem. Without the file the MCP server throws on every
+  // validation (a clean install would never be "valid"). Best-effort: if it
+  // fails, notify the user.
   const pubkeyOk = await fetchPubkey(serverUrl);
   if (!pubkeyOk) {
     vscode.window.showWarningMessage(
-      'Tokengram: public key endirilmədi (server əlçatmaz?). Açar saxlanıldı, ' +
-        'amma server bərpa olunanda re-index/setup-u təkrar işlət.',
+      'Tokengram: public key could not be downloaded (server unreachable?). ' +
+        'The key was saved, but re-run re-index/setup once the server recovers.',
     );
   }
 
@@ -240,11 +241,11 @@ interface ResolvedMcp {
 }
 
 function resolveMcpServer(workspace: string): ResolvedMcp | null {
-  // Tokengram MCP-i konkret olaraq running olduğu konfiqurasiya ilə çağırırıq:
-  // həm dev (system python + mcp_server.py), həm install (venv + run_mcp_server.py)
-  // eyni `--reindex <path> --fresh` CLI rejimini dəstəkləyir.
-  // `command`/`args` adətən relativ yollardır — `.mcp.json` qovluğunu cwd kimi
-  // qaytarırıq ki, "python mcp_server.py" düzgün resolve olsun.
+  // We invoke the Tokengram MCP with the exact configuration it is running
+  // under: both dev (system python + mcp_server.py) and install (venv +
+  // run_mcp_server.py) support the same `--reindex <path> --fresh` CLI mode.
+  // `command`/`args` are usually relative paths — we return the `.mcp.json`
+  // directory as cwd so "python mcp_server.py" resolves correctly.
 
   // 1) Walk up from workspace looking for .mcp.json (Claude Code's own
   //    discovery does the same thing).
@@ -288,8 +289,8 @@ function readMcpConfig(p: string): McpServerEntry | null {
   return null;
 }
 
-// Hooks və lazımi modullar `~/.tokengram/`-da yoxdursa, VSIX bundle-dakı
-// resources/hooks/-dan kopyalayır. Hooks artıq mövcuddursa toxunmur.
+// If the hooks and required modules are missing from `~/.tokengram/`, copy them
+// from the VSIX bundle's resources/hooks/. If the hooks already exist, leave them alone.
 function ensureGlobalHooks(extensionPath: string): boolean {
   const homeHooks = path.join(TOKENGRAM_HOME, 'hooks');
   const homeMessages = path.join(TOKENGRAM_HOME, 'messages');
@@ -323,9 +324,9 @@ function ensureGlobalHooks(extensionPath: string): boolean {
   }
 }
 
-// Layihənin `.claude/settings.json`-na Tokengram hook bağlamaları əlavə edir.
-// Mövcud field-lərə (model, effortLevel, və s.) toxunmur — yalnız `hooks`
-// sahəsi yazılır. Köhnə Tokengram hook konfiqi varsa, yeniləyir.
+// Adds the Tokengram hook bindings to the project's `.claude/settings.json`.
+// It does not touch existing fields (model, effortLevel, etc.) — only the
+// `hooks` field is written. If an old Tokengram hook config exists, it updates it.
 function ensureProjectHookSettings(workspace: string): void {
   const claudeDir = path.join(workspace, '.claude');
   const settingsPath = path.join(claudeDir, 'settings.json');
@@ -379,9 +380,9 @@ function ensureProjectHookSettings(workspace: string): void {
   fs.writeFileSync(settingsPath, JSON.stringify(existing, null, 2), 'utf-8');
 }
 
-// Tokengram MCP girişinin MÜTLƏQ ehtiyac duyduğu env dəyişənləri.
-// Offline flag-lar olmadan sentence-transformers HF online check-də worker
-// thread-i asır (queue_stuck insidenti) — embedding fazası heç bitmir.
+// Env variables the Tokengram MCP entry ABSOLUTELY requires.
+// Without the offline flags, sentence-transformers hangs the worker thread on
+// the HF online check (queue_stuck incident) — the embedding phase never finishes.
 const REQUIRED_MCP_ENV: Record<string, string> = {
   PYTHONUNBUFFERED: '1',
   PYTHONIOENCODING: 'utf-8',
@@ -390,10 +391,10 @@ const REQUIRED_MCP_ENV: Record<string, string> = {
   ANONYMIZED_TELEMETRY: 'False',
 };
 
-// Köhnə extension versiyalarının yazdığı `.mcp.json`-larda offline env-lər yox
-// idi və Re-index onları heç vaxt təmir etmirdi — köhnə tester embedding-də
-// HF şəbəkə yoxlamasına ilişirdi. İndi yalnız ƏSKİK env açarlarını əlavə
-// edirik; command/args/istifadəçinin öz dəyərlərinə toxunulmur.
+// `.mcp.json` files written by older extension versions had no offline env
+// vars, and Re-index never repaired them — old testers got stuck on the HF
+// network check during embedding. Now we only add the MISSING env keys;
+// command/args/the user's own values are left untouched.
 function repairMcpEnv(target: string): void {
   try {
     const raw = fs.readFileSync(target, 'utf-8');
@@ -414,22 +415,23 @@ function repairMcpEnv(target: string): void {
     entry.env = env;
     fs.writeFileSync(target, JSON.stringify(cfg, null, 2), { encoding: 'utf-8' });
   } catch {
-    /* təmir best-effort-dur — pozulmuş JSON-a toxunmuruq */
+    /* repair is best-effort — we don't touch broken JSON */
   }
 }
 
-// Re-index düyməsi əksik `.mcp.json`-u öz-özünə yaradır ki, hər layihə üçün
-// installer-i ProjectPath ilə təkrar işlətməyə ehtiyac qalmasın. Mövcud faylda
-// yalnız əskik məcburi env açarları tamamlanır (repairMcpEnv) — qalanı user-indir.
+// The Re-index button creates a missing `.mcp.json` on its own so there's no
+// need to re-run the installer with ProjectPath for every project. In an
+// existing file, only the missing required env keys are filled in (repairMcpEnv)
+// — the rest belongs to the user.
 function ensureMcpConfigForReindex(workspace: string): ResolvedMcp | null {
   const target = path.join(workspace, '.mcp.json');
   if (fs.existsSync(target)) {
     repairMcpEnv(target);
-    return null; // command/args-a toxunmuruq — resolveMcpServer mövcud faylı oxuyacaq
+    return null; // we don't touch command/args — resolveMcpServer will read the existing file
   }
 
-  // Qlobal install-da `~/.tokengram/venv` olmalıdır. Olmayanda yaradacaq config
-  // işləməyəcək, ona görə də setup-suz mühitə fayl yazmırıq.
+  // A global install must have `~/.tokengram/venv`. Without it, the config we'd
+  // create wouldn't work, so we don't write a file into an unset-up environment.
   if (!fs.existsSync(VENV_PYTHON)) return null;
 
   const cfg = {
@@ -452,10 +454,10 @@ function ensureMcpConfigForReindex(workspace: string): ResolvedMcp | null {
   return entry ? { server: entry, cwd: workspace } : null;
 }
 
-// Açar yoxdursa trial təklif et (reindex uğurundan sonra çağırılır).
-// MCP server ilk tool çağırışında trial-ı onsuz da özü başlada bilir, amma
-// o an offline-dırsa search sadəcə xəta verir — burada istifadəçiyə aydın
-// "bir dəfəlik internet lazımdır" konteksti ilə düymə veririk.
+// If there's no key, offer a trial (called after a successful reindex).
+// The MCP server can start a trial itself on the first tool call, but if it's
+// offline at that moment search simply errors out — here we give the user a
+// button with a clear "one-time internet required" context.
 async function offerTrialIfKeyless(): Promise<void> {
   if (effectiveStatus() !== 'no_key') return;
   const startBtn = tr('trial.startButton');
@@ -521,40 +523,42 @@ function projectRoot(): string | undefined {
   return ws ? findProjectRoot(ws) : undefined;
 }
 
-// ── Deep recovery — kritik donmadan terminal olmadan çıxış ───────────────
-// Uzunömürlü MCP serverləri Claude Code spawn edir (.mcp.json) — extension
-// onları birbaşa restart edə bilmir. AMMA donmuş prosesi PID ilə öldürə bilir;
-// öləndə Claude Code MCP disconnect-i görüb təzə server spawn edir. Recovery:
-//   1) writer/drainer kilidini CANLI tutub irəliləməyən (DB N saniyə yazılmayıb)
-//      donmuş server(lər)i tap və öldür,
-//   2) ölü-PID stale lock + orfan `.tmp.<pid>` fayllarını sil (idempotent),
-//   3) savings history-ni touch edib status bar-ı dərhal yenilə.
+// ── Deep recovery — escape from a critical freeze without a terminal ──────
+// Long-lived MCP servers are spawned by Claude Code (.mcp.json) — the extension
+// can't restart them directly. BUT it can kill a frozen process by PID; when it
+// dies, Claude Code sees the MCP disconnect and spawns a fresh server. Recovery:
+//   1) find and kill the frozen server(s) that hold the writer/drainer lock LIVE
+//      but make no progress (the DB hasn't been written for N seconds),
+//   2) delete dead-PID stale locks + orphan `.tmp.<pid>` files (idempotent),
+//   3) touch the savings history and refresh the status bar immediately.
 const LOCK_NAMES = ['.tokengram.writer.lock', '.tokengram.drainer.lock'];
-// Donmuş server LEADER lock-u tuta bilər (writer/drainer YOX) — onu da kill +
-// stale-clear namizədinə qat. 2026-06-18 insidenti: server model-yükündə
-// C-extension (torch/HNSW) GIL-i tutub donmuşdu, yalnız `.tokengram.leader.lock`
-// saxlayırdı → köhnə detektor (writer/drainer-ə baxırdı) "healthy" deyirdi,
-// içəri-proses watchdog isə GIL boşalmadığı üçün os._exit edə bilmirdi. Yeganə
-// etibarlı xilas: extension (ayrı proses) prosesi PID ilə öldürsün.
+// A frozen server may hold the LEADER lock (NOT writer/drainer) — add it to the
+// kill + stale-clear candidates too. 2026-06-18 incident: the server froze
+// during model load with a C-extension (torch/HNSW) holding the GIL, holding
+// only `.tokengram.leader.lock` → the old detector (which looked at
+// writer/drainer) reported "healthy", while the in-process watchdog couldn't
+// os._exit because the GIL was never released. The only reliable rescue: have
+// the extension (a separate process) kill the process by PID.
 const HOLDER_LOCK_NAMES = [
   '.tokengram.writer.lock',
   '.tokengram.drainer.lock',
   '.tokengram.leader.lock',
 ];
-// İndeksləmə bu qədər saniyə irəliləmirsə (chroma.sqlite3 / .processing mtime
-// yenilənmir) = donub. Soyuq model yükü (~70s) eşikdən aşağıdır ki, canlı uzun
-// indeks yanlışlıqla öldürülməsin (2026-06-17: real donma 13 dəq idi).
+// If indexing makes no progress for this many seconds (chroma.sqlite3 /
+// .processing mtime not updated) = frozen. The cold model load (~70s) is below
+// the threshold so a live long-running index isn't killed by mistake
+// (2026-06-17: a real freeze was 13 min).
 const DB_NOPROGRESS_SEC = 120;
 
 function isPidAlive(pid: number): boolean {
   if (!pid || pid <= 0) return false;
   try {
-    // sig 0 = yalnız mövcudluq yoxlaması. Node-da ÖLDÜRMÜR (Python os.kill-dən
-    // fərqli — orada Windows-da sig 0 prosesi öldürür).
+    // sig 0 = existence check only. In Node it does NOT kill (unlike Python's
+    // os.kill — there, on Windows, sig 0 kills the process).
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'EPERM'; // var, amma icazə yox
+    return (e as NodeJS.ErrnoException).code === 'EPERM'; // exists, but no permission
   }
 }
 
@@ -573,11 +577,11 @@ function killPid(pid: number): boolean {
   }
 }
 
-// Kilid faylından {pid, ts} oxu. KRİTİK: canlı writer.lock yalnız 0-cı baytı
-// kilidləyir, JSON isə offset 1-dədir (db_guard._acquire_lock). Bütün faylı
-// oxumaq kilidli 0-cı bayta görə fail olur — ona görə offset 1-dən də sınayırıq.
-// drainer.lock (advisory) tam oxunur. Beləcə DONMUŞ writer.lock sahibinin
-// PID-ni belə (kilid tutulu ikən) ala bilirik.
+// Read {pid, ts} from a lock file. CRITICAL: a live writer.lock locks only
+// byte 0, while the JSON is at offset 1 (db_guard._acquire_lock). Reading the
+// whole file fails on the locked byte 0 — so we also try from offset 1. The
+// drainer.lock (advisory) is read in full. This way we can get even a FROZEN
+// writer.lock owner's PID (while the lock is held).
 function readLockOwner(p: string): { pid?: number; ts?: number } | null {
   const parse = (s: string): { pid?: number; ts?: number } | null => {
     const a = s.indexOf('{');
@@ -595,26 +599,27 @@ function readLockOwner(p: string): { pid?: number; ts?: number } | null {
     const r = parse(fs.readFileSync(p, 'utf-8'));
     if (r) return r;
   } catch {
-    /* byte 0 kilidli ola bilər — aşağıda offset 1-dən sına */
+    /* byte 0 may be locked — try from offset 1 below */
   }
   try {
     const fd = fs.openSync(p, 'r');
     try {
       const buf = Buffer.alloc(256);
-      const n = fs.readSync(fd, buf, 0, 256, 1); // faylda offset 1-dən oxu
+      const n = fs.readSync(fd, buf, 0, 256, 1); // read from offset 1 in the file
       return parse(buf.toString('utf-8', 0, n));
     } finally {
       fs.closeSync(fd);
     }
   } catch {
-    /* yox */
+    /* none */
   }
   return null;
 }
 
-// Ölü-PID lock faylları + orfan `.tokengram.*.lock.tmp.<pid>` (kəsilmiş atomik
-// yazı) sil. Yalnız sahib PID ÖLÜBSƏ — canlıya toxunma. db_guard.clear_stale_locks
-// ilə eyni məntiq (TS tərəfi, server rebuild olmadan dərhal işləsin deyə).
+// Delete dead-PID lock files + orphan `.tokengram.*.lock.tmp.<pid>` (truncated
+// atomic write). Only if the owner PID is DEAD — never touch a live one. Same
+// logic as db_guard.clear_stale_locks (the TS side, so it works immediately
+// without a server rebuild).
 function clearStaleLocks(root: string): string[] {
   const cleared: string[] = [];
   let entries: string[] = [];
@@ -627,13 +632,13 @@ function clearStaleLocks(root: string): string[] {
     const full = path.join(root, name);
     if (HOLDER_LOCK_NAMES.includes(name)) {
       const owner = readLockOwner(full);
-      // Oxunmursa (canlı byte-lock) və ya sahib canlıdırsa → toxunma.
+      // If unreadable (live byte-lock) or the owner is alive → leave it alone.
       if (owner && typeof owner.pid === 'number' && !isPidAlive(owner.pid)) {
         try {
           fs.unlinkSync(full);
           cleared.push(name);
         } catch {
-          /* başqası tutub — keç */
+          /* held by someone else — skip */
         }
       }
       continue;
@@ -644,15 +649,15 @@ function clearStaleLocks(root: string): string[] {
         fs.unlinkSync(full);
         cleared.push(name);
       } catch {
-        /* keç */
+        /* skip */
       }
     }
   }
   return cleared;
 }
 
-// Növbədə gözləyən UNİKAL fayl sayı (.mla_pending.txt + .processing birləşib).
-// Bar-dakı ⟳N ilə eyni — dublikatlar bir sayılır.
+// Count of UNIQUE files waiting in the queue (.mla_pending.txt + .processing
+// merged). Same as the ⟳N in the bar — duplicates count once.
 function uniquePendingCount(root: string): number {
   const set = new Set<string>();
   for (const name of ['.mla_pending.txt', '.mla_pending.processing']) {
@@ -662,15 +667,15 @@ function uniquePendingCount(root: string): number {
         if (t) set.add(t);
       }
     } catch {
-      /* fayl yoxdur */
+      /* file missing */
     }
   }
   return set.size;
 }
 
-// İndeksləmə fəaliyyətindən keçən saniyə: drain irəlilədikcə chroma.sqlite3
-// (yazı) və/və ya .processing (növbə təhvili) mtime-ı yenilənir. Ən təzə
-// toxunuşdan keçən vaxt — bu DB_NOPROGRESS-dən böyükdürsə drain dayanıb.
+// Seconds since the last indexing activity: as the drain progresses, the
+// mtime of chroma.sqlite3 (write) and/or .processing (queue handoff) updates.
+// Time since the most recent touch — if it exceeds DB_NOPROGRESS the drain has stalled.
 function indexingActivityAgeSec(root: string): number {
   let newest = 0;
   const paths = [
@@ -682,14 +687,14 @@ function indexingActivityAgeSec(root: string): number {
       const m = fs.statSync(p).mtimeMs;
       if (m > newest) newest = m;
     } catch {
-      /* yox */
+      /* none */
     }
   }
   if (newest === 0) return Infinity;
   return (Date.now() - newest) / 1000;
 }
 
-// Bütün lock fayllarını (writer + drainer + LEADER) tutan CANLI PID-lər.
+// LIVE PIDs holding any lock file (writer + drainer + LEADER).
 function liveLockHolders(root: string): number[] {
   const pids = new Set<number>();
   for (const name of HOLDER_LOCK_NAMES) {
@@ -711,20 +716,21 @@ interface RecoveryResult {
   stuck: boolean;
 }
 
-// Növbə-əsaslı donma aşkarı (köhnə yalnız-writer/drainer-lock yanaşmasını əvəz
-// edir): görüləsi iş var (pending>0) AMMA indeksləmə DB_NOPROGRESS-dir irəliləmir
-// → donub. Donmuş halda: bütün CANLI lock sahiblərini (LEADER daxil) öldür,
-// ölü-PID stale lock + orfanları sil. Drenləmənin ÖZÜ (reindex) çağıran tərəfdə
-// edilir (extensionPath lazımdır) — kill yalnız donmuş prosesi azad edir.
+// Queue-based freeze detection (replaces the old writer-only/drainer-lock
+// approach): there is work to do (pending>0) BUT indexing is DB_NOPROGRESS, not
+// advancing → frozen. When frozen: kill all LIVE lock holders (including LEADER),
+// remove dead-PID stale locks + orphans. The drain ITSELF (reindex) is done on
+// the caller side (needs extensionPath) — kill only frees the frozen process.
 function deepRecover(root: string): RecoveryResult {
   const pending = uniquePendingCount(root);
   const activityAgeSec = indexingActivityAgeSec(root);
-  // "Donmuş" üçün ÜÇ şərt birlikdə lazımdır: (1) görüləsi iş var (pending>0),
-  // (2) indeksləmə DB_NOPROGRESS-dir irəliləmir, (3) CANLI bir proses lock tutub.
-  // 3-cü şərt kritikdir: canlı lock sahibi yoxdursa öldürüləsi DONMUŞ proses də
-  // yoxdur — ya server ümumiyyətlə işləmir, ya növbə orfandır. O halda "stuck"
-  // demək = "killed 0 frozen process(es)" kimi YALANÇI alarm. holders-i kill-dən
-  // ƏVVƏL bir dəfə oxuyuruq (kill onları öldürəndən sonra siyahı boşalır).
+  // "Frozen" requires THREE conditions together: (1) there is work to do (pending>0),
+  // (2) indexing is DB_NOPROGRESS, not advancing, (3) a LIVE process holds a lock.
+  // The 3rd condition is critical: if there is no live lock holder, there is no
+  // FROZEN process to kill either — either the server is not running at all, or the
+  // queue is orphaned. In that case saying "stuck" = a FALSE alarm like
+  // "killed 0 frozen process(es)". We read holders ONCE BEFORE the kill (the list
+  // empties out after kill terminates them).
   const holders = liveLockHolders(root);
   const stuck =
     pending > 0 && activityAgeSec > DB_NOPROGRESS_SEC && holders.length > 0;
@@ -734,9 +740,9 @@ function deepRecover(root: string): RecoveryResult {
       if (killPid(pid)) killed.push(pid);
     }
   }
-  // Öldürdükdən sonra: indi-ölü sahiblərin lock faylları + orfanları təmizlə.
+  // After killing: clear the lock files of the now-dead holders + orphans.
   const cleared = clearStaleLocks(root);
-  // Status bar-ı dərhal yenilə (heç vaxt "heç nə etmədi" olmasın).
+  // Refresh the status bar immediately (so it never looks like "did nothing").
   const history = path.join(root, '.mla_savings_history.jsonl');
   try {
     const now = new Date();
@@ -745,18 +751,18 @@ function deepRecover(root: string): RecoveryResult {
     try {
       fs.writeFileSync(history, '', { encoding: 'utf-8', flag: 'a' });
     } catch {
-      /* yox */
+      /* none */
     }
   }
   return { killed, cleared, pending, activityAgeSec, stuck };
 }
 
-// Avtomatik recovery (autoRecoverIfStuck) SİLİNDİ (2026-06-19 yenidən-qurma):
-// köhnə davamlı poll-drain + watchdog/self-heal qülləsi getdi → "GIL-donmuş
-// server" halı artıq mövcud deyil, ona görə bar dövründən avtomatik kill+reindex
-// də lazım deyil. Növbə task sonu Stop hook-da (server bağlısa onun soyuq
-// fallback-ı ilə) drenlənir. Manual eskalasiya: aşağıdakı `refresh` (deepRecover)
-// və `reindex` düymələri qalır.
+// Automatic recovery (autoRecoverIfStuck) was REMOVED (2026-06-19 rebuild):
+// the old continuous poll-drain + watchdog/self-heal tower is gone → the
+// "GIL-frozen server" case no longer exists, so automatic kill+reindex from the
+// bar cycle is no longer needed either. The queue is drained at task end in the
+// Stop hook (via its cold fallback if the server is closed). Manual escalation:
+// the `refresh` (deepRecover) and `reindex` buttons below remain.
 
 async function runAction(action: MenuItem['action'], root: string, extensionPath: string) {
   const channel = vscode.window.createOutputChannel('MLA Agent');
@@ -791,9 +797,10 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
       break;
     }
     case 'refresh': {
-      // venv interpreter yoxdursa (qırıq/partial venv) bərpa mənasızdır — drenləyən
-      // proses ola bilməz. "İndeksləyirəm..." deyib sonra Setup-a atmaq əvəzinə
-      // dərhal tək aydın mesaj ver (2026-06-19 partial-venv UX).
+      // If the venv interpreter is missing (broken/partial venv), recovery is
+      // pointless — there can be no draining process. Instead of saying
+      // "Indexing..." and then dumping into Setup, give a single clear message
+      // right away (2026-06-19 partial-venv UX).
       if (!fs.existsSync(VENV_PYTHON)) {
         const setupBtn = tr('menu.runSetupButton');
         const action = await vscode.window.showWarningMessage(
@@ -815,8 +822,8 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
       );
 
       if (result.stuck) {
-        // Donmuş drain — sahibləri öldürdük (varsa). İNDİ avtomatik reindex ilə
-        // drenlə: "healthy deyir amma N fayl ilişib" UX-i bitir, düymə ƏSL düzəldir.
+        // Frozen drain — we killed the holders (if any). NOW drain via automatic
+        // reindex: ends the "says healthy but N files stuck" UX; the button ACTUALLY fixes it.
         const mins = Math.floor(result.activityAgeSec / 60);
         vscode.window.showWarningMessage(
           tr('menu.refreshRecovered', {
@@ -827,12 +834,12 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
         );
         await runAction('reindex', root, extensionPath);
       } else if (result.pending > 0) {
-        // Növbə var, amma donma yox. İki hal:
-        //  - canlı sahib var → server aktiv drenləyir (soyuq yük/aktiv drain),
-        //    nə öldür nə reindex; sadəcə "gedir" de.
-        //  - canlı sahib yox → orfan növbə (server işləmir). İstifadəçi dərin
-        //    bərpa düyməsinə basıb — növbəni özümüz incremental reindex ilə
-        //    drenləyirik (collision yox, çünki canlı indeksləyici yoxdur).
+        // There is a queue, but no freeze. Two cases:
+        //  - live holder exists → the server is actively draining (cold load/active
+        //    drain), neither kill nor reindex; just say "in progress".
+        //  - no live holder → orphan queue (server not running). The user pressed the
+        //    deep recovery button — we drain the queue ourselves via incremental
+        //    reindex (no collision, because there is no live indexer).
         if (liveLockHolders(root).length === 0) {
           vscode.window.showInformationMessage(
             tr('menu.refreshDraining', { pending: result.pending }),
@@ -844,12 +851,12 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
           );
         }
       } else if (result.cleared.length > 0) {
-        // Növbə boş, amma ölü-proses qalıq kilidləri təmizləndi.
+        // Queue empty, but residual dead-process locks were cleared.
         vscode.window.showInformationMessage(
           tr('menu.refreshCleared', { cleared: result.cleared.length }),
         );
       } else {
-        // Hər şey sağlam — sadəcə bar yeniləndi.
+        // Everything healthy — just the bar was refreshed.
         vscode.window.showInformationMessage(tr('menu.refreshResult'));
       }
       break;
@@ -904,16 +911,16 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
       break;
     }
     case 'reindex': {
-      // Tam layihə setup-u: hooks (~/.tokengram), per-project hook bindings,
-      // .mcp.json və nəhayət `--reindex` çağırışı. Hər addım yalnız əksik
-      // olduqda işləyir — mövcud user faylları üzərinə yazılmır.
+      // Full project setup: hooks (~/.tokengram), per-project hook bindings,
+      // .mcp.json and finally the `--reindex` call. Each step runs only when
+      // missing — it does not overwrite existing user files.
       const hooksOk = ensureGlobalHooks(extensionPath);
       if (!hooksOk && !fs.existsSync(path.join(TOKENGRAM_HOME, 'hooks', 'pre_read_check.py'))) {
         vscode.window.showWarningMessage(tr('menu.reindexHooksMissing'));
       } else {
         ensureProjectHookSettings(root);
-        // search_code-a yönləndirən idarə olunan CLAUDE.md bloku (setupWizard
-        // ilə eyni). Re-index yolu da activation yolu ilə paritet olsun.
+        // Managed CLAUDE.md block that steers toward search_code (same as
+        // setupWizard). Keep the Re-index path in parity with the activation path.
         ensureClaudeMdGuidance(root);
       }
 
@@ -928,15 +935,16 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
       }
       let { server } = resolved;
       const { cwd: serverCwd } = resolved;
-      // .mcp.json mütləq python.exe yoluna işarə edə bilər, amma o interpreter
-      // fiziki olaraq YOXDUR (venv silinib/yarımçıq qalıb) → cp.spawn xam
-      // "ENOENT" verir, istifadəçi səbəbi anlamır (2026-06-19 tester insidenti).
-      // Spawn-dan ƏVVƏL yoxla: command bir yol (path-separator var) və mövcud
-      // deyilsə, canlı VENV_PYTHON ilə əvəz et; o da yoxdursa Setup-a yönəlt.
+      // .mcp.json may point to an absolute python.exe path, but that interpreter
+      // does not physically EXIST (venv deleted/left half-built) → cp.spawn gives
+      // a raw "ENOENT" and the user can't tell why (2026-06-19 tester incident).
+      // Check BEFORE spawn: if command is a path (has a path separator) and does
+      // not exist, replace it with the live VENV_PYTHON; if that's missing too,
+      // route to Setup.
       const cmdIsPath = /[\\/]/.test(server.command);
       if (cmdIsPath && !fs.existsSync(server.command)) {
         if (fs.existsSync(VENV_PYTHON)) {
-          // venv var, sadəcə .mcp.json köhnə/yanlış yola baxır — canlı yolla işlət.
+          // venv exists, .mcp.json just points to an old/wrong path — run with the live path.
           server = { ...server, command: VENV_PYTHON };
         } else {
           const setupBtn = tr('menu.runSetupButton');
@@ -951,9 +959,9 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
         }
       }
       const serverArgs = server.args ?? [];
-      // İncremental (default): yalnız dəyişən faylları yenidən embed edir
-      // (dəyişməyənləri hash ilə atlayır). İlk dəfə (boş index) onsuz da hamısını
-      // qurur. `--fresh` (tam silmə) yalnız format dəyişikliyi/korrupsiya üçündür.
+      // Incremental (default): re-embeds only changed files (skips unchanged ones
+      // by hash). On the first run (empty index) it builds everything anyway.
+      // `--fresh` (full wipe) is only for format changes/corruption.
       const reindexArgs = [...serverArgs, '--reindex', root];
       const serverEnv = server.env ?? {};
       try {
@@ -979,14 +987,15 @@ async function runAction(action: MenuItem['action'], root: string, extensionPath
           },
         );
         vscode.window.showInformationMessage(tr('menu.reindexDone'));
-        // Açarsız maşında reindex uğurla bitir, amma search_code lisenziya
-        // xətası verəcək — tester "reindex pozdu" düşünür. Burada trial
-        // təklif edirik ki, axtarış işləməyə başlasın.
+        // On a keyless machine reindex completes successfully, but search_code
+        // will raise a license error — the tester thinks "reindex broke it". Here
+        // we offer a trial so that search starts working.
         void offerTrialIfKeyless();
       } catch (e) {
         const msg = (e as Error).message ?? String(e);
-        // Spawn ENOENT (interpreter yoxdur — pre-check tutmayıbsa, məs. PATH-dakı
-        // `python` tapılmır): xam "ENOENT" əvəzinə aydın Setup yönləndirməsi ver.
+        // Spawn ENOENT (interpreter missing — if the pre-check didn't catch it,
+        // e.g. `python` on PATH is not found): instead of a raw "ENOENT", give a
+        // clear redirect to Setup.
         if ((e as NodeJS.ErrnoException).code === 'ENOENT' || /\bENOENT\b/.test(msg)) {
           channel.clear();
           channel.appendLine(msg);
@@ -1141,8 +1150,8 @@ export function registerMenuCommand(
       await runAction(pick.action, root, context.extensionPath);
     } catch (err) {
       const m = (err as Error).message ?? String(err);
-      // İstənilən action-da interpreter ENOENT-i (məs. 'sync' → savings_report.py
-      // qırıq venv python ilə): xam "spawn python ENOENT" əvəzinə Setup yönləndir.
+      // Interpreter ENOENT in any action (e.g. 'sync' → savings_report.py with a
+      // broken venv python): instead of a raw "spawn python ENOENT", redirect to Setup.
       if ((err as NodeJS.ErrnoException).code === 'ENOENT' || /\bENOENT\b/.test(m)) {
         const setupBtn = tr('menu.runSetupButton');
         const action = await vscode.window.showWarningMessage(
@@ -1164,10 +1173,10 @@ export function registerMenuCommand(
   });
 }
 
-// Spawn olunan reindex CLI child-ları izlənir ki, pəncərə bağlananda (extension
-// deactivate) və ya istifadəçi ləğv edəndə orphan qalmasınlar. Windows-da parent
-// (extension host) öləndə uşaq proses avtomatik ölmür → Task Manager-də python
-// asılı qalırdı. deactivate() bunları kill edir.
+// Spawned reindex CLI children are tracked so they don't become orphans when the
+// window closes (extension deactivate) or the user cancels. On Windows, when the
+// parent (extension host) dies the child process does not die automatically →
+// python would hang around in Task Manager. deactivate() kills these.
 const _activeReindexChildren = new Set<cp.ChildProcess>();
 
 export function killActiveReindexChildren(): void {
@@ -1175,7 +1184,7 @@ export function killActiveReindexChildren(): void {
     try {
       child.kill();
     } catch {
-      /* artıq ölüb — əhəmiyyətsiz */
+      /* already dead — irrelevant */
     }
   }
   _activeReindexChildren.clear();
@@ -1189,11 +1198,11 @@ export function killActiveReindexChildren(): void {
 // Stage map (matches the banners printed by mcp_server._cli_reindex):
 //   start          →  5%   "Starting Tokengram..."
 //   [1/3] scan     → 20%   "Files being scanned"
-//   [KEYWORD]      → 45%   "Keyword search ready" (faza 1 bitdi)
+//   [KEYWORD]      → 45%   "Keyword search ready" (phase 1 done)
 //   [2/3] model    → 55%, slow-fill to 70% over ~45s for first-run HF download
-//   [3/3] N chunk  → 72%   "Indexing chunks" (banner, rəqəmsiz)
-//   [3/3] done/tot → 72→99% canlı embedding progress (hər batch-da)
-//   ✓ Hazır         → 100% (success)
+//   [3/3] N chunk  → 72%   "Indexing chunks" (banner, no number)
+//   [3/3] done/tot → 72→99% live embedding progress (per batch)
+//   ✓ Done          → 100% (success)
 function streamingReindex(
   bin: string,
   args: string[],
@@ -1208,7 +1217,7 @@ function streamingReindex(
       cwd,
       env: { ...process.env, CLAUDE_PROJECT_DIR: cwd, ...extraEnv },
     });
-    // Orphan qarşısı: izlə + ləğv/bağlanışda kill.
+    // Orphan prevention: track + kill on cancel/close.
     _activeReindexChildren.add(child);
     const cancelSub = token?.onCancellationRequested(() => {
       try {
@@ -1244,7 +1253,7 @@ function streamingReindex(
     const startModelFill = () => {
       stopModelFill();
       const startedAt = Date.now();
-      const cap = 70; // embedding stream (72→99%) buradan götürür; üst-üstə düşməsin
+      const cap = 70; // the embedding stream (72→99%) takes over from here; avoid overlap
       const expectedMs = 45_000; // first-run HF model download; cached is ~2s
       const start = value;
       modelFillTimer = setInterval(() => {
@@ -1275,11 +1284,12 @@ function streamingReindex(
         if (!trimmed) continue;
         captured.push(trimmed);
 
-        // Faza 1 — keyword indeksi hazırdır (embedding hələ davam edir).
-        // İstifadəçi bu nöqtədə artıq keyword axtarışı edə bilər.
+        // Phase 1 — the keyword index is ready (embedding still in progress).
+        // The user can already run keyword searches at this point.
         if (/^\[KEYWORD\]/.test(trimmed)) {
           stopModelFill();
-          const kf = trimmed.match(/(\d+)\s*fayl/);
+          // The CLI banner labels the file count as "fayl" (legacy) or "file".
+          const kf = trimmed.match(/(\d+)\s*(?:fayl|file)/);
           const kc = trimmed.match(/(\d+)\s*chunk/);
           const detail =
             kf && kc ? ` (${kf[1]} files · ${kc[1]} chunks)` : '';
@@ -1298,14 +1308,15 @@ function streamingReindex(
             startModelFill();
           } else if (n === '3') {
             stopModelFill();
-            // Streaming "done/total chunk (pct%) · N fayl" — canlı sür (72→99%).
+            // Streaming "done/total chunk (pct%) · N files" — live speed (72→99%).
             const m = tail.match(/(\d+)\s*\/\s*(\d+)/);
             if (m) {
               const done = parseInt(m[1], 10);
               const total = parseInt(m[2], 10) || 1;
               const frac = Math.min(1, done / total);
               const pct = Math.round(frac * 100);
-              const filesM = tail.match(/(\d+)\s*fayl/);
+              // The CLI banner labels the file count as "fayl" (legacy) or "file".
+              const filesM = tail.match(/(\d+)\s*(?:fayl|file)/);
               const filesPart = filesM ? ` · ${filesM[1]} files` : '';
               jumpTo(
                 72 + Math.round((99 - 72) * frac),
@@ -1318,7 +1329,15 @@ function streamingReindex(
           continue;
         }
 
-        if (/^\s*✓\s*Haz[ıi]r/i.test(trimmed) || /Hazır:.*indeksl/i.test(trimmed)) {
+        // The CLI success banner is "✓ Ready: N chunks indexed". Older wheels
+        // emitted the Azerbaijani "Haz<i>r: N chunk indekslendi" (the middle vowel
+        // may be a dotless "i", U+0131). Match both forms — the \u escape keeps
+        // the byte match exact without a non-ASCII char in source — so a mixed
+        // deploy (new extension + old wheel, or vice versa) still detects done.
+        if (
+          /^\s*✓\s*(Ready\b|Haz[\u0131i]r)/i.test(trimmed) ||
+          /(Ready:.*\bindexed\b|Haz[\u0131i]r:.*indeksl)/i.test(trimmed)
+        ) {
           stopModelFill();
           jumpTo(100, 'Done');
         }
@@ -1340,9 +1359,9 @@ function streamingReindex(
         jumpTo(100);
         resolve();
       } else if (code === 3) {
-        // mcp_server._cli_reindex: indeks korlanıb VƏ başqa proses onu açıq
-        // saxlayır (self-heal köçürə bilmədi). Ümumi "exited with code 3"
-        // əvəzinə aydın bərpa addımı göstər.
+        // mcp_server._cli_reindex: the index is corrupted AND another process is
+        // holding it open (self-heal couldn't relocate it). Instead of the generic
+        // "exited with code 3", show a clear recovery step.
         reject(
           new Error(
             'Index corruption detected and the database is locked by another process. ' +
@@ -1350,11 +1369,11 @@ function streamingReindex(
           ),
         );
       } else if (code === 4) {
-        // Yalnız kilid timeout-u — korrupsiya yoxdur. Fon işçisi (leader drain)
-        // onsuz da növbəni indeksləyir. Əvvəlki "wait a minute, click again"
-        // mesajı user-i çaşdırırdı; indi onları status bar-dakı CANLI ⟳ sayğacına
-        // yönəldirik — indeksləmə öz-özünə bitir və spinner itir (manual təkrar
-        // Re-index lazım deyil).
+        // Lock timeout only — no corruption. The background worker (leader drain)
+        // is indexing the queue anyway. The previous "wait a minute, click again"
+        // message confused users; now we point them to the LIVE ⟳ counter in the
+        // status bar — indexing finishes on its own and the spinner disappears (no
+        // manual Re-index needed).
         reject(
           new Error(
             'Tokengram is already indexing in the background — watch the ⟳ count in the ' +

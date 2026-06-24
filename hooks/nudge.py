@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
-"""Tokengram hooks üçün BLOKLAMAYAN yönləndirmə (nudge) köməkçisi.
+"""NON-BLOCKING steering (nudge) helper for Tokengram hooks.
 
-Məqsəd: agent tam fayl oxuduqda / geniş Grep etdikdə ona "növbəti dəfə
-search_code işlət" deyə MODELƏ görünən qısa mesaj çatdırmaq — amma HEÇ VAXT
-tool-u bloklamadan və xəta vermədən.
+Goal: when the agent reads a full file / does a broad Grep, deliver a short
+MODEL-VISIBLE message telling it to "use search_code next time" — but WITHOUT
+ever blocking the tool or raising an error.
 
-Mexanizm (Claude Code rəsmi kontraktı):
-  stdout-a exit 0 ilə {"hookSpecificOutput": {"hookEventName": ..,
-  "additionalContext": ..}} yazmaq → tool normal işləyir + mətn modelə düşür.
-  `permissionDecision: "deny"` / exit 2 ASLA istifadə olunmur (bunlar bloklayır).
+Mechanism (Claude Code official contract):
+  writing {"hookSpecificOutput": {"hookEventName": ..,
+  "additionalContext": ..}} to stdout with exit 0 → the tool runs normally + the
+  text reaches the model.
+  `permissionDecision: "deny"` / exit 2 are NEVER used (those block).
 
-Rate-limit: modelin kontekstini doldurmamaq üçün
-  * pəncərə başına ən çox GLOBAL_CAP nudge (bütün hook-lar paylaşır),
-  * eyni açar FILE_COOLDOWN müddətində təkrar nudge olunmur.
-State per-machine `chroma_db/.nudge_state.json`-da saxlanır (chroma_db onsuz da
-hər layihədə gitignore-dadır → yeni gitignore sətri lazım deyil). chroma_db
-yoxdursa project root-a düşür.
+Rate-limit: to avoid filling the model's context
+  * at most GLOBAL_CAP nudges per window (shared across all hooks),
+  * the same key is not nudged again within FILE_COOLDOWN.
+State is stored per-machine in `chroma_db/.nudge_state.json` (chroma_db is already
+gitignored in every project → no new gitignore line needed). If chroma_db is
+missing, it falls back to the project root.
 
-Hər funksiya tam müdafiəlidir: istənilən xəta → nudge YOX, amma hook sınmır.
+Every function is fully guarded: any error → NO nudge, but the hook never breaks.
 """
 import json
 import sys
 import time
 from pathlib import Path
 
-GLOBAL_WINDOW = 3600   # saniyə — rate-limit pəncərəsi
-GLOBAL_CAP = 6         # pəncərə ərzində maksimum nudge sayı (hamısı birlikdə)
-FILE_COOLDOWN = 1800   # eyni açar bu müddətdə təkrar nudge olunmur
+GLOBAL_WINDOW = 3600   # seconds — rate-limit window
+GLOBAL_CAP = 6         # max number of nudges within the window (all combined)
+FILE_COOLDOWN = 1800   # the same key is not nudged again within this period
 
 
 def _state_path(project_root: Path) -> Path:
@@ -47,11 +48,12 @@ def _load(p: Path) -> dict:
 
 
 def should_nudge(project_root, key) -> bool:
-    """`key` üçün indi nudge etmək olarmı? İcazə varsa qeyd edib True qaytarır.
+    """May we nudge for `key` now? If allowed, records it and returns True.
 
-    Rate-limit: GLOBAL_WINDOW ərzində <= GLOBAL_CAP nudge VƏ eyni açar
-    FILE_COOLDOWN-dan tez təkrar olunmur. Best-effort — yarış halında ən pisi
-    bir əlavə nudge (zərərsiz). İstənilən xəta → False (nudge yox), hook sınmaz.
+    Rate-limit: <= GLOBAL_CAP nudges within GLOBAL_WINDOW AND the same key is
+    not repeated sooner than FILE_COOLDOWN. Best-effort — in a race the worst
+    case is one extra nudge (harmless). Any error -> False (no nudge); the hook
+    never breaks.
     """
     try:
         now = time.time()
@@ -84,10 +86,11 @@ def _save(p: Path, state: dict) -> None:
 
 
 def emit(additional_context, event="PreToolUse") -> None:
-    """Bloklamayan additionalContext JSON-u stdout-a yaz (sonra exit 0 olmalıdır).
+    """Write the non-blocking additionalContext JSON to stdout (then exit 0).
 
-    `permissionDecision` QOYULMUR → tool normal axarla işləyir. Yalnız mətn
-    modelə əlavə olunur. İstənilən xəta udulur — hook sınmaz.
+    `permissionDecision` is NOT set -> the tool runs through its normal flow.
+    Only text is added for the model. Any error is swallowed — the hook never
+    breaks.
     """
     try:
         sys.stdout.write(json.dumps({

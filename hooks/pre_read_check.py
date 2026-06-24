@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""PreToolUse hook — Read tool-u indekslənmiş fayllar üçün tənzimləyir.
+"""PreToolUse hook — adjusts the Read tool for indexed files.
 
-WARN-ONLY (heç vaxt block etmir — block redaktəni sındırırdı):
-  >= THRESHOLD_WARN   → exit 0 (allow) + yumşaq məsləhət: search_code daha sərfəli (stderr)
+WARN-ONLY (never blocks — blocking broke editing):
+  >= THRESHOLD_WARN   → exit 0 (allow) + a soft hint: search_code is cheaper (stderr)
   < THRESHOLD_WARN    → exit 0 (silent allow)
-chunked Read (limit) və hər ölçü fayl həmişə icazəlidir.
+A chunked Read (limit) and a file of any size are always allowed.
 """
 import json
 import os
@@ -12,8 +12,8 @@ import sys
 import time
 from pathlib import Path
 
-# Windows-da AZ locale-ında stderr-ə Azərbaycan hərfləri yazsa cp1252 escape
-# olmasın deyə (savings_report-da göründüyü kimi).
+# On Windows with an AZ locale, force UTF-8 so writing non-ASCII letters to
+# stderr doesn't get cp1252-escaped (as seen in savings_report).
 if sys.platform == "win32":
     try:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -30,11 +30,11 @@ try:
     from project_root import find_project_root
     from atomic_write import append_atomic
 except Exception:
-    # Dependency moduldan biri tapılmadı (natamam install və s.) — Read-i HEÇ
-    # vaxt block etmə. Fail open: səssiz icazə ver (exit 0 = allow).
+    # One of the dependency modules wasn't found (incomplete install, etc.) —
+    # NEVER block the Read. Fail open: silently allow (exit 0 = allow).
     sys.exit(0)
 
-# Nudge köməkçisi ayrıca try-da: yoxdursa hook normal işləməyə davam etsin.
+# The nudge helper is in a separate try: if it's missing, the hook keeps working normally.
 try:
     from nudge import should_nudge, emit
 except Exception:
@@ -46,10 +46,10 @@ except Exception:
 
 
 def _nudge_large_read(project_root, file_path, lines, tokens):
-    """Böyük tam Read-də modelə BLOKLAMADAN search_code/chunked məsləhəti çatdır.
+    """On a large full Read, give the model a search_code/chunked hint WITHOUT BLOCKING.
 
-    Read onsuz da baş verir (exit 0, permissionDecision yoxdur) — yalnız mətn
-    əlavə olunur. Rate-limited (fayl başına bir dəfə, pəncərə cap-i ilə)."""
+    The Read happens anyway (exit 0, no permissionDecision) — only text is
+    added. Rate-limited (once per file, with a window cap)."""
     if should_nudge(project_root, f"read:{file_path}"):
         emit(
             f"Tokengram tip: '{file_path.name}' is large (~{int(lines)} lines, "
@@ -59,15 +59,15 @@ def _nudge_large_read(project_root, file_path, lines, tokens):
             event="PreToolUse",
         )
 
-# DİQQƏT: artıq HARD-BLOCK YOXDUR. Əvvəl 50+ sətirlik faylın tam Read-i
-# bloklanırdı (exit 2) → Edit əvvəlcə Read tələb etdiyi üçün redaktə tamamilə
-# sınırdı, istifadəçi /MlaOff-a məcbur olurdu. Bu səhv idi: enforcement-in
-# məqsədi böyük EXPLORATION oxumalarını search_code-a yönləndirib token qənaət
-# etməkdir — redaktəni dağıtmaq YOX.
+# NOTE: there is NO MORE HARD-BLOCK. Previously a full Read of a 50+ line file
+# was blocked (exit 2) → since Edit requires a Read first, editing broke
+# completely and the user was forced to /MlaOff. That was wrong: the goal of
+# enforcement is to redirect large EXPLORATION reads to search_code and save
+# tokens — NOT to wreck editing.
 #
-# İndi hook YALNIZ XƏBƏRDARLIQ edir (heç vaxt block): böyük faylda "search_code
-# daha sərfəlidir" deyir, amma oxumağa həmişə icazə verir. Qənaət agent
-# təklifə əməl edib search_code/chunked Read işlədəndə gəlir.
+# Now the hook ONLY WARNS (never blocks): on a large file it says "search_code is
+# cheaper", but it always allows the read. The saving comes when the agent follows
+# the suggestion and uses search_code/a chunked Read.
 THRESHOLD_WARN = 250
 
 # Average chars per line for estimating "limit-bounded Read" cost when only
@@ -76,7 +76,7 @@ AVG_CHARS_PER_LINE = 80
 
 
 def _log_read_pass(session_log, file_path, estimated_tokens, reason):
-    """Bypassed / silent-allowed Read-i real-spend bucket-inə salır."""
+    """Puts a bypassed / silent-allowed Read into the real-spend bucket."""
     record = {
         "ts": time.time(),
         "type": "read_pass",
@@ -88,11 +88,11 @@ def _log_read_pass(session_log, file_path, estimated_tokens, reason):
 
 
 def _log_read_chunked(session_log, file_path, lines, limit, baseline, spent):
-    """Limit-bounded Read — agent qənaət etdi, faylın bir hissəsini oxudu.
+    """Limit-bounded Read — the agent saved tokens, reading only part of the file.
 
-    Həm baseline (tam-oxuma alternativi), həm spent (faktiki oxuduğu hissə)
-    qeydə alınır. savings_report.py bunları həm "saved", həm "real_spent"
-    bucket-lərinə düzgün böləcək.
+    Both baseline (the full-read alternative) and spent (the part actually read)
+    are recorded. savings_report.py will split these correctly into the "saved"
+    and "real_spent" buckets.
     """
     record = {
         "ts": time.time(),
@@ -144,21 +144,22 @@ def main():
     session_log = project_root / ".mla_session_log.jsonl"
     limit_val = tool_input.get("limit")
 
-    # Stat-əsaslı early-out: faylın 1MB-dan böyükdürsə, hətta read_bytes
-    # 30-100ms IO əlavə edir (5 paralel Read = 500ms görünən Claude lag).
-    # Limit yoxdursa və fayl çox böyükdürsə block ediləcəyi onsuz da
-    # bəllidir — full read əvəzinə baseline-i stat.st_size ilə təxmin et.
+    # Stat-based early-out: if the file is larger than 1MB, even read_bytes
+    # adds 30-100ms of IO (5 parallel Reads = 500ms of visible Claude lag).
+    # If there's no limit and the file is very large, it's known anyway that it
+    # would be blocked — instead of a full read, estimate the baseline with
+    # stat.st_size.
     try:
         file_size = file_path.stat().st_size
     except OSError:
         sys.exit(0)
 
     # ~80 char/line ortalama → byte-based heuristic line count.
-    # Real read yalnız böyük fayllarda və ya limit-bounded Read-də olsun.
+    # Do a real read only for large files or a limit-bounded Read.
     if limit_val is None and file_size > 200_000:
-        # Çox böyük fayl — HARD-BLOCK ETMİRİK (block redaktəni sındırır).
-        # Yalnız xəbərdarlıq + icazə. Perf üçün read_bytes etmirik, baseline-i
-        # stat ilə təxmin edirik. Read faktiki baş verir → real spend kimi say.
+        # Very large file — WE DON'T HARD-BLOCK (blocking breaks editing).
+        # Only warn + allow. For perf we don't read_bytes, we estimate the
+        # baseline with stat. The Read actually happens → count it as real spend.
         estimated_line_count = max(THRESHOLD_WARN + 1, file_size // 80)
         estimated_baseline = estimate_tokens(b"x" * file_size)
         record = {
@@ -178,12 +179,12 @@ def main():
         _nudge_large_read(project_root, file_path, estimated_line_count, estimated_baseline)
         sys.exit(0)
 
-    # Chunked (limit-bounded) Read BÖYÜK faylda: tam read_bytes() ETMƏ. Bu, MLA-nın
-    # tövsiyə etdiyi əsas yoldur (Read + kiçik `limit`) və daim işləyir; agent
-    # onsuz da faylın yalnız `limit` sətrini istəyir. Əvvəl bütün fayl diskdən
-    # oxunub split edilirdi (5 paralel Read = 5 tam-fayl oxuması → görünən lag +
-    # RAM sıçrayışı). Baseline-i stat ilə, spent-i limit*AVG ilə təxmin edirik —
-    # no-limit budağındakı eyni stat-əsaslı naxış.
+    # Chunked (limit-bounded) Read on a LARGE file: DON'T do a full read_bytes().
+    # This is MLA's recommended main path (Read + a small `limit`) and works all
+    # the time; the agent only wants `limit` lines of the file anyway. Previously
+    # the whole file was read from disk and split (5 parallel Reads = 5 full-file
+    # reads → visible lag + a RAM spike). We estimate the baseline with stat and
+    # the spent with limit*AVG — the same stat-based pattern as the no-limit branch.
     if isinstance(limit_val, int) and limit_val > 0 and file_size > 200_000:
         estimated_line_count = max(THRESHOLD_WARN + 1, file_size // AVG_CHARS_PER_LINE)
         estimated_baseline = estimate_tokens(b"x" * file_size)
@@ -203,18 +204,18 @@ def main():
     line_count = content.count(b"\n") + (1 if content and not content.endswith(b"\n") else 0)
     estimated_baseline = estimate_tokens(content)
 
-    # Bounded Read — agent qənaət etdi. Hər ölçüdə qeydə al:
-    #  - Agent yalnız `limit` sətir oxudu (`offset`-dən başlayaraq), bütöv fayl yox.
-    #  - "spent" = faktiki oxunan hissənin token sayı (file content slice-i ilə hesablanır).
-    #  - "saved" = baseline - spent (faylın oxunmayan hissəsinin token dəyəri).
-    # Limit faylın bütün sətirlərini ötürsə qənaət yoxdur — spent ≈ baseline.
+    # Bounded Read — the agent saved tokens. Record it at any size:
+    #  - The agent read only `limit` lines (starting from `offset`), not the whole file.
+    #  - "spent" = the token count of the part actually read (computed from the file content slice).
+    #  - "saved" = baseline - spent (the token value of the unread part of the file).
+    # If the limit covers all the file's lines there is no saving — spent ≈ baseline.
     if isinstance(limit_val, int) and limit_val > 0:
         offset_val = tool_input.get("offset") or 0
         try:
             offset_int = int(offset_val)
         except (TypeError, ValueError):
             offset_int = 0
-        # offset agent-dən 1-tabanlıdır (Read tool tərifinə görə)
+        # offset from the agent is 1-based (per the Read tool definition)
         start = max(0, offset_int - 1) if offset_int else 0
         end = start + limit_val
         lines = content.split(b"\n")
@@ -227,10 +228,10 @@ def main():
         sys.exit(0)
 
     if line_count >= THRESHOLD_WARN:
-        # Soft warning — user (və ya AI) hələ də Read edə bilər, amma biz
-        # event-i log-a salırıq ki, savings_report "soft" kateqoriyasında
-        # tracking aparsın. Bu BASELINE-a əlavə olunmur (Read faktiki baş
-        # verə bilər), yalnız MLA-nın guidance işini sayır.
+        # Soft warning — the user (or AI) can still Read, but we log the event
+        # so savings_report tracks it in the "soft" category. This is NOT added
+        # to BASELINE (the Read may actually happen), it only counts MLA's
+        # guidance work.
         record = {
             "ts": time.time(),
             "type": "read_warn",
@@ -240,7 +241,7 @@ def main():
         }
         append_atomic(session_log, json.dumps(record, ensure_ascii=False))
 
-        # Warn-da fayl yenə də oxunur → real_spent-ə daxil et
+        # On a warn the file is still read → include it in real_spent
         _log_read_pass(session_log, file_path, estimated_baseline, "warn_allow")
         print(
             tr(
@@ -254,7 +255,7 @@ def main():
         _nudge_large_read(project_root, file_path, line_count, estimated_baseline)
         sys.exit(0)
 
-    # Silent allow (< 30 sətir indexed) — fayl yenə də oxunur, kiçik real spend
+    # Silent allow (< 30 lines indexed) — the file is still read, a small real spend
     _log_read_pass(session_log, file_path, estimated_baseline, "silent_allow")
     sys.exit(0)
 

@@ -18,12 +18,12 @@ interface SavingsRecord {
   bash_baseline_tokens?: number;
   bash_actual_tokens?: number;
   warn_baseline_tokens?: number;
-  // Real-spend buckets (yeni — 2026-05-15; köhnə qeydlər undefined verə bilər)
+  // Real-spend buckets (new — 2026-05-15; old records may return undefined)
   read_passes?: number;
   read_pass_tokens?: number;
   bash_outputs?: number;
   bash_output_tokens?: number;
-  // Chunked Read (yeni — 2026-05-18): hər limit-bounded Read həm saved, həm spent verir
+  // Chunked Read (new — 2026-05-18): each limit-bounded Read yields both saved and spent
   read_chunked?: number;
   chunked_baseline_tokens?: number;
   chunked_spent_tokens?: number;
@@ -53,25 +53,25 @@ export interface SavingsSummary {
   recent24hBashInspects: number;
   recent24hWarns: number;
   recent24hFiles: number;
-  // Bar UX: 24h aggregate kifayət deyil — kiçik turn-dəlişikliklər görünmür.
-  // Bunlar session_log-dan oxunur (Stop hook hələ flush etməyib):
-  pendingSavedTokens: number;     // bu turn-də indi səviyyəsində qənaət
-  pendingActivityCount: number;   // search + grep + bash + block + warn cəm
+  // Bar UX: the 24h aggregate is not enough — small per-turn changes aren't visible.
+  // These are read from the session_log (the Stop hook hasn't flushed yet):
+  pendingSavedTokens: number;     // savings at the current level in this turn
+  pendingActivityCount: number;   // sum of search + grep + bash + block + warn
   // Background worker queue (index re-build pending):
-  indexingPending: number;        // .mla_pending.txt-də fayl sayı
-  // Health signals — bar bu state-ləri user-ə görünən etmək üçün istifadə edir:
-  historyEmpty: boolean;          // .mla_savings_history.jsonl 0 byte
-  historyMtimeAgeSec: number;     // history-nin son dəyişikliyindən keçən saniyə
-  queueStuckAgeSec: number;       // .mla_pending.processing yaşı (0 = yox)
+  indexingPending: number;        // number of files in .mla_pending.txt
+  // Health signals — the bar uses these states to make them visible to the user:
+  historyEmpty: boolean;          // .mla_savings_history.jsonl is 0 bytes
+  historyMtimeAgeSec: number;     // seconds since the history was last modified
+  queueStuckAgeSec: number;       // age of .mla_pending.processing (0 = none)
 }
 
-// VS Code workspace bəzən Claude Code project_root-undan kiçikdir (məsələn user
-// mono-repo-nun bir subfolder-ini açır). Hooks `$CLAUDE_PROJECT_DIR` kökündə yazır.
-// Biz iki dəfə yuxarı qalxırıq:
-//   1) Data faylı (.mla_savings_history.jsonl) — ən etibarlı işarə, real qeydlər orda.
-//   2) Konfigurasiya faylı (.claude/settings.json / .mcp.json) — hooks
-//      konfiqurasiyalı olduğu kök; bar oraya yazmaq üçün hələ ən düzgün vaxtdır.
-// Yalnız `.mla_enforcement.flag` çox yerdə ola bilər, son seçim kimi istifadə edirik.
+// The VS Code workspace is sometimes smaller than the Claude Code project_root (for example
+// the user opens a single subfolder of a mono-repo). Hooks write at the `$CLAUDE_PROJECT_DIR` root.
+// We walk up in two ways:
+//   1) The data file (.mla_savings_history.jsonl) — the most reliable signal, the real records are there.
+//   2) The configuration file (.claude/settings.json / .mcp.json) — the root where hooks
+//      are configured; this is still the most correct place for the bar to write to.
+// Only `.mla_enforcement.flag` can exist in many places, so we use it as a last resort.
 export function findProjectRoot(startDir: string): string {
   const exists = (dir: string, ...parts: string[]) =>
     fs.existsSync(path.join(dir, ...parts));
@@ -125,8 +125,8 @@ interface SessionLogEntry {
   actual_tokens?: number;
   estimated_baseline_tokens?: number;
   estimated_actual_tokens?: number;
-  estimated_spent_tokens?: number;  // read_chunked event-ləri üçün
-  estimated_tokens?: number;  // read_pass / bash_output event-ləri üçün
+  estimated_spent_tokens?: number;  // for read_chunked events
+  estimated_tokens?: number;  // for read_pass / bash_output events
 }
 
 interface PendingDelta {
@@ -152,9 +152,9 @@ interface PendingDelta {
   bashOutputTokens: number;
 }
 
-// Per-event baseline cap = realistik chunked Read dəyəri (~1000 sətir × 10 tok).
-// Model: MLA-sız agent adətən nəhəng faylı tam oxumur, target-li chunked Read edir.
-// savings_report.py-da eyni dəyər istifadə olunur.
+// Per-event baseline cap = realistic chunked Read value (~1000 lines × 10 tok).
+// Model: without MLA an agent usually doesn't read a huge file in full, it does a targeted chunked Read.
+// The same value is used in savings_report.py.
 const MAX_BASELINE_PER_EVENT = 10_000;
 
 function capProportional(rawBaseline: number, rawActual: number): [number, number] {
@@ -246,8 +246,8 @@ function readSessionLog(historyPath: string): PendingDelta | null {
       d.searchCount += 1;
       d.searchActual += e.actual_tokens ?? 0;
       const files = e.files ?? {};
-      // search_code: yalnız TOP fayl-ı baseline-a hesab et (rank order qorunur).
-      // MLA-sız agent N fayl deyil, 1 chunked Read edərdi.
+      // search_code: count only the TOP file toward the baseline (rank order is preserved).
+      // Without MLA an agent would do 1 chunked Read, not N files.
       const entries = Object.entries(files);
       if (entries.length > 0) {
         const topTokens = entries[0][1] as number;
@@ -278,16 +278,16 @@ function addUniqueQueuePaths(filePath: string, into: Set<string>): void {
       if (t) into.add(t);
     }
   } catch {
-    /* yoxdursa heç nə əlavə etmə */
+    /* if it does not exist, add nothing */
   }
 }
 
 function readIndexingPending(historyPath: string): number {
-  // Background worker drain etməyən UNİKAL fayllar — re-embed gözləyirlər.
-  // Həm .pending.txt (növbədə), həm də .processing (drain mid-flight) BİRLƏŞİB
-  // unikallaşır. Səbəb: eyni faylı 10 dəfə save etmək növbəyə 10 sətir yazırdı
-  // → spinner "⟳10" göstərirdi, halbuki gözləyən cəmi 1 fayldır (drain onsuz da
-  // dedup edir). İndi say real "neçə fayl gözləyir"i göstərir.
+  // UNIQUE files the background worker has not drained — they are waiting to be re-embedded.
+  // Both .pending.txt (queued) and .processing (drain mid-flight) are MERGED
+  // and deduplicated. Reason: saving the same file 10 times wrote 10 lines to the queue
+  // → the spinner showed "⟳10" even though only 1 file is actually waiting (the drain
+  // dedupes anyway). Now the count shows the real "how many files are waiting".
   const dir = path.dirname(historyPath);
   const unique = new Set<string>();
   addUniqueQueuePaths(path.join(dir, '.mla_pending.txt'), unique);
@@ -295,10 +295,10 @@ function readIndexingPending(historyPath: string): number {
   return unique.size;
 }
 
-// `.mla_pending.processing` mövcud və **boş deyilsə**, MCP background worker
-// queue-nu drain edir. Worker crash etsə, fayl qalır — yaşı 30 dəq+ olarsa
-// stuck. Boş `.processing` (orphan marker) stuck sayılmır — drainer üçün
-// sonrakı dövrdə avtomatik təmizlənən artıqdır.
+// If `.mla_pending.processing` exists and is **not empty**, the MCP background worker
+// is draining the queue. If the worker crashes, the file remains — if its age is 30 min+
+// it is stuck. An empty `.processing` (orphan marker) does not count as stuck — it is
+// leftover that the drainer cleans up automatically on the next cycle.
 function readQueueStuckAge(historyPath: string): number {
   const processingPath = path.join(
     path.dirname(historyPath),
@@ -329,10 +329,10 @@ function readHistoryStats(historyPath: string): {
   }
 }
 
-// Parse-edilmiş history record-ları (mtime+size) ilə keşlənir. Bar hər 5s
-// tick-də (+ hər watcher event-də) readSavings çağırır; əvvəl bu, heç vaxt
-// rotasiya olunmayan (sonsuz böyüyən) JSONL faylını HƏR DƏFƏ tam oxuyub hər
-// sətri JSON.parse edirdi (UI thread). Fayl dəyişməyibsə keşdən qaytarırıq.
+// Parsed history records are cached keyed by (mtime+size). The bar calls readSavings
+// on every 5s tick (+ on every watcher event); previously this read the entire
+// never-rotated (infinitely growing) JSONL file EVERY TIME and JSON.parse'd every
+// line (on the UI thread). If the file has not changed we return from the cache.
 let _recordsCache: {
   path: string;
   mtimeMs: number;
@@ -382,16 +382,16 @@ export function readSavings(historyPath: string): SavingsSummary | null {
   const indexingPending = readIndexingPending(historyPath);
   const queueStuckAgeSec = readQueueStuckAge(historyPath);
   const historyStats = readHistoryStats(historyPath);
-  // Boş state-də də summary qaytar — bar "0.0k · 0%" göstərsin,
-  // "başlayır..." state-i user-ə sonsuz yüklənmə kimi görünür.
+  // Return a summary even in the empty state — let the bar show "0.0k · 0%";
+  // a "starting..." state looks to the user like an endless load.
 
   const cutoff = Date.now() / 1000 - 86400;
   const recent = records.filter((r) => r.ts >= cutoff);
   const actualR = recent.reduce((s, r) => s + r.actual_tokens, 0);
   const baseR = recent.reduce((s, r) => s + r.baseline_tokens, 0);
   const savedR = baseR - actualR;
-  // Yeni real-spend bucket-ləri history-dən topla. Köhnə record-larda
-  // (yeni hook-lardan əvvəl) bunlar undefined-dir, default 0.
+  // Aggregate the new real-spend buckets from history. In old records
+  // (before the new hooks) these are undefined, defaulting to 0.
   const readPassTokens24h = recent.reduce(
     (s, r) => s + (r.read_pass_tokens ?? 0),
     0,
@@ -419,8 +419,8 @@ export function readSavings(historyPath: string): SavingsSummary | null {
   const recent24hWarns = recent.reduce((s, r) => s + (r.read_warns ?? 0), 0);
   const recent24hFiles = recent.reduce((s, r) => s + (r.file_count ?? 0), 0);
 
-  // Hər kateqoriya üçün baseline ayrıca, actual ayrıca — sonra subtract.
-  // Bu cür hesablama "bash savings search sətrinə leak olur" bug-unun qarşısını alır.
+  // Baseline separately and actual separately for each category — then subtract.
+  // Computing it this way prevents the "bash savings leak into the search line" bug.
   const searchBaseline24h = recent.reduce(
     (s, r) => s + (r.search_baseline_tokens ?? 0),
     0,
@@ -441,7 +441,7 @@ export function readSavings(historyPath: string): SavingsSummary | null {
     (s, r) => s + (r.bash_actual_tokens ?? 0),
     0,
   );
-  // read_block-ların actual-ı 0-dır — actualR-də yalnız search + grep + bash töhfə var.
+  // read_block actual is 0 — only search + grep + bash contribute to actualR.
   const searchActual24h = Math.max(0, actualR - grepActual24h - bashActual24h);
 
   const savedFromBlocksHistory = recent.reduce(
@@ -455,8 +455,8 @@ export function readSavings(historyPath: string): SavingsSummary | null {
     searchBaseline24h - searchActual24h,
   );
 
-  // Pending delta — in-flight session_log entries. Hooks bunlara yazır,
-  // Stop hook isə history-yə dren edir. Bar promt zamanı livedir.
+  // Pending delta — in-flight session_log entries. Hooks write to these,
+  // and the Stop hook drains them into history. The bar is live at prompt time.
   const p = pending ?? {
     searchCount: 0,
     blockCount: 0,
@@ -496,10 +496,10 @@ export function readSavings(historyPath: string): SavingsSummary | null {
 
   const savedTokens24h = savedR + pendingSaved;
   const baseline24h = baseR + pendingBaseline;
-  // Real session pct — saved / (saved + bütün real spend). Köhnə düstur
-  // saved / baseline idi, amma baseline yalnız MLA-nın gördüyü ops üçündü.
-  // İndi Edit-heavy / Bash-heavy refactor-da bypass və bash_output sayılır,
-  // % rəqəmi real session reduction-u göstərir.
+  // Real session pct — saved / (saved + all real spend). The old formula
+  // was saved / baseline, but baseline only covered the ops MLA saw.
+  // Now, in an Edit-heavy / Bash-heavy refactor, bypass and bash_output are counted,
+  // so the % figure reflects the real session reduction.
   const realSpent24h =
     actualR +
     readPassTokens24h +

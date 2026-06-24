@@ -1,17 +1,17 @@
 """
 ============================================
-hooks/queue_change.py — PostToolUse Hook (Sürətli)
+hooks/queue_change.py — PostToolUse Hook (Fast)
 ============================================
-MƏRHƏLƏ 8b: Claude Code Edit/Write/MultiEdit-dən sonra
-çağırır. Bu skript yalnız fayl yolunu pending növbəsinə
-yazır — ChromaDB və ya embedding modelini yükləmir.
+PHASE 8b: runs after Claude Code Edit/Write/MultiEdit.
+This script only writes the file path into the pending
+queue — it does NOT load ChromaDB or the embedding model.
 
-Niyə belə? Hər redaktədə 3-5 saniyəlik Python+Chroma
-yüklənməsi Claude Code-u yavaşladar. Növbə strategiyası:
-- Bu skript: ~50ms (yalnız fayl yazır)
-- Stop hook (flush_queue.py): bir dəfə işləyir, hamısını birləşdirir
+Why? Loading Python+Chroma for 3-5 seconds on every edit
+would slow Claude Code down. Queue strategy:
+- This script: ~50ms (only writes a file)
+- Stop hook (flush_queue.py): runs once, merges everything
 
-Stdin-dən gələn JSON formatı:
+JSON format received from stdin:
 {
   "tool_name": "Edit" | "Write" | "MultiEdit",
   "tool_input": {"file_path": "..."},
@@ -25,7 +25,7 @@ import os
 import sys
 from pathlib import Path
 
-# Mərkəzi siyahılar — install layout-unda mla_constants hook-un yanındadır.
+# Central lists — in the install layout mla_constants sits next to the hook.
 _INSTALL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_INSTALL_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -40,7 +40,7 @@ try:
     from project_root import find_project_root
     from atomic_write import append_atomic
 except Exception:
-    # Dependency import alınmadı — queue hook-u səssiz keç, heç nə block etmə.
+    # Dependency import failed — skip the queue hook silently, block nothing.
     sys.exit(0)
 
 PROJECT_ROOT = find_project_root()
@@ -51,10 +51,10 @@ def main() -> int:
     try:
         data = json.load(sys.stdin)
     except json.JSONDecodeError:
-        # Pis JSON — sakit çıx, Claude Code-u bloklamayaq
+        # Bad JSON — exit quietly, don't block Claude Code
         return 0
 
-    # Off-mode-da queue böyüməsin (flush_queue sonsuz işləməsin).
+    # In off-mode don't grow the queue (so flush_queue doesn't run forever).
     if not enforcement_active(PROJECT_ROOT):
         return 0
 
@@ -65,9 +65,9 @@ def main() -> int:
 
     p = Path(file_path)
 
-    # Müvəqqəti qovluqlardakı faylları növbəyə salma. ChromaDB/test skriptləri
-    # AppData\Local\Temp altında .py faylı yaradıb redaktə edəndə hook onları
-    # növbəyə yazırdı; fayl sonra silinir, amma sətir növbədə "ghost" qalırdı.
+    # Don't queue files in temporary directories. When ChromaDB/test scripts
+    # created and edited a .py file under AppData\Local\Temp the hook wrote them
+    # to the queue; the file is later deleted, but the line stayed as a "ghost".
     try:
         import tempfile
         _tmp = Path(tempfile.gettempdir()).resolve()
@@ -77,7 +77,7 @@ def main() -> int:
     except Exception:
         pass
 
-    # Filtrlər (Windows-da `.PY` ≠ `.py` problemi üçün lowercase suffix)
+    # Filters (lowercase suffix to handle the Windows `.PY` != `.py` problem)
     if p.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return 0
     if any(part in EXCLUDED_DIRS for part in p.parts):
@@ -87,9 +87,9 @@ def main() -> int:
     if any(p.name.endswith(sfx) for sfx in EXCLUDED_FILE_SUFFIXES):
         return 0
 
-    # Növbədə (.txt) və ya drain-də (.processing) artıq varsa təkrar yazma —
-    # eyni faylı dəfələrlə redaktə etmək növbəni şişirdirdi. Drainer onsuz da
-    # dedup edir, lakin sayğac/təkrar-embed işi böyüyürdü. Hərf-həssas (Windows).
+    # If already in the queue (.txt) or being drained (.processing), don't write
+    # again — editing the same file repeatedly inflated the queue. The drainer
+    # dedups anyway, but the counter/re-embed work grew. Case-sensitive (Windows).
     resolved = str(p.resolve())
     want = resolved.lower()
     processing = PROJECT_ROOT / ".mla_pending.processing"

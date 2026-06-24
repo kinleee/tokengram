@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""PostToolUse hook — Grep indeksli fayl üzərində call olduqda
-'grep_search' entry-ni session_log-a yaz.
+"""PostToolUse hook — when Grep is invoked on an indexed file,
+write a 'grep_search' entry to session_log.
 
-Grep = "Read-ə alternativ" hesab olunur:
-  baseline = (lines * 10) — tam Read olsa nə qədər token gedərdi
-  actual   ≈ 15% baseline  — Grep matched lines + context (heuristik)
+Grep is treated as an "alternative to Read":
+  baseline = (lines * 10) — how many tokens a full Read would cost
+  actual   ≈ 15% baseline  — Grep matched lines + context (heuristic)
 """
 import json
 import os
@@ -23,10 +23,10 @@ try:
     from project_root import find_project_root
     from atomic_write import append_atomic
 except Exception:
-    # Dependency import alınmadı — heç vaxt tool-u block etmə, səssiz çıx.
+    # Dependency import failed — never block the tool, exit silently.
     sys.exit(0)
 
-# Nudge köməkçisi ayrıca try-da: yoxdursa hook normal işləməyə davam etsin.
+# Nudge helper in a separate try: if missing, the hook keeps working normally.
 try:
     from nudge import should_nudge, emit
 except Exception:
@@ -41,25 +41,25 @@ SESSION_LOG = PROJECT_ROOT / ".mla_session_log.jsonl"
 
 THRESHOLD_LINES = 30
 ESTIMATED_ACTUAL_RATIO = 0.15
-AVG_CHARS_PER_LINE = 80  # böyük faylda stat→sətir təxmini üçün
+AVG_CHARS_PER_LINE = 80  # for stat→line estimation on large files
 
-# Grep çox vaxt DOĞRU alətdir (artıq bildiyin dəqiq simvol/sətir). Yönləndirmə
-# yalnız GENİŞ / kəşfiyyat tipli grep-də olur — search_code-un parladığı yer:
-# repo/qovluq-boyu axtarış VƏ (3+ alternativli pattern, və ya konseptual çox-sözlü
-# sorğu). Tək faylda və ya tək dəqiq simvolda grep "dar"dır → ona toxunmuruq.
+# Grep is often the RIGHT tool (an exact symbol/string you already know). A nudge
+# only happens on a BROAD / exploratory grep — where search_code shines:
+# a repo/folder-wide search AND (a 3+ alternative pattern, or a conceptual multi-word
+# query). On a single file or a single exact symbol, grep is "narrow" → we leave it alone.
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 
 
 def _grep_breadth(tool_input):
-    """(is_broad, reason): bu grep search_code-a yönləndiriləcək qədər genişdir?
+    """(is_broad, reason): is this grep broad enough to redirect to search_code?
 
-    Dar (nudge YOX): tək fayl scope, və ya tək qısa dəqiq token.
-    Geniş (nudge): repo/qovluq-boyu VƏ (çox-alternativ pattern / konseptual sorğu).
-    Mühafizəkar — şübhədə nudge ETMƏ (False qaytar)."""
+    Narrow (NO nudge): single-file scope, or a single short exact token.
+    Broad (nudge): repo/folder-wide AND (multi-alternative pattern / conceptual query).
+    Conservative — when in doubt, do NOT nudge (return False)."""
     pattern = (tool_input.get("pattern") or "").strip()
     if not pattern:
         return (False, "")
-    # Tək mövcud fayla yönəlmiş grep → dar (bildiyi faylda axtarır).
+    # A grep aimed at a single existing file → narrow (searching a known file).
     path = tool_input.get("path") or ""
     if path:
         try:
@@ -67,7 +67,7 @@ def _grep_breadth(tool_input):
                 return (False, "")
         except (OSError, ValueError):
             pass
-    # Repo / qovluq-boyu: pattern formasına bax.
+    # Repo / folder-wide: look at the pattern shape.
     alts = [a for a in pattern.split("|") if a.strip()]
     if len(alts) >= 3:
         return (True, f"{len(alts)}-alternative codebase-wide pattern")
@@ -75,7 +75,7 @@ def _grep_breadth(tool_input):
     words = _WORD_RE.findall(pattern)
     if len(segments) >= 3 and len(words) >= 3:
         return (True, "multi-word codebase-wide query")
-    # Tək dəqiq token repo-boyu → çox güman bildiyi simvol; Grep doğrudur.
+    # A single exact token repo-wide → most likely a known symbol; Grep is right.
     return (False, "")
 
 
@@ -93,10 +93,10 @@ def main() -> int:
 
     tool_input = payload.get("tool_input", {})
 
-    # GENİŞ / kəşfiyyat grep yönləndirməsi (BLOKLAMIR) — single-file accounting-dən
-    # ƏVVƏL gəlir, çünki o `path` tələb edir, geniş repo-boyu grep-də isə adətən
-    # `path` OLMUR (köhnə kod belə grep-ləri tamamilə gözardı edirdi). Tək açar
-    # ("grep:broad") → nudge.py cap/cooldown ilə ~30 dəq-də bir dəfə.
+    # BROAD / exploratory grep nudge (DOES NOT BLOCK) — comes BEFORE single-file
+    # accounting, because that requires `path`, whereas a broad repo-wide grep
+    # usually has NO `path` (old code ignored such greps entirely). A single key
+    # ("grep:broad") → ~once per 30 min via nudge.py cap/cooldown.
     is_broad, reason = _grep_breadth(tool_input)
     if is_broad and should_nudge(PROJECT_ROOT, "grep:broad"):
         emit(
@@ -128,9 +128,9 @@ def main() -> int:
     if file_path.suffix.lower() not in INDEXED_EXTS:
         return 0
 
-    # Böyük faylda tam read_bytes() ETMƏ — sadəcə baseline/line təxmini üçün
-    # bütün faylı oxumaq (size cap-siz) hər Grep-də əlavə disk IO idi. Stat ilə
-    # təxmin et; yalnız kiçik fayllarda real oxu (line-threshold qərarı dəqiq olsun).
+    # Don't do a full read_bytes() on a large file — reading the whole file
+    # (no size cap) just for a baseline/line estimate added disk IO on every Grep.
+    # Estimate via stat; only read small files for real (so the line-threshold decision is exact).
     try:
         file_size = file_path.stat().st_size
     except OSError:

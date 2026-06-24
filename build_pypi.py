@@ -289,13 +289,21 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--upload", action="store_true", help="twine upload after build")
     parser.add_argument("--skip-compile-check", action="store_true")
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="skip the clean-process import smoke test (it needs the full runtime "
+        "dependency tree installed; useful when building the wheel separately "
+        "from verifying it, e.g. on a RAM-constrained machine)",
+    )
     args = parser.parse_args()
 
     if not args.skip_compile_check:
         ensure_compiled()
     populate_package()
     wheel = build_wheel()
-    verify_wheel(wheel)
+    if not args.skip_verify:
+        verify_wheel(wheel)
     if args.upload:
         upload(wheel)
 

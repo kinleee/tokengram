@@ -9,22 +9,24 @@ import { findProjectRoot } from './savingsReader';
 import { ensureAutoInstall, registerSetupCommand, pinServerUrl, ensureGitignore, promptReload } from './setupWizard';
 
 export function activate(context: vscode.ExtensionContext) {
-  // Bundled wheel `py3-none-any` taglənib amma daxili .pyd Windows-only.
-  // macOS/Linux-də pip silent install edir, sonra import-da crash; user
-  // "extension installed" görür amma heç bir hook işləmir. Fail-fast.
-  if (process.platform !== 'win32') {
+  // Platform gate. Each platform-specific VSIX bundles a wheel compiled for that
+  // platform — Windows ships .pyd, Linux ships .so. macOS (.so/.dylib) is not
+  // built yet, so we still fail-fast there: the Marketplace should not serve a
+  // Windows/Linux VSIX to a Mac, but a sideloaded build would otherwise install
+  // and then crash on import. Windows and Linux are supported.
+  if (process.platform !== 'win32' && process.platform !== 'linux') {
     void vscode.window.showErrorMessage(
-      'Tokengram currently supports Windows only. macOS and Linux builds are on the roadmap — please follow https://github.com/kinleee/tokengram for updates.',
+      'Tokengram supports Windows and Linux. A macOS build is on the roadmap — please follow https://github.com/kinleee/tokengram for updates.',
     );
     return;
   }
   warnIfLegacyMlaExtensionPresent();
   mirrorParentWorkspaceHooks();
-  // Mövcud (artıq qurulmuş) layihələrdə də .gitignore-u təmin et. Kritik: kilid
-  // faylı (.tokengram.writer.lock) işləyən server tərəfindən OS-lock-landığı üçün
-  // `git add .` onu oxuya bilmir → "Permission denied" → BÜTÜN add fatal sınır.
-  // gitignore olunca git ona toxunmur. ensureGitignore idempotentdir (sentinel)
-  // və yalnız git repo / mövcud .gitignore olanda yazır.
+  // Ensure the .gitignore exists in existing (already set-up) projects too. Critical:
+  // the lock file (.tokengram.writer.lock) is OS-locked by the running server, so
+  // `git add .` cannot read it → "Permission denied" → the ENTIRE add fails fatally.
+  // Once gitignored, git does not touch it. ensureGitignore is idempotent (sentinel)
+  // and only writes when there is a git repo / an existing .gitignore.
   ensureProjectGitignoreIfTokengram();
   // Self-heal a stale license-server URL (old ~/.mla migration / parked-domain
   // era) so already-installed testers don't stay stuck on a dead endpoint.
@@ -36,20 +38,21 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(statusBar);
   context.subscriptions.push(startPeriodicRecheck());
   registerSaveIndexer(context);
-  // Aktivasiya tick-indən kənara çıxar: `activate()` dərhal qayıtsın ki, VS Code
-  // və digər extension-lar (xüsusən Claude Code-un startup model/storage yükü)
-  // bizim setup yoxlamamızı gözləməsin. ensureAutoInstall onsuz da fire-and-forget-dir.
+  // Get off the activation tick: let `activate()` return immediately so VS Code
+  // and other extensions (especially Claude Code's startup model/storage load)
+  // do not wait on our setup check. ensureAutoInstall is fire-and-forget anyway.
   setTimeout(() => void ensureAutoInstall(context), 0);
 }
 
-// VS Code editor-də fayl save olunanda onu indeks növbəsinə (.mla_pending.txt)
-// yazırıq — Claude Code redaktələri PostToolUse hook (queue_change.py) ilə artıq
-// tutulur, amma user birbaşa editor-də Ctrl+S edəndə yalnız Python watchdog (2s
-// debounce) tuturdu. Bu listener save anında DƏRHAL növbəyə yazır → status bar
-// FS watcher-i .mla_pending.txt dəyişikliyini görüb spinner+sayğacı o anda
-// göstərir. İNDEKSLƏMƏNİ ÖZÜMÜZ ETMİRİK — sadəcə növbəyə yazırıq; onsuz da işləyən
-// MCP server background drainer faylları embed edir (yeni proses spawn YOX →
-// spawn-storm/RAM riski yox). Filtrlər mla_constants.py güzgüsüdür.
+// When a file is saved in the VS Code editor, we write it to the index queue
+// (.mla_pending.txt) — Claude Code edits are already captured by the PostToolUse
+// hook (queue_change.py), but when the user presses Ctrl+S directly in the editor,
+// only the Python watchdog (2s debounce) caught it. This listener writes to the
+// queue IMMEDIATELY on save → the status bar FS watcher sees the .mla_pending.txt
+// change and shows the spinner+counter at that moment. WE DO NOT INDEX OURSELVES —
+// we only write to the queue; the already-running MCP server background drainer
+// embeds the files (NO new process spawn → no spawn-storm/RAM risk). The filters
+// mirror mla_constants.py.
 const INDEXABLE_EXTENSIONS = new Set([
   '.py', '.sol', '.sql', '.md',
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
@@ -74,9 +77,9 @@ const INDEX_EXCLUDED_DIRS = new Set([
   '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox',
 ]);
 
-// Fayl-adı uyğunluqları (name.startsWith) — mla_constants.EXCLUDED_FILE_PATTERNS
-// güzgüsü. Secret/credential fayllarını da daxil edir: queue faylına secret YOLU
-// belə düşməməlidir (Tokengram "local · private" iddia edir).
+// File-name matches (name.startsWith) — mirrors mla_constants.EXCLUDED_FILE_PATTERNS.
+// Includes secret/credential files too: not even a secret's PATH should end up in
+// the queue file (Tokengram claims "local · private").
 const INDEX_EXCLUDED_FILE_PATTERNS = [
   '.mla_pending', '.mla_session_log', '.file_hashes',
   'TEST_PROMPT', 'test_prompt', 'PROMPT_', 'prompts.', 'FIXTURE_', 'fixture_',
@@ -87,25 +90,25 @@ const INDEX_EXCLUDED_FILE_PATTERNS = [
   'service-account', 'firebase-adminsdk', 'google-services.json',
 ];
 
-// Suffix istisnaları — mla_constants.EXCLUDED_FILE_SUFFIXES güzgüsü (minified
-// bundle, source map, generated kod).
+// Suffix exclusions — mirrors mla_constants.EXCLUDED_FILE_SUFFIXES (minified
+// bundle, source map, generated code).
 const INDEX_EXCLUDED_FILE_SUFFIXES = [
   '.min.js', '.min.css', '.bundle.js', '.bundle.css', '.map',
   '.pb.go', '.pb.ts', '_pb2.py', '_pb2_grpc.py',
   '.gen.go', '.gen.ts', '.generated.ts', '.generated.go',
 ];
 
-// Trailing (idle) debounce per fayl: hər save timer-i SIFIRLAYIR; növbəyə yalnız
-// fayl SAVE_IDLE_MS müddətində toxunulmadıqda BİR DƏFƏ yazılır. Səbəb: köhnə 3s
-// "leading" debounce 3-4s aralıqla yavaş yazanda hər save-i ayrıca növbəyə salırdı
-// → eyni fayl üçün onlarla sətir + spinner hər simvolda fırlanırdı. İndi yazmağı
-// dayandırana qədər gözləyirik, sonra bir dəfə (dedup ilə) növbəyə qoyuruq.
+// Trailing (idle) debounce per file: every save RESETS the timer; the file is
+// written to the queue only ONCE, after SAVE_IDLE_MS of no touches. Reason: the old
+// 3s "leading" debounce queued each save separately when typing slowly at 3-4s
+// intervals → dozens of lines for the same file + the spinner spun on every keystroke.
+// Now we wait until typing stops, then enqueue once (with dedup).
 const pendingTimers = new Map<string, NodeJS.Timeout>();
 const SAVE_IDLE_MS = 6000;
 
-// Növbədə (.mla_pending.txt + .processing) artıq varsa təkrar yazma. Drainer
-// onsuz da dedup edir, amma burada da dedup etməsək növbə şişir və ⟳N saxta böyük
-// görünür. Müqayisə Windows-da hərf-həssaslığını nəzərə alır.
+// Do not re-write if it is already in the queue (.mla_pending.txt + .processing).
+// The drainer dedups anyway, but if we do not dedup here the queue bloats and ⟳N
+// looks falsely large. The comparison accounts for case-insensitivity on Windows.
 function alreadyQueued(projectRoot: string, filePath: string): boolean {
   const want = filePath.toLowerCase();
   for (const name of ['.mla_pending.txt', '.mla_pending.processing']) {
@@ -115,15 +118,16 @@ function alreadyQueued(projectRoot: string, filePath: string): boolean {
         if (line.trim().toLowerCase() === want) return true;
       }
     } catch {
-      /* fayl yoxdursa keç */
+      /* skip if the file does not exist */
     }
   }
   return false;
 }
 
-// venv interpreter yolu — növbəni yalnız drenləyə biləcək bir interpreter varsa
-// böyüdürük. Yoxdursa (qırıq/partial venv) növbəyə yazmaq disk-i doldurur, heç
-// nə drenləmir (2026-06-19 partial-venv: 1194 fayl növbədə, 0 indekslənmiş).
+// venv interpreter path — we only grow the queue if there is an interpreter that
+// can actually drain it. Otherwise (a broken/partial venv) writing to the queue
+// fills the disk and nothing drains (2026-06-19 partial-venv: 1194 files queued,
+// 0 indexed).
 const VENV_PYTHON =
   process.platform === 'win32'
     ? path.join(os.homedir(), '.tokengram', 'venv', 'Scripts', 'python.exe')
@@ -133,12 +137,12 @@ function registerSaveIndexer(context: vscode.ExtensionContext): void {
   const enqueue = (filePath: string): void => {
     pendingTimers.delete(filePath);
     try {
-      // Drainer (venv python) yoxdursa növbəyə yazma — onsuz da heç kim
-      // indeksləməyəcək, yalnız .mla_pending.txt sonsuz böyüyər.
+      // If the drainer (venv python) is missing, do not write to the queue —
+      // nobody will index it anyway, only .mla_pending.txt grows unbounded.
       if (!fs.existsSync(VENV_PYTHON)) return;
       const projectRoot = findProjectRoot(path.dirname(filePath));
-      // Enforcement OFF olanda növbəni böyütmə (queue_change.py:58 güzgüsü).
-      // Fire anında yenidən yoxlayırıq — istifadəçi yazarkən toggle etmiş ola bilər.
+      // Do not grow the queue when enforcement is OFF (mirrors queue_change.py:58).
+      // We re-check at fire time — the user may have toggled it while typing.
       let on = false;
       try {
         on =
@@ -153,19 +157,20 @@ function registerSaveIndexer(context: vscode.ExtensionContext): void {
       if (!alreadyQueued(projectRoot, filePath)) {
         fs.appendFileSync(path.join(projectRoot, '.mla_pending.txt'), filePath + '\n', 'utf-8');
       }
-      // Editor save-i task-a bağlı deyil (Stop hook işləməyəcək) — ona görə
-      // drain marker-ini ÖZÜMÜZ buraxırıq ki, işləyən MCP server növbəni isti
-      // modeli ilə dərhal (~1s) drenlə. (Claude redaktələri queue_change.py ilə
-      // yığılır və task sonu Stop hook tərəfindən drenlənir — orada marker buraxmırıq.)
-      // Marker-i bir editor save-ı üçün 6s idle debounce-dan SONRA buraxırıq →
-      // davamlı drain churn-u yox, yazı bursunun sonunda bir drain.
+      // An editor save is not tied to a task (the Stop hook will not fire) — so
+      // WE drop the drain marker ourselves so the running MCP server drains the
+      // queue immediately (~1s) with its warm model. (Claude edits accumulate via
+      // queue_change.py and are drained by the Stop hook at task end — we do not
+      // drop a marker there.) We drop the marker AFTER the 6s idle debounce for a
+      // single editor save → no continuous drain churn, one drain at the end of a
+      // write burst.
       try {
         fs.writeFileSync(path.join(projectRoot, '.mla_drain.now'), '', 'utf-8');
       } catch {
         /* best-effort */
       }
     } catch {
-      // Best-effort — heç vaxt save əməliyyatını bloklama.
+      // Best-effort — never block the save operation.
     }
   };
 
@@ -176,26 +181,26 @@ function registerSaveIndexer(context: vscode.ExtensionContext): void {
       const parts = filePath.split(/[\\/]/);
       if (parts.some((p) => INDEX_EXCLUDED_DIRS.has(p))) return;
       const base = path.basename(filePath);
-      // Tokengram-ın öz state fayllarını növbəyə salma (sonsuz dövrə düşməsin)...
+      // Do not queue Tokengram's own state files (avoid an infinite loop)...
       if (
         base.startsWith('.mla_') ||
         base.startsWith('.tokengram') ||
         base.startsWith('.bm25_index')
       )
         return;
-      // ...və paket-menecer lock / secret / generated faylları (queue_change.py paritisi).
+      // ...and package-manager lock / secret / generated files (parity with queue_change.py).
       if (INDEX_EXCLUDED_FILE_PATTERNS.some((pat) => base.startsWith(pat))) return;
       if (INDEX_EXCLUDED_FILE_SUFFIXES.some((sfx) => base.endsWith(sfx))) return;
 
-      // Trailing debounce: bu fayl üçün gözləyən timer-i sıfırla, yenisini qur.
+      // Trailing debounce: reset the pending timer for this file, set a new one.
       const existing = pendingTimers.get(filePath);
       if (existing) clearTimeout(existing);
       const timer = setTimeout(() => enqueue(filePath), SAVE_IDLE_MS);
-      // VS Code bağlananda Node prosesini canlı saxlamasın.
+      // Do not keep the Node process alive when VS Code is closing.
       if (typeof timer.unref === 'function') timer.unref();
       pendingTimers.set(filePath, timer);
     } catch {
-      // Best-effort — heç vaxt save əməliyyatını bloklama.
+      // Best-effort — never block the save operation.
     }
   });
   context.subscriptions.push(listener);
@@ -267,11 +272,11 @@ function mirrorParentWorkspaceHooks(): void {
   }
 }
 
-// Açılan layihə tokengram-ın işlədiyi layihədirsə (.mcp.json / qənaət tarixçəsi /
-// chroma_db var), onun .gitignore-una runtime-artefakt blokunu təmin et. Bu, hər
-// activation-da işləyir (idempotent) ki, KÖHNƏ layihələr də qorunsun — yalnız
-// fresh setup deyil. Səbəb: kilidli .tokengram.*.lock faylı gitignore olunmasa
-// `git add .` fatal sınır.
+// If the opened project is a Tokengram project (.mcp.json / savings history /
+// chroma_db present), ensure the runtime-artifact block is in its .gitignore. This
+// runs on every activation (idempotent) so that OLD projects are protected too —
+// not just fresh setups. Reason: if the locked .tokengram.*.lock file is not
+// gitignored, `git add .` fails fatally.
 function ensureProjectGitignoreIfTokengram(): void {
   try {
     const folders = vscode.workspace.workspaceFolders;
@@ -285,12 +290,12 @@ function ensureProjectGitignoreIfTokengram(): void {
     if (!isTokengramProject) return;
     ensureGitignore(root);
   } catch {
-    /* best-effort — heç vaxt activation-u bloklama */
+    /* best-effort — never block activation */
   }
 }
 
 export function deactivate() {
-  // Pəncərə bağlananda spawn olunmuş reindex CLI child-larını kill et —
-  // əks halda Windows-da python orphan qalıb fonda işləməyə davam edir.
+  // Kill the spawned reindex CLI children when the window closes —
+  // otherwise on Windows the python process orphans and keeps running in the background.
   killActiveReindexChildren();
 }
