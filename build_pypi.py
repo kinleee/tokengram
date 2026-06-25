@@ -62,7 +62,8 @@ HOOK_FILES = [
     "show_arch.py",
     "flush_queue.py",
     "toggle_mla.py",
-    "license_gate.py",
+    # license_gate is NOT copied as plaintext: it holds the enforcement gate and
+    # is import-only, so it ships COMPILED (.pyd) via build_license_gate.py below.
     "project_root.py",
     "atomic_write.py",
     # 2026-06-21: bloklamayan search_code yönləndirməsi (additionalContext nudge).
@@ -210,6 +211,16 @@ def populate_package() -> None:
         shutil.copy2(src, PKG / "hooks" / h)
         print(f"  + tokengram/hooks/{h}")
 
+    # 3b. license_gate — the enforcement gate, shipped COMPILED (.pyd) so an AI
+    # (or anyone) can't read or patch it. build_license_gate.py compiles
+    # hooks/license_gate.py and drops the .pyd into tokengram/hooks/ (+ the VSIX
+    # resources/hooks/), removing any plaintext license_gate.py left there.
+    print("  · compiling license_gate -> .pyd (build_license_gate.py)")
+    subprocess.check_call([sys.executable, "build_license_gate.py"], cwd=ROOT)
+    stray = PKG / "hooks" / "license_gate.py"
+    if stray.exists():
+        stray.unlink()  # belt-and-suspenders: never ship the gate as plaintext
+
     # 4. i18n messages
     msgs = ROOT / "messages"
     if msgs.is_dir():
@@ -255,7 +266,16 @@ def verify_wheel(wheel: Path) -> None:
     import zipfile
     with tempfile.TemporaryDirectory(prefix="tg_wheel_verify_") as td:
         with zipfile.ZipFile(wheel) as z:
+            names = z.namelist()
             z.extractall(td)
+        # Source-protection guard: the license gate MUST ship compiled, never as
+        # readable/patchable plaintext. Fail the build if that ever regresses.
+        gate = [n for n in names if "hooks/license_gate" in n]
+        if any(n.endswith("hooks/license_gate.py") for n in gate):
+            fail("wheel ships PLAINTEXT tokengram/hooks/license_gate.py — gate must be .pyd")
+        if not any(n.endswith(".pyd") or n.endswith(".so") for n in gate):
+            fail("wheel is MISSING the compiled license_gate (.pyd/.so) — run build_license_gate.py")
+        print("  gate ships compiled:", [n.split('/')[-1] for n in gate])
         code = (
             "import sys; sys.path.insert(0, sys.argv[1]);\n"
             "import tokengram\n"

@@ -11,7 +11,10 @@ Strategiya:
 - Yalnız OZ kodumuz kompilyasiya olunur. Third-party deps (chromadb,
   sentence-transformers, etc.) toxunulmur — onsuz da GitHub-da açıqdır.
 - hooks/* kompilyasiya OLUNMUR — Claude Code shell ilə çağırır, .py qalmalıdır.
-  (TODO: hook-ları stub-layer-ə çevir, real məntiq _mla_hooks.pyd-də.)
+  İSTİSNA: hooks/license_gate.py — import-only (script kimi çağırılmır) və
+  enforcement gate-ini saxlayır, ona görə .pyd kimi ship olunur. Ayrıca
+  `build_license_gate.py` ilə build + deploy olunur (bu skriptdə DEYİL, çünki
+  o, çıxışı tokengram/hooks/ + vscode-extension/resources/hooks/-a yerləşdirir).
 """
 from __future__ import annotations
 

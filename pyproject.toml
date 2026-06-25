@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tokengram"
-version = "0.1.42"
+version = "0.1.43"
 description = "Token-saving memory layer for AI coding assistants — local hybrid RAG (BM25 + semantic + reranker) over your project, exposed via MCP."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -50,3 +50,7 @@ packages = ["tokengram", "tokengram.hooks"]
 
 [tool.setuptools.package-data]
 tokengram = ["*.pyd", "*.so", "messages/*.json", "py.typed"]
+# license_gate is the ONLY hook shipped compiled: it is import-only (never run as
+# a script by Claude Code), and it carries the license-enforcement gate, so it must
+# not ship as readable/patchable plaintext. Built by build_license_gate.py.
+"tokengram.hooks" = ["*.pyd", "*.so"]
