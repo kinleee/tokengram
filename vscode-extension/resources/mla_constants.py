@@ -149,3 +149,144 @@ def estimate_tokens(text) -> int:
     else:
         n = len(str(text))
     return max(1, n // CHARS_PER_TOKEN)
+
+
+# =============================================================================
+#  Gitignore-aware filtering
+# =============================================================================
+# The hardcoded EXCLUDED_* lists above only catch UNIVERSAL names
+# (node_modules, .env, lock files...). Project-SPECIFIC ignores (private config,
+# generated artifacts, scratch data) are only known from the project's own
+# `.gitignore`. We honour those too.
+#
+# We use `git check-ignore` — NO `pathspec` dependency. Git's full semantics
+# (nested .gitignore, .git/info/exclude, global excludes, `!` negation, `**`,
+# anchoring) come for free.
+#
+# CRITICAL: git only ignores UNTRACKED files; a file force-added with `git add
+# -f` (or committed before the rule existed) that matches an ignore rule is
+# still live repo source → we DO NOT drop it. So dropped = (matches ignore)
+# AND (NOT tracked).
+#
+# Non-git directory / git not installed / any error → SAFE no-op: nothing is
+# dropped, existing behaviour is unchanged (legit files are never harmed).
+import os as _os
+import subprocess as _subprocess
+
+_GIT_AVAILABLE = None          # None=unchecked, True/False
+_REPO_ROOT_CACHE = {}          # str(dir) -> repo toplevel | None
+
+
+def _git_available() -> bool:
+    global _GIT_AVAILABLE
+    if _GIT_AVAILABLE is None:
+        try:
+            _subprocess.run(
+                ["git", "--version"],
+                stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL,
+                timeout=5,
+            )
+            _GIT_AVAILABLE = True
+        except Exception:
+            _GIT_AVAILABLE = False
+    return _GIT_AVAILABLE
+
+
+def _repo_root(directory):
+    """Toplevel of the git work tree containing `directory`; None if not git (cached)."""
+    key = str(directory)
+    if key in _REPO_ROOT_CACHE:
+        return _REPO_ROOT_CACHE[key]
+    root = None
+    if _git_available():
+        try:
+            r = _subprocess.run(
+                ["git", "-C", key, "rev-parse", "--show-toplevel"],
+                stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL, timeout=5,
+            )
+            if r.returncode == 0:
+                out = r.stdout.decode("utf-8", "surrogateescape").strip()
+                root = out or None
+        except Exception:
+            root = None
+    _REPO_ROOT_CACHE[key] = root
+    return root
+
+
+def _posix_rel(p, root):
+    """Absolute path → repo-relative POSIX path (git expects forward slashes)."""
+    try:
+        rel = _os.path.relpath(str(p), root)
+    except ValueError:
+        return None  # different drive on Windows → outside repo
+    return rel.replace(_os.sep, "/")
+
+
+def _git_stdin_set(root, args, rels):
+    """Feed NUL-joined `rels` to git via --stdin -z; return the set of echoed
+    paths. No trailing NUL (breaks the batch on some git versions). None on error."""
+    if not rels:
+        return set()
+    payload = b"\x00".join(r.encode("utf-8", "surrogateescape") for r in rels)
+    try:
+        r = _subprocess.run(
+            ["git", "-C", root] + args, input=payload,
+            stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL, timeout=30,
+        )
+    except Exception:
+        return None
+    if r.returncode not in (0, 1):   # 0=some matched, 1=none, 128=error
+        return None
+    out = r.stdout.decode("utf-8", "surrogateescape")
+    return {seg for seg in out.split("\x00") if seg}
+
+
+def _tracked_set(root):
+    """Set of all tracked files (repo-relative POSIX). None on error."""
+    try:
+        r = _subprocess.run(
+            ["git", "-C", root, "ls-files", "-z"],
+            stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL, timeout=30,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    out = r.stdout.decode("utf-8", "surrogateescape")
+    return {seg for seg in out.split("\x00") if seg}
+
+
+def filter_gitignored(directory, paths):
+    """Drop untracked+ignored files from `paths` (git semantics). Tracked files
+    are NEVER dropped. Non-git work tree / git missing / error → `paths`
+    unchanged (no-op). Order preserved."""
+    paths = list(paths)
+    if not paths:
+        return paths
+    root = _repo_root(directory)
+    if not root:
+        return paths
+    pairs = [(p, _posix_rel(p, root)) for p in paths]
+    pairs = [(p, rel) for p, rel in pairs if rel is not None and not rel.startswith("../")]
+    if not pairs:
+        return paths
+    ignored = _git_stdin_set(root, ["check-ignore", "-z", "--stdin"],
+                             [rel for _, rel in pairs])
+    if not ignored:
+        return paths
+    tracked = _tracked_set(root) or set()
+    drop = {p for p, rel in pairs if rel in ignored and rel not in tracked}
+    if not drop:
+        return paths
+    return [p for p in paths if p not in drop]
+
+
+def is_gitignored(path, directory=None) -> bool:
+    """Single-file incremental check: True if untracked+ignored.
+    Git missing / error → False (never dropped)."""
+    if directory is None:
+        try:
+            directory = _os.path.dirname(_os.path.abspath(str(path)))
+        except Exception:
+            return False
+    return len(filter_gitignored(directory, [path])) == 0

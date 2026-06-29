@@ -66,6 +66,7 @@ try:
         EXCLUDED_DIRS,
         EXCLUDED_FILE_PATTERNS,
         EXCLUDED_FILE_SUFFIXES,
+        is_gitignored,
     )
     from license_gate import enforcement_active
     from project_root import find_project_root
@@ -117,6 +118,12 @@ def main() -> int:
         return 0
     if any(p.name.endswith(sfx) for sfx in EXCLUDED_FILE_SUFFIXES):
         return 0
+    # Project .gitignore (untracked+ignored) — no-op if not git / on error
+    try:
+        if is_gitignored(p):
+            return 0
+    except Exception:
+        pass
 
     # If already in the queue (.txt) or being drained (.processing), don't write
     # again — editing the same file repeatedly inflated the queue. The drainer

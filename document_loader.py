@@ -187,6 +187,15 @@ def find_code_files(directory: str) -> List[Path]:
     except PermissionError as e:
         logger.warning(f"İcazə xətası, bəzi fayllar keçildi: {e}")
 
+    # Layihənin öz `.gitignore`-una hörmət — sabit EXCLUDED_* siyahısının tutmadığı
+    # layihəyə-xas ignore-ları da kənarlaşdır (tracked fayllar qorunur, qeyri-git
+    # qovluqda no-op). Tək batch git-subprocess, ona görə walk-dan SONRA tətbiq olunur.
+    before = len(found_files)
+    found_files = config.filter_gitignored(dir_path, found_files)
+    skipped = before - len(found_files)
+    if skipped:
+        logger.info(f"🚫 {skipped} fayl .gitignore qaydaları ilə kənarlaşdırıldı")
+
     logger.info(f"📁 {len(found_files)} kod faylı tapıldı: {dir_path}")
     return sorted(found_files)
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tokengram"
-version = "0.1.43"
+version = "0.1.44"
 description = "Token-saving memory layer for AI coding assistants — local hybrid RAG (BM25 + semantic + reranker) over your project, exposed via MCP."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

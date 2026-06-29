@@ -184,6 +184,13 @@ def _cold_drain() -> int:
                 if any(p.name.startswith(pat) for pat in config.EXCLUDED_FILE_PATTERNS):
                     skipped += 1
                     continue
+                # Project .gitignore (untracked+ignored); no-op if not git
+                try:
+                    if config.is_gitignored(p):
+                        skipped += 1
+                        continue
+                except Exception:
+                    pass
                 source = p.read_text(encoding="utf-8", errors="replace")
                 if not source.strip():
                     skipped += 1

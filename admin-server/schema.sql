@@ -41,6 +41,15 @@ CREATE TABLE IF NOT EXISTS trials (
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
+-- Magic-link sign-in (parolsuz). Token birdəfəlikdir, qısa ömürlüdür.
+CREATE TABLE IF NOT EXISTS magic_links (
+  token TEXT PRIMARY KEY,
+  email TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS admin_users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT UNIQUE NOT NULL,
@@ -63,3 +72,4 @@ CREATE INDEX IF NOT EXISTS idx_subs_status ON subscriptions(status);
 CREATE INDEX IF NOT EXISTS idx_lic_user ON licenses(user_id);
 CREATE INDEX IF NOT EXISTS idx_lic_fingerprint ON licenses(machine_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_magic_email ON magic_links(email);

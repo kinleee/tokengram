@@ -40,6 +40,8 @@ import {
   checkKey,
   effectiveStatus,
   fetchPubkey,
+  readCachedStatus,
+  readKey,
   readServerUrl,
   refreshStatus,
   startTrial,
@@ -56,7 +58,9 @@ interface MenuItem extends vscode.QuickPickItem {
     | 'reindex'
     | 'sync'
     | 'license'
-    | 'breakdown';
+    | 'breakdown'
+    | 'subscribe'
+    | 'dashboard';
 }
 
 function venvHasTokengram(): boolean {
@@ -495,6 +499,15 @@ async function offerTrialIfKeyless(): Promise<void> {
   const action = await vscode.window.showInformationMessage(tr('trial.offer'), startBtn);
   if (action !== startBtn) return;
 
+  // Email könüllüdür — verify gözləmir, trial onsuz da başlayır. Boş buraxsa keçir.
+  const email = await vscode.window.showInputBox({
+    prompt: tr('trial.emailPrompt'),
+    placeHolder: tr('trial.emailPlaceholder'),
+    ignoreFocusOut: true,
+    validateInput: (v) =>
+      !v.trim() || /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim()) ? undefined : tr('trial.emailInvalid'),
+  });
+
   const serverUrl = readServerUrl() ?? 'https://tokengram.click';
   const outcome = await vscode.window.withProgress(
     {
@@ -502,7 +515,7 @@ async function offerTrialIfKeyless(): Promise<void> {
       title: tr('trial.starting'),
       cancellable: false,
     },
-    () => startTrial(serverUrl),
+    () => startTrial(serverUrl, email?.trim() || undefined),
   );
   if (outcome.ok) {
     const days = outcome.trial_ends_at
@@ -795,9 +808,35 @@ function deepRecover(root: string): RecoveryResult {
 // Stop hook (via its cold fallback if the server is closed). Manual escalation:
 // the `refresh` (deepRecover) and `reindex` buttons below remain.
 
+// Checkout/dashboard URL-lərini qurur. license_key (varsa) ötürülür ki, ödəniş
+// webhook-da mövcud trial açarına bağlansın (eyni açar paid-ə yüksəlir).
+function buyUrl(): string {
+  const base = readServerUrl() ?? 'https://tokengram.click';
+  const key = readKey();
+  const email = readCachedStatus()?.email;
+  const qs = new URLSearchParams();
+  if (key) qs.set('key', key);
+  if (email && !email.endsWith('.tokengram.local')) qs.set('email', email);
+  const q = qs.toString();
+  return `${base}/buy${q ? '?' + q : ''}`;
+}
+
+function dashboardUrl(): string {
+  const base = readServerUrl() ?? 'https://tokengram.click';
+  return `${base}/dashboard`;
+}
+
 async function runAction(action: MenuItem['action'], root: string, extensionPath: string) {
   const channel = vscode.window.createOutputChannel('MLA Agent');
   switch (action) {
+    case 'subscribe': {
+      await vscode.env.openExternal(vscode.Uri.parse(buyUrl()));
+      break;
+    }
+    case 'dashboard': {
+      await vscode.env.openExternal(vscode.Uri.parse(dashboardUrl()));
+      break;
+    }
     case 'toggle': {
       const cur = readFlag(root);
       const next = cur === 'on' ? 'off' : 'on';
@@ -1172,6 +1211,27 @@ export function registerMenuCommand(
         action: 'reset',
       },
     ];
+    // Abünə ol — yalnız paid-aktiv olmayanda (trial, trial bitib, açar yox, invalid).
+    // trial_expired/no_key halında ən yuxarı qoyulur (əsas conversion action).
+    const licState = effectiveStatus();
+    if (licState !== 'valid') {
+      const subItem: MenuItem = {
+        label: tr('menu.subscribe'),
+        description: tr('menu.subscribeDesc'),
+        action: 'subscribe',
+      };
+      if (licState === 'trial_expired' || licState === 'no_key') {
+        items.unshift(subItem);
+      } else {
+        items.splice(1, 0, subItem);
+      }
+    }
+    // Dashboard — hər zaman (açarı gör / abunəni idarə et / cihaz dəyiş).
+    items.push({
+      label: tr('menu.dashboard'),
+      description: tr('menu.dashboardDesc'),
+      action: 'dashboard',
+    });
     const pick = await vscode.window.showQuickPick(items, {
       placeHolder: tr('menu.placeholder'),
       matchOnDescription: true,

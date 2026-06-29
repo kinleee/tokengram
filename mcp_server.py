@@ -196,6 +196,12 @@ def _filter_indexable(path_str: str) -> Optional[Path]:
         return None
     if any(p.name.startswith(pat) for pat in config.EXCLUDED_FILE_PATTERNS):
         return None
+    # Layihənin .gitignore-u (untracked+ignored) — git deyilsə/xətada no-op
+    try:
+        if config.is_gitignored(p):
+            return None
+    except Exception:
+        pass
     return p
 
 
