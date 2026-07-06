@@ -62,6 +62,9 @@ interface SavingsRecord {
   saving_tokens: number;
   saving_pct: number;
   file_count: number;
+  // 2 = evidence-based attribution (2026-07-06). Records without it were written
+  // under the old inflationary heuristics — excluded from all token math.
+  method?: number;
 }
 
 export interface SavingsSummary {
@@ -73,6 +76,11 @@ export interface SavingsSummary {
   totalWarns: number;
   totalFiles: number;
   savedTokens24h: number;
+  // Lifetime cumulative saved (all history, no 24h cutoff) + current pending.
+  // The bar headline uses THIS so the odometer only ever climbs — a 24h rolling
+  // figure drops when old entries age out of the window, which in small/low-use
+  // projects looks like the counter "going backwards" and alarms users.
+  savedTokensLifetime: number;
   savedFromSearch24h: number;
   savedFromBlocks24h: number;
   savedFromGreps24h: number;
@@ -88,6 +96,10 @@ export interface SavingsSummary {
   // These are read from the session_log (the Stop hook hasn't flushed yet):
   pendingSavedTokens: number;     // savings at the current level in this turn
   pendingActivityCount: number;   // sum of search + grep + bash + block + warn
+  // Age (sec) of the newest session-log entry; -1 = no pending entries. Lets the
+  // bar distinguish a LIVE turn from a stale leftover whose Stop hook never ran
+  // (interrupted task / closed window) — those must not show "⚡ now" forever.
+  pendingNewestAgeSec: number;
   // Background worker queue (index re-build pending):
   indexingPending: number;        // number of files in .mla_pending.txt
   // Health signals — the bar uses these states to make them visible to the user:
@@ -152,8 +164,10 @@ export function findHistoryFile(): string | null {
 interface SessionLogEntry {
   ts: number;
   type?: string;
+  file?: string;  // read_*/grep/bash/file_edit events carry the touched path
   files?: Record<string, number>;
   actual_tokens?: number;
+  hunt_tokens?: number;  // server-computed "finding cost" (kw-rank simulation)
   estimated_baseline_tokens?: number;
   estimated_actual_tokens?: number;
   estimated_spent_tokens?: number;  // for read_chunked events
@@ -181,6 +195,13 @@ interface PendingDelta {
   // Untracked real-spend
   readPassTokens: number;
   bashOutputTokens: number;
+  // Spend of events that earned NO credit (no steering evidence / cancelled) —
+  // real cost for the % denominator, never a saving.
+  ungatedSpent: number;
+  // ts (epoch sec) of the NEWEST session-log entry. The bar uses its age to tell
+  // a LIVE turn from a stale leftover (Stop hook skipped: interrupted task,
+  // closed window) — a stale leftover must not flash "⚡ now" forever.
+  newestTs: number;
 }
 
 // Per-event baseline cap = realistic chunked Read value (~1000 lines × 10 tok).
@@ -226,19 +247,72 @@ function readSessionLog(historyPath: string): PendingDelta | null {
     chunkedSpent: 0,
     readPassTokens: 0,
     bashOutputTokens: 0,
+    ungatedSpent: 0,
+    newestTs: 0,
   };
-  let hasAny = false;
+  const parsed: SessionLogEntry[] = [];
   for (const line of data.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    let e: SessionLogEntry;
     try {
-      e = JSON.parse(trimmed);
+      parsed.push(JSON.parse(trimmed));
     } catch {
       continue;
     }
-    hasAny = true;
+  }
+  if (parsed.length === 0) return null;
+  d.newestTs = parsed.reduce((m, e) => Math.max(m, e.ts ?? 0), 0);
+
+  // ---- EVIDENCE PASS (method 2) — mirrors hooks/savings_report.py. ----------
+  // An event earns credit only when the session shows Tokengram caused the
+  // saving (a search/block surfaced the file BEFORE the event). Un-steered
+  // heuristic events earn 0; their cost still counts as real spend. Keep the
+  // two implementations in sync. (TS norm skips fs-resolve — good enough for
+  // live pending; the authoritative record is written by the Python Stop hook.)
+  const norm = (p?: string): string | null =>
+    p ? p.replace(/\\/g, '/').toLowerCase() : null;
+  const searchedFirst = new Map<string, number>();
+  const blockedFirst = new Map<string, number>();
+  const editTs = new Map<string, number[]>();
+  const fullyRead = new Set<string>();
+  const touchedRead = new Set<string>();
+  for (const e of parsed) {
     const t = e.type ?? 'search_code';
+    const ts = e.ts ?? 0;
+    if (t === 'search_code') {
+      for (const fp of Object.keys(e.files ?? {})) {
+        const n = norm(fp);
+        if (n && (!searchedFirst.has(n) || ts < (searchedFirst.get(n) as number))) {
+          searchedFirst.set(n, ts);
+        }
+      }
+      continue;
+    }
+    const f = norm(e.file);
+    if (!f) continue;
+    if (t === 'read_block') {
+      if (!blockedFirst.has(f) || ts < (blockedFirst.get(f) as number)) {
+        blockedFirst.set(f, ts);
+      }
+    } else if (t === 'file_edit') {
+      const arr = editTs.get(f) ?? [];
+      arr.push(ts);
+      editTs.set(f, arr);
+    } else if (t === 'read_pass') {
+      fullyRead.add(f);
+    } else if (t === 'read_chunked' || t === 'grep_search' || t === 'bash_inspect') {
+      touchedRead.add(f);
+    }
+  }
+  const steered = (f: string | null, evTs: number): boolean =>
+    !!f &&
+    (((searchedFirst.get(f) ?? Infinity) < evTs) ||
+      ((blockedFirst.get(f) ?? Infinity) < evTs));
+
+  const creditedTier1 = new Set<string>();
+  for (const e of parsed) {
+    const t = e.type ?? 'search_code';
+    const evTs = e.ts ?? 0;
     if (t === 'read_block') {
       d.blockCount += 1;
       d.blockBaseline += Math.min(e.estimated_baseline_tokens ?? 0, MAX_BASELINE_PER_EVENT);
@@ -247,47 +321,100 @@ function readSessionLog(historyPath: string): PendingDelta | null {
       d.warnBaseline += Math.min(e.estimated_baseline_tokens ?? 0, MAX_BASELINE_PER_EVENT);
     } else if (t === 'grep_search') {
       d.grepCount += 1;
-      const [cb, ca] = capProportional(
-        e.estimated_baseline_tokens ?? 0,
-        e.estimated_actual_tokens ?? 0,
-      );
-      d.grepBaseline += cb;
-      d.grepActual += ca;
+      if (steered(norm(e.file), evTs)) {
+        const [cb, ca] = capProportional(
+          e.estimated_baseline_tokens ?? 0,
+          e.estimated_actual_tokens ?? 0,
+        );
+        d.grepBaseline += cb;
+        d.grepActual += ca;
+      } else {
+        // Agent grepped on its own — not a Tokengram saving; real spend only.
+        d.ungatedSpent += Math.min(e.estimated_actual_tokens ?? 0, MAX_BASELINE_PER_EVENT);
+      }
     } else if (t === 'bash_inspect') {
       d.bashCount += 1;
-      const [cb, ca] = capProportional(
-        e.estimated_baseline_tokens ?? 0,
-        e.estimated_actual_tokens ?? 0,
-      );
-      d.bashBaseline += cb;
-      d.bashActual += ca;
+      if (steered(norm(e.file), evTs)) {
+        const [cb, ca] = capProportional(
+          e.estimated_baseline_tokens ?? 0,
+          e.estimated_actual_tokens ?? 0,
+        );
+        d.bashBaseline += cb;
+        d.bashActual += ca;
+      } else {
+        d.ungatedSpent += Math.min(e.estimated_actual_tokens ?? 0, MAX_BASELINE_PER_EVENT);
+      }
     } else if (t === 'read_pass') {
       d.readPassTokens += e.estimated_tokens ?? 0;
     } else if (t === 'bash_output') {
       d.bashOutputTokens += e.estimated_tokens ?? 0;
     } else if (t === 'read_chunked') {
       d.chunkedCount += 1;
-      const [cb, cs] = capProportional(
-        e.estimated_baseline_tokens ?? 0,
-        e.estimated_spent_tokens ?? 0,
-      );
-      d.chunkedBaseline += cb;
-      d.chunkedSpent += cs;
+      if (steered(norm(e.file), evTs)) {
+        // Steered chunk-read: search/block pointed the agent here — the
+        // full-read alternative is a fair counterfactual.
+        const [cb, cs] = capProportional(
+          e.estimated_baseline_tokens ?? 0,
+          e.estimated_spent_tokens ?? 0,
+        );
+        d.chunkedBaseline += cb;
+        d.chunkedSpent += cs;
+      } else {
+        // Un-steered chunked Read = the agent's own habit — no credit.
+        d.ungatedSpent += e.estimated_spent_tokens ?? 0;
+      }
+    } else if (t === 'file_edit') {
+      // Evidence only — consumed in the evidence pass above.
     } else {
       d.searchCount += 1;
-      d.searchActual += e.actual_tokens ?? 0;
       const files = e.files ?? {};
-      // search_code: count only the TOP file toward the baseline (rank order is preserved).
-      // Without MLA an agent would do 1 chunked Read, not N files.
-      const entries = Object.entries(files);
-      if (entries.length > 0) {
-        const topTokens = entries[0][1] as number;
-        d.searchBaseline += Math.min(topTokens, MAX_BASELINE_PER_EVENT);
-        for (const [p] of entries) uniqueFiles.set(p, 0);
+      const fentries = Object.entries(files);
+      const evActual = e.actual_tokens ?? 0;
+      if (fentries.length === 0) {
+        d.searchActual += evActual;
+        continue;
+      }
+      for (const [p] of fentries) uniqueFiles.set(p, 0);
+      const normed = fentries.map(
+        ([fp, tok]) => [norm(fp), tok as number] as const,
+      );
+
+      // Tier 1 — "replaced a read": surfaced file later EDITED without ever
+      // being read: the chunk supplied the content. Deduped across searches.
+      let tier1 = 0;
+      for (const [n, tok] of normed) {
+        if (!n || creditedTier1.has(n)) continue;
+        if (fullyRead.has(n) || touchedRead.has(n)) continue;
+        if ((editTs.get(n) ?? []).some((x) => x > evTs)) {
+          tier1 += Math.min(tok, MAX_BASELINE_PER_EVENT);
+          creditedTier1.add(n);
+        }
+      }
+      const anyTouched = normed.some(([n]) => n !== null && touchedRead.has(n));
+      const anyFullyRead = normed.some(([n]) => n !== null && fullyRead.has(n));
+
+      if (tier1 > 0) {
+        d.searchBaseline += tier1;
+        d.searchActual += evActual;
+      } else if (anyTouched) {
+        // Follow-up chunk/grep events carry the credit — no double counting.
+        d.searchActual += evActual;
+      } else if (anyFullyRead) {
+        // B1 — a surfaced file was read in full anyway: chunks were overhead.
+        d.ungatedSpent += evActual;
+      } else {
+        // Untouched results = the chunks alone answered. Credit the hunt cost
+        // (server-computed); old wheels lack it → top file alone as fallback.
+        let hunt = e.hunt_tokens;
+        if (typeof hunt !== 'number' || hunt <= 0) {
+          hunt = Math.min(normed[0][1], MAX_BASELINE_PER_EVENT);
+        }
+        hunt = Math.min(hunt, 5 * MAX_BASELINE_PER_EVENT);
+        d.searchBaseline += hunt;
+        d.searchActual += evActual;
       }
     }
   }
-  if (!hasAny) return null;
   d.fileCount = uniqueFiles.size;
   return d;
 }
@@ -417,18 +544,32 @@ export function readSavings(historyPath: string): SavingsSummary | null {
   // a "starting..." state looks to the user like an endless load.
 
   const cutoff = Date.now() / 1000 - 86400;
-  const recent = records.filter((r) => r.ts >= cutoff);
+  // Method-2 cut-over: ALL token math counts only records written by the
+  // evidence-based Stop hook (method >= 2). Earlier records were produced by
+  // inflationary heuristics (un-steered chunked/grep credits — audited at 72%
+  // of the displayed total on 2026-07-06); they stay in the file for audit,
+  // but not in the numbers. Activity counters (tasks/searches) still count
+  // every record — the activity was real regardless of how it was priced.
+  const honest = records.filter((r) => (r.method ?? 0) >= 2);
+  const recent = honest.filter((r) => r.ts >= cutoff);
   const actualR = recent.reduce((s, r) => s + r.actual_tokens, 0);
   const baseR = recent.reduce((s, r) => s + r.baseline_tokens, 0);
-  const savedR = baseR - actualR;
-  // Aggregate the new real-spend buckets from history. In old records
-  // (before the new hooks) these are undefined, defaulting to 0.
-  const readPassTokens24h = recent.reduce(
-    (s, r) => s + (r.read_pass_tokens ?? 0),
-    0,
-  );
-  const bashOutputTokens24h = recent.reduce(
-    (s, r) => s + (r.bash_output_tokens ?? 0),
+  // A single task can never register as a net LOSS. Should response overhead
+  // edge past the evidence-based baseline, clamp PER RECORD — symmetric with
+  // the pending path — so neither the 24h nor the lifetime figure drops below 0.
+  const recordSaved = (r: SavingsRecord): number =>
+    Math.max(0, r.baseline_tokens - r.actual_tokens);
+  const savedR = recent.reduce((s, r) => s + recordSaved(r), 0);
+  // Lifetime saved across the honest history (no cutoff) — monotonic headline.
+  const savedLifetimeHistory = honest.reduce((s, r) => s + recordSaved(r), 0);
+  // Real-spend from history for the % denominator. New records carry the full
+  // untracked bucket (read_pass + bash_output + cancelled + ungated); fall back
+  // to the two legacy fields when it's absent.
+  const untrackedTokens24h = recent.reduce(
+    (s, r) =>
+      s +
+      (r.untracked_spent_tokens ??
+        (r.read_pass_tokens ?? 0) + (r.bash_output_tokens ?? 0)),
     0,
   );
 
@@ -508,6 +649,8 @@ export function readSavings(historyPath: string): SavingsSummary | null {
     chunkedSpent: 0,
     readPassTokens: 0,
     bashOutputTokens: 0,
+    ungatedSpent: 0,
+    newestTs: 0,
   };
   const pendingSavedBlocks = p.blockBaseline;
   const pendingSavedGreps = Math.max(0, p.grepBaseline - p.grepActual);
@@ -533,14 +676,14 @@ export function readSavings(historyPath: string): SavingsSummary | null {
   // so the % figure reflects the real session reduction.
   const realSpent24h =
     actualR +
-    readPassTokens24h +
-    bashOutputTokens24h +
+    untrackedTokens24h +
     p.searchActual +
     p.grepActual +
     p.bashActual +
     p.chunkedSpent +
     p.readPassTokens +
-    p.bashOutputTokens;
+    p.bashOutputTokens +
+    p.ungatedSpent;
   const realTotal24h = savedTokens24h + realSpent24h;
   // Low-sample guard: just after VS Code reload only "saved" events have
   // been recorded yet (chunked-Read / Edit / Bash actuals haven't fired),
@@ -563,6 +706,7 @@ export function readSavings(historyPath: string): SavingsSummary | null {
     totalWarns: totalWarns + p.warnCount,
     totalFiles: totalFiles + p.fileCount,
     savedTokens24h,
+    savedTokensLifetime: savedLifetimeHistory + pendingSaved,
     savedFromSearch24h: savedFromSearchHistory + pendingSavedSearch,
     savedFromBlocks24h: savedFromBlocksHistory + pendingSavedBlocks,
     savedFromGreps24h: savedFromGrepsHistory + pendingSavedGreps,
@@ -577,6 +721,8 @@ export function readSavings(historyPath: string): SavingsSummary | null {
     pendingSavedTokens: pendingSaved,
     pendingActivityCount:
       p.searchCount + p.blockCount + p.grepCount + p.bashCount + p.warnCount,
+    pendingNewestAgeSec:
+      p.newestTs > 0 ? Math.max(0, Date.now() / 1000 - p.newestTs) : -1,
     indexingPending,
     historyEmpty: historyStats.empty,
     historyMtimeAgeSec: historyStats.mtimeAgeSec,

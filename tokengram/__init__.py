@@ -1,5 +1,5 @@
 """Tokengram — token-saving memory layer for AI coding assistants."""
-__version__ = "0.1.44"
+__version__ = "0.1.45"
 
 
 def _ensure_pkg_dir_on_syspath() -> None:

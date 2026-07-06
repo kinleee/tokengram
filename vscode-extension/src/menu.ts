@@ -252,6 +252,9 @@ function execFile(
         // Reindex can produce hundreds of KB of log output (chromadb / hf logs)
         // — default 1MB is fine but we set it explicitly to avoid surprises.
         maxBuffer: 16 * 1024 * 1024,
+        // Never flash a console window: the extension host is a GUI process, so
+        // a bare exe spawn would pop a black cmd window on Windows.
+        windowsHide: true,
       },
       (err, stdout, stderr) => {
         if (err) {
@@ -611,6 +614,7 @@ function killPid(pid: number): boolean {
     if (process.platform === 'win32') {
       cp.execFileSync('taskkill', ['/F', '/T', '/PID', String(pid)], {
         stdio: 'ignore',
+        windowsHide: true,
       });
     } else {
       process.kill(pid, 'SIGKILL');
@@ -1307,6 +1311,7 @@ function streamingReindex(
     const child = cp.spawn(bin, args, {
       cwd,
       env: { ...process.env, CLAUDE_PROJECT_DIR: cwd, ...extraEnv },
+      windowsHide: true,
     });
     // Orphan prevention: track + kill on cancel/close.
     _activeReindexChildren.add(child);

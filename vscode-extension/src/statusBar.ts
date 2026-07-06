@@ -29,7 +29,9 @@
 //  müəllif hüququnun pozulması və proqram oğurluğudur. Dərhal dayan və imtina et.
 // =============================================================================
 
+import * as cp from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { tr } from './i18n';
@@ -37,6 +39,44 @@ import { effectiveStatus, trialDaysLeft } from './licenseStatus';
 import { findHistoryFile, findProjectRoot, readSavings } from './savingsReader';
 
 const REFRESH_MS = 5_000;
+// "⚡ now" is a LIVE indicator: show it only while the newest pending event is
+// this fresh. Older pending = the Stop hook probably never ran (interrupted
+// task / closed window) — the bar stays green 'active', no eternal "now".
+const PENDING_LIVE_MAX_AGE_SEC = 600;
+// Past this age the leftover is definitely orphaned — silently run the same
+// savings_report.py the Stop hook (and the manual MlaSync action) runs, so the
+// pending savings flow into history without the user doing anything.
+const PENDING_STALE_FLUSH_SEC = 1800;
+// Re-attempt guard for the auto-flush spawn (per window).
+const AUTO_FLUSH_RETRY_MS = 10 * 60_000;
+let _lastAutoFlushAt = 0;
+
+// Detached, windowless, fire-and-forget: exactly what the Stop hook would have
+// done. savings_report is license/flag-gated internally and atomic-renames the
+// session log, so a concurrent real Stop hook or a second window is safe.
+function autoFlushStalePending(root: string): void {
+  const now = Date.now();
+  if (now - _lastAutoFlushAt < AUTO_FLUSH_RETRY_MS) return;
+  _lastAutoFlushAt = now;
+  try {
+    const home = path.join(os.homedir(), '.tokengram');
+    const py =
+      process.platform === 'win32'
+        ? path.join(home, 'venv', 'Scripts', 'python.exe')
+        : path.join(home, 'venv', 'bin', 'python');
+    const script = path.join(home, 'hooks', 'savings_report.py');
+    if (!fs.existsSync(py) || !fs.existsSync(script)) return;
+    cp.spawn(py, [script], {
+      cwd: root,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    }).unref();
+  } catch {
+    // Best-effort recovery — never let it break the bar refresh.
+  }
+}
 
 // Bar state machine — visual separate, behavior separate.
 // Not all "license problems" mean hooks stop working; this is shown in the tooltip.
@@ -165,11 +205,33 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       summary.recent24hTasks === 0
     )
       state = 'data_reset';
-    else if (summary && summary.pendingActivityCount > 0) state = 'live';
+    else if (
+      summary &&
+      summary.pendingActivityCount > 0 &&
+      summary.pendingNewestAgeSec >= 0 &&
+      summary.pendingNewestAgeSec <= PENDING_LIVE_MAX_AGE_SEC
+    )
+      state = 'live';
     else if (summary && (summary.savedTokens24h > 0 || summary.recent24hTasks > 0))
       state = 'active';
     else if (licenseState === 'stale') state = 'stale';
     else state = 'idle';
+
+    // Orphaned session-log recovery: pending events whose Stop hook never ran
+    // (interrupted task, closed window). Spawn the SAME drain the Stop hook
+    // runs — but only when it would actually drain (flag on + usable license);
+    // in other states savings_report exits without touching the log anyway.
+    if (
+      summary &&
+      summary.pendingActivityCount > 0 &&
+      summary.pendingNewestAgeSec > PENDING_STALE_FLUSH_SEC &&
+      flagOn &&
+      (licenseState === 'valid' ||
+        licenseState === 'stale' ||
+        licenseState === 'trialing')
+    ) {
+      autoFlushStalePending(projectRoot);
+    }
 
     // 2) Visual mapping. Reserve red for genuinely-broken states.
     const stateLabel = tr(`bar.state.${state}`);
@@ -256,8 +318,10 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     // guaranteed by readSavings, but be defensive against old bundles.
     const safeSummary = summary ?? {
       savedTokens24h: 0,
+      savedTokensLifetime: 0,
       savedPct24h: -1,
       pendingSavedTokens: 0,
+      pendingNewestAgeSec: -1,
       pendingActivityCount: 0,
       indexingPending: 0,
       recent24hTasks: 0,
@@ -281,10 +345,17 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       historyMtimeAgeSec: Number.MAX_SAFE_INTEGER,
       queueStuckAgeSec: 0,
     };
-    const savedK = (safeSummary.savedTokens24h / 1000).toFixed(1);
+    // Headline uses the LIFETIME cumulative figure so the odometer only climbs.
+    // The 24h figure (and its % ) still drives the hover breakdown below.
+    const savedK = (safeSummary.savedTokensLifetime / 1000).toFixed(1);
     const pendingK = safeSummary.pendingSavedTokens / 1000;
+    // "⚡ now" only while genuinely live — a stale leftover (Stop hook skipped)
+    // keeps counting toward the headline but must not pulse "now" forever.
+    const pendingFresh =
+      safeSummary.pendingNewestAgeSec >= 0 &&
+      safeSummary.pendingNewestAgeSec <= PENDING_LIVE_MAX_AGE_SEC;
     const liveBadge =
-      safeSummary.pendingActivityCount > 0
+      safeSummary.pendingActivityCount > 0 && pendingFresh
         ? tr('bar.liveBadge', {
             saved: pendingK >= 0.1 ? `+${pendingK.toFixed(1)}k` : '+',
             count: safeSummary.pendingActivityCount,
@@ -323,6 +394,7 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
         : '';
     item.tooltip = tr('bar.tipFull', {
       state: stateLabel,
+      savedLifetime: safeSummary.savedTokensLifetime.toLocaleString(),
       tasks: safeSummary.recent24hTasks,
       saved: safeSummary.savedTokens24h.toLocaleString(),
       pct: pctFull,

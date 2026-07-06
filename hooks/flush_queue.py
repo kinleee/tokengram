@@ -255,10 +255,31 @@ def _spawn_detached_cold_drain() -> int:
         return _cold_drain()
 
 
+def _license_ok(blocking: bool) -> bool:
+    """License-only gate (deliberately NOT the enforcement flag).
+
+    Flag-off is a user preference — edits queued while licensed should still
+    finish indexing (harmless freshness, the user paid). A DEAD license is
+    different: draining runs the embedding model, i.e. delivers real compute —
+    that stops. The queue is left INTACT so it drains when the license returns.
+    Fail-open on import errors: a broken hook layout must not silently brick a
+    paid user's indexing — the valuable surface (search) is gated per-call in
+    the compiled server anyway.
+    """
+    try:
+        from license_gate import license_valid
+        return license_valid(blocking=blocking)
+    except Exception:
+        return True
+
+
 def main() -> int:
     # Detached worker mode: drain cold right here and exit. No stdin, no grace,
-    # no re-spawn (so there's no chance of a spawn loop).
+    # no re-spawn (so there's no chance of a spawn loop). Re-check the license
+    # here too — this process may start well after the Stop hook that spawned it.
     if "--cold" in sys.argv[1:]:
+        if not _license_ok(blocking=True):
+            return 0
         return _cold_drain()
 
     # We read and discard stdin — there's nothing interesting in the Stop hook.
@@ -266,6 +287,11 @@ def main() -> int:
         sys.stdin.read()
     except Exception:
         pass
+
+    # Stop hook path: non-blocking (the turn's completion waits on this hook —
+    # never pay a license-server round-trip here; cached value is fine).
+    if not _license_ok(blocking=False):
+        return 0
 
     # If there's no work to do, exit immediately (don't even drop the marker).
     if _queue_is_empty():

@@ -124,10 +124,16 @@ class TestStopChain(unittest.TestCase):
         self.assertEqual(r["blocks"], 1)
         self.assertEqual(r["greps"], 1)
         self.assertEqual(r["bash_inspects"], 1)
-        # Baseline = 500 + 1000 + 500 + 600 = 2600
-        self.assertEqual(r["baseline_tokens"], 2600)
-        # Actual = 100 + 75 + 120 = 295  (block-da 0)
-        self.assertEqual(r["actual_tokens"], 295)
+        # Sübut-əsaslı model (method 2): search-ün nəticəsinə toxunulmayıb →
+        # hunt fallback = min(top_file, cap) = 500; block = 1000 (real cəhd).
+        # Sübutsuz (un-steered) grep/bash KREDİT ALMIR — xərcləri ungated-ə düşür.
+        self.assertEqual(r["method"], 2)
+        # Baseline = 500 (search hunt) + 1000 (block) = 1500
+        self.assertEqual(r["baseline_tokens"], 1500)
+        # Actual = yalnız search chunk-ları = 100 (grep/bash ungated xərcdir)
+        self.assertEqual(r["actual_tokens"], 100)
+        # Ungated = grep 75 + bash 120 = 195
+        self.assertEqual(r["ungated_spent_tokens"], 195)
 
     def test_savings_off_flag_clears_session_no_history(self):
         SESSION_LOG.write_text('{"query":"x","files":{},"actual_tokens":0}\n', encoding="utf-8")

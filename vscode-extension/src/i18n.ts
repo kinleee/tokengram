@@ -191,6 +191,7 @@ const EN: Messages = {
 
   'bar.tipFull':
     'State: {state}\n' +
+    'All-time saved: {savedLifetime} tokens  ← the headline number\n' +
     'Last 24h: {tasks} tasks, {saved} tokens saved ({pct} on tracked ops) · {files} files\n' +
     '  • search_code: {search} tok\n' +
     '  • Grep: {grep} tok ({greps} greps)\n' +

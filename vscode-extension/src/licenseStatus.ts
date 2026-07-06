@@ -168,7 +168,7 @@ export function getMachineFingerprint(): Promise<string> {
     cp.execFile(
       VENV_PYTHON,
       ['-c', 'from tokengram import license; print(license.machine_fingerprint())'],
-      { encoding: 'utf-8', timeout: HTTP_TIMEOUT_MS },
+      { encoding: 'utf-8', timeout: HTTP_TIMEOUT_MS, windowsHide: true },
       (err, stdout, stderr) => {
         if (err) {
           reject(new Error(stderr.trim() || err.message));
