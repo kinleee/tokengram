@@ -25,15 +25,40 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+# Versiya = TƏK həqiqət mənbəyi (package.json). VSIX-ləri LastWriteTime ilə
+# yox, MƏHZ BU VERSİYA ilə seçirik — köhnə "ən yeni faylı götür" məntiqi
+# həm platformalar arası qarışırdı, həm də linux-x64-u tez-tez atırdı
+# (bu, "linux vsix yoxdur" şikayətinin əsl kök səbəbi idi).
+$extVersion = (Get-Content "vscode-extension\package.json" -Raw | ConvertFrom-Json).version
+Write-Host "Ext versiya (package.json): $extVersion" -ForegroundColor Cyan
+
 $wheel = Get-ChildItem -Path "dist\tokengram-*.whl" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-$vsix = Get-ChildItem -Path "vscode-extension\tokengram-*.vsix" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+# HƏR İKİ platforma VSIX-i bu versiya üçün — QAYDA: ikisi birlikdə publish.
+$vsixWin   = Get-Item "vscode-extension\tokengram-win32-x64-$extVersion.vsix" -ErrorAction SilentlyContinue
+$vsixLinux = Get-Item "vscode-extension\tokengram-linux-x64-$extVersion.vsix" -ErrorAction SilentlyContinue
+$vsixes = @($vsixWin, $vsixLinux) | Where-Object { $_ }
 
 if (-not $wheel) { Write-Host "ERROR: no wheel found in dist/" -ForegroundColor Red; exit 1 }
-if (-not $vsix)  { Write-Host "ERROR: no .vsix found in vscode-extension/" -ForegroundColor Red; exit 1 }
+if (-not $vsixWin) {
+    Write-Host "ERROR: win32-x64 VSIX yoxdur: tokengram-win32-x64-$extVersion.vsix" -ForegroundColor Red
+    Write-Host "  Düzəlt:  cd vscode-extension; npx vsce package --target win32-x64 -o tokengram-win32-x64-$extVersion.vsix" -ForegroundColor Yellow
+    exit 1
+}
+if (-not $vsixLinux) {
+    # Linux VSIX YALNIZ CI-da (Ubuntu) build olunur — Windows-da mümkün deyil.
+    Write-Host "ERROR: linux-x64 VSIX yoxdur: tokengram-linux-x64-$extVersion.vsix" -ForegroundColor Red
+    Write-Host "  Linux VSIX CI artefaktıdır. Endirmək üçün (v$extVersion tag push-dan sonra):" -ForegroundColor Yellow
+    Write-Host "    .\fetch_linux_vsix.ps1 -Version $extVersion" -ForegroundColor Yellow
+    Write-Host "  QAYDA: win + linux HƏMİŞƏ birlikdə publish olunur — Linux olmadan davam ETMƏ." -ForegroundColor Yellow
+    exit 1
+}
 
 Write-Host "=== Release artefaktlar ===" -ForegroundColor Cyan
 Write-Host "  PyPI wheel:  $($wheel.Name) ($([math]::Round($wheel.Length/1KB,1)) KB)"
-Write-Host "  VSIX:        $($vsix.Name)  ($([math]::Round($vsix.Length/1KB,1)) KB)"
+foreach ($v in $vsixes) {
+    Write-Host "  VSIX:        $($v.Name)  ($([math]::Round($v.Length/1MB,2)) MB)"
+}
 
 # --- Pre-flight credential check ---
 if (-not $SkipPyPI -and -not $env:TWINE_PASSWORD) {
@@ -66,19 +91,22 @@ if (-not $SkipPyPI) {
     }
 }
 
-# --- 2. Marketplace publish ---
+# --- 2. Marketplace publish (HƏR İKİ platforma VSIX-i) ---
 if (-not $SkipMarketplace) {
-    Write-Host "`n=== 2/2  VS Code Marketplace publish ===" -ForegroundColor Cyan
+    Write-Host "`n=== 2/2  VS Code Marketplace publish ($($vsixes.Count) VSIX) ===" -ForegroundColor Cyan
     Set-Location $PSScriptRoot\vscode-extension
-    if ($DryRun) {
-        Write-Host "  (dry-run) npx vsce publish --packagePath $($vsix.FullName) --pat ***"
-    } else {
-        & npx vsce publish --packagePath $vsix.FullName --pat $env:VSCE_PAT
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "`nMarketplace publish FAILED. Note: PyPI artıq yüklənib." -ForegroundColor Red
-            exit 1
+    foreach ($v in $vsixes) {
+        Write-Host "`n  → $($v.Name)" -ForegroundColor Cyan
+        if ($DryRun) {
+            Write-Host "    (dry-run) npx vsce publish --packagePath $($v.FullName) --pat ***"
+        } else {
+            & npx vsce publish --packagePath $v.FullName --pat $env:VSCE_PAT
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "`n  Marketplace publish FAILED: $($v.Name). Note: PyPI artıq yüklənib." -ForegroundColor Red
+                exit 1
+            }
+            Write-Host "    ✓ published: $($v.Name)" -ForegroundColor Green
         }
-        Write-Host "  ✓ Marketplace published" -ForegroundColor Green
     }
     Set-Location $PSScriptRoot
 }
