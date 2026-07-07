@@ -17,6 +17,15 @@ When you ask Claude a question, it normally reads whole files into its context w
 - ♻️ **Auto re-index** — saved files are picked up automatically
 - 🎯 **Hybrid search** — semantic (meaning) + BM25 (keyword) + cross-encoder reranker
 - 📊 **Live status bar** — see real-time savings as you code
+- ✓ **Evidence-based savings** — *we only count savings we can prove*
+
+## Evidence-based savings
+
+Most tools show inflated "estimated savings". Tokengram counts a token as
+saved **only when it has hard evidence**: a search that answered without
+opening the file, a blocked full-file read, a targeted edit after a search.
+The number in your status bar is smaller than a marketing estimate — and you
+can verify it against your own usage bill.
 
 ## When it works
 
