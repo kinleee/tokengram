@@ -7,7 +7,7 @@ the very same scripts, so behaviour stays identical across UIs.
 
 | Command | What it does | Script |
 |---|---|---|
-| `/MlaOn` | Enable Read-enforcement — block large (≥50 lines) indexed files, force the assistant to use `search_code` | `hooks/toggle_mla.py on` |
+| `/MlaOn` | Enable Read-guidance — nudge the assistant toward `search_code` on large indexed files (warn-only, nothing is blocked) | `hooks/toggle_mla.py on` |
 | `/MlaOff` | Disable enforcement — `Read` is unrestricted, `search_code` is optional | `hooks/toggle_mla.py off` |
 | `/MlaRefreshBar` | Force the VS Code status bar to refresh immediately (`mtime` touch) | `hooks/refresh_bar.py` |
 | `/MlaResetBar` | Reset the savings history (old history is moved to a backup); the bar starts from zero | `hooks/reset_savings.py` |
@@ -24,47 +24,50 @@ Go, Rust, Java, Kotlin, C/C++/C#, Ruby, PHP, Swift, Dart, HTML/CSS/SCSS,
 JSON/YAML/TOML, shell, Terraform). After adding a new extension, run
 `/MlaReindex` so ChromaDB actually contains content for that file type.
 
-| Line count | Behaviour |
+There is **no hard block** (an earlier ≥50-line block broke editing —
+`Edit` requires a prior `Read`). The hook only warns and logs:
+
+| Read call | Behaviour |
 |---|---|
-| ≥ 50 | **Block** (exit 2) — assistant must use `search_code` |
-| 30 – 49 | **Allow + soft tip** (stderr) — `search_code` would be cheaper |
-| < 30 | **Silent allow** — savings are minimal |
+| with `limit`/`offset` (chunked) | **Silent allow** — logged as `read_chunked` (baseline + spent) |
+| full read, ≥ 250 lines | **Allow + tip** (stderr) — logged as `read_warn` + `read_pass` |
+| full read, < 250 lines | **Silent allow** — logged as `read_pass` (real spend) |
 
-State file: `.mla_enforcement.flag` (`on` / `off`). When **OFF**, none of
-`arch_doc.py`, `savings_report.py`, `pre_read_check.py` do anything — the
-counter freezes and the session log stops accumulating.
+State file: `.mla_enforcement.flag` (`on` / `off`). When **OFF** the hooks
+do nothing — the counter freezes and the session log stops accumulating
+(the log itself is left untouched to avoid racing a parallel writer).
 
-## Token-tracking sources (4 types)
+## Token tracking — evidence-based attribution ("method 2", 2026-07-06)
 
 The Stop hook `savings_report.py` reads `.mla_session_log.jsonl` after
-each task and sums these four event types:
+each task. An event earns savings credit **only when the session itself
+shows Tokengram caused the saving** — heuristic credits with no steering
+evidence earn 0 (the old chunked/grep heuristics minted ~72% of the
+displayed total with no evidence; that inflation is gone).
 
-| Type | Source | Baseline | Actual |
-|---|---|---|---|
-| **search_code** | MCP tool call | total size of all returned files | tokens in the returned chunks |
-| **Grep** (`post_grep_check.py`) | Grep tool on indexed file (≥30 lines) | `lines * 10` | `baseline * 15%` (heuristic) |
-| **Bash-inspect** (`post_bash_check.py`) | Inspect command on indexed file (≥50 lines). Detected keywords: `cat / head / tail / wc / less / more / awk / sed / type / findstr / gc / Get-Content / Select-String / sls / git show <ref>:<path>` | `lines * 10` | `baseline * 20%` (heuristic) |
-| **Read-block** (`pre_read_check.py`) | A block event (≥50 lines) | `lines * 10` | 0 (file was not read) |
+Credit tiers (strongest first):
 
-Each baseline contributes to the total; **actual** is recorded only when
-the assistant actually consumed tokens (blocks have 0 actual). The status
-bar shows the total; hovering the widget reveals the search / Grep /
-Read-block breakdown (bash-inspect is folded into the total).
+| Tier | Evidence | Credit |
+|---|---|---|
+| **Tier 1 — replaced a read** | `search_code` surfaced a file that the agent later **edited without ever reading it** | full file size (capped at 10k/event), deduped per file |
+| **Steered chunk/grep** | a search surfaced the file **before** the chunked Read / Grep happened | full-read alternative (capped); the chunk's own cost counts as spend |
+| **Hunt** | search results never touched and the task completed — the snippets alone answered | server-computed `hunt_tokens` (keyword-rank simulation of finding the file without MLA) |
+| **B1 — cancelled** | the agent read a surfaced file **in full** anyway | 0 — the search was pure overhead; its cost goes to the denominator |
+| **Un-steered chunk/grep/bash** | the agent chunked/grepped on its own habit; no search pointed it there | 0 credit; the spend still counts (`ungated_spent_tokens`) |
 
-The 15 % / 20 % ratios are heuristics — true Grep/Bash output token counts
-aren't known to the hook, so we estimate against the Read alternative.
-The estimate skews conservative; real savings are usually higher.
+Every history record is stamped `"method": 2`. The status bar sums
+**only `method >= 2` records** — older records (written under the
+inflationary heuristics) stay in `.mla_savings_history.jsonl` for audit
+but are excluded from all displayed totals. Full reads, bash output and
+cancelled searches all count as real spend, so the percentage is honest:
+`saved / (saved + spent + untracked)`.
 
 ## Localization (`MLA_LANG`)
 
-User-facing strings produced by the hooks (block message, savings
-summary, missing-arch-doc note, etc.) are routed through `i18n.py`. The
-default locale is **English**. Switch to Azerbaijani:
-
-```bash
-export MLA_LANG=az     # Linux / macOS
-$env:MLA_LANG = 'az'   # Windows PowerShell
-```
+User-facing hook strings are routed through `i18n.py`
+(`messages/en.json`). The product is currently **English-only** — the
+`az.json` locale was removed before launch. `MLA_LANG` is still honored
+for future locales; an unsupported value silently falls back to English.
 
 The VS Code extension picks its locale from `vscode.env.language`. See
 the README for details on adding more languages.

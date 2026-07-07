@@ -54,6 +54,7 @@ JSON format received from stdin:
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # Central lists — in the install layout mla_constants sits next to the hook.
@@ -66,6 +67,7 @@ try:
         EXCLUDED_DIRS,
         EXCLUDED_FILE_PATTERNS,
         EXCLUDED_FILE_SUFFIXES,
+        is_gitignored,
     )
     from license_gate import enforcement_active
     from project_root import find_project_root
@@ -108,6 +110,22 @@ def main() -> int:
     except Exception:
         pass
 
+    # Savings evidence: log WHICH file the agent edited. The Stop hook's Tier-1
+    # attribution uses this — a search-surfaced file later EDITED without ever
+    # being read means the chunk supplied the content (strongest per-file
+    # evidence). Logged BEFORE the index filters: search only surfaces indexed
+    # files anyway, so extra paths are inert, but the evidence stays complete.
+    try:
+        append_atomic(
+            PROJECT_ROOT / ".mla_session_log.jsonl",
+            json.dumps(
+                {"ts": time.time(), "type": "file_edit", "file": str(p.resolve())},
+                ensure_ascii=False,
+            ),
+        )
+    except Exception:
+        pass
+
     # Filters (lowercase suffix to handle the Windows `.PY` != `.py` problem)
     if p.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return 0
@@ -117,6 +135,12 @@ def main() -> int:
         return 0
     if any(p.name.endswith(sfx) for sfx in EXCLUDED_FILE_SUFFIXES):
         return 0
+    # Project .gitignore (untracked+ignored) — no-op if not git / on error
+    try:
+        if is_gitignored(p):
+            return 0
+    except Exception:
+        pass
 
     # If already in the queue (.txt) or being drained (.processing), don't write
     # again — editing the same file repeatedly inflated the queue. The drainer

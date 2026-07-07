@@ -168,7 +168,7 @@ export function getMachineFingerprint(): Promise<string> {
     cp.execFile(
       VENV_PYTHON,
       ['-c', 'from tokengram import license; print(license.machine_fingerprint())'],
-      { encoding: 'utf-8', timeout: HTTP_TIMEOUT_MS },
+      { encoding: 'utf-8', timeout: HTTP_TIMEOUT_MS, windowsHide: true },
       (err, stdout, stderr) => {
         if (err) {
           reject(new Error(stderr.trim() || err.message));
@@ -354,7 +354,7 @@ export type TrialOutcome =
  * per fingerprint — deleting local files does not reset it; if an existing trial
  * is still active the same key is returned again (reinstall case).
  */
-export async function startTrial(serverUrl: string): Promise<TrialOutcome> {
+export async function startTrial(serverUrl: string, email?: string): Promise<TrialOutcome> {
   let fingerprint: string;
   try {
     fingerprint = await getMachineFingerprint();
@@ -367,10 +367,15 @@ export async function startTrial(serverUrl: string): Promise<TrialOutcome> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   try {
+    // email könüllüdür (verify yox) — yalnız əlaqə + conversion maili üçün.
+    const payload: { machine_fingerprint: string; email?: string } = {
+      machine_fingerprint: fingerprint,
+    };
+    if (email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) payload.email = email;
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ machine_fingerprint: fingerprint }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     const body = (await res.json().catch(() => ({}))) as {

@@ -84,7 +84,9 @@ models_cache/
 # Müvəqqəti append/edit faylları
 _tmp_*.md
 
-# .mcp.json backups (setupWizard hər yenidən yazanda .bak-<ts> yaradır — per-machine)
+# .mcp.json — setupWizard onu hər maşında sıfırdan yazır + içində maşına-spesifik
+# mütləq venv yolu var (per-machine, repo-ya commit olunmamalıdır)
+.mcp.json
 .mcp.json.bak*
 
 # Claude Code lokal/şəxsi tənzimləmələr (settings.json paylaşılır)
@@ -141,6 +143,7 @@ chroma_db.corrupt-*/
 .tokengram.reindex.want
 .tokengram.*.lock.tmp.*
 *.quarantine_pending
+*.bak-*
 # <<< Tokengram (auto-managed) <<<
 # Tokengram auto-created CLAUDE.md (search_code guidance — only meaningful
 # with the Tokengram MCP installed). Kept local. To share it with your team,

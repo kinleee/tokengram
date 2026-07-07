@@ -530,7 +530,7 @@ function installedWheelVersion(): Promise<string | null> {
     cp.execFile(
       py,
       ['-c', "import importlib.metadata as m;print(m.version('tokengram'))"],
-      { encoding: 'utf-8', timeout: 5000 },
+      { encoding: 'utf-8', timeout: 5000, windowsHide: true },
       (err, stdout) => {
         if (err) {
           resolve(null);
@@ -563,7 +563,7 @@ async function killTokengramVenvProcesses(): Promise<void> {
     const out = cp.execFileSync(
       'powershell',
       ['-NoProfile', '-NonInteractive', '-Command', script],
-      { encoding: 'utf-8', timeout: 8000 },
+      { encoding: 'utf-8', timeout: 8000, windowsHide: true },
     );
     const pids = out.trim().split(/\s+/).filter((s) => /^\d+$/.test(s));
     for (const pidStr of pids) {
@@ -620,7 +620,7 @@ function exactPython(actual: [number, number, number], required: readonly [numbe
 function tryPython(cmd: string): Promise<PythonInfo | null> {
   return new Promise((resolve) => {
     const parts = cmd.split(' ');
-    const child = cp.spawn(parts[0], [...parts.slice(1), '-c', 'import sys,json;print(json.dumps({"v":list(sys.version_info[:3]),"p":sys.executable}))'], { shell: false });
+    const child = cp.spawn(parts[0], [...parts.slice(1), '-c', 'import sys,json;print(json.dumps({"v":list(sys.version_info[:3]),"p":sys.executable}))'], { shell: false, windowsHide: true });
     let out = '';
     child.stdout.on('data', (d) => (out += d.toString()));
     child.on('error', () => resolve(null));
@@ -727,7 +727,7 @@ async function ensureUv(onMsg: (m: string) => void): Promise<string> {
           '-Command',
           `Expand-Archive -LiteralPath '${archivePath}' -DestinationPath '${TOKENGRAM_HOME}' -Force`,
         ],
-        { shell: false },
+        { shell: false, windowsHide: true },
       );
       let err = '';
       ps.stderr.on('data', (d) => (err += d.toString()));
@@ -743,7 +743,7 @@ async function ensureUv(onMsg: (m: string) => void): Promise<string> {
     // (uv-x86_64-unknown-linux-gnu/) containing the uv binary. Extract with tar,
     // move uv up to ~/.tokengram/uv, then ensure it is executable.
     await new Promise<void>((resolve, reject) => {
-      const tar = cp.spawn('tar', ['-xzf', archivePath, '-C', TOKENGRAM_HOME], { shell: false });
+      const tar = cp.spawn('tar', ['-xzf', archivePath, '-C', TOKENGRAM_HOME], { shell: false, windowsHide: true });
       let err = '';
       tar.stderr.on('data', (d) => (err += d.toString()));
       tar.on('error', reject);
@@ -822,6 +822,7 @@ async function runInstaller(
     }
     const child = cp.spawn(uvPath, args, {
       shell: false,
+      windowsHide: true,
       cwd: TOKENGRAM_HOME,
       // installer.py writes logs with Azerbaijani characters; on a pipe the
       // default cp1252 throws UnicodeEncodeError. Force UTF-8 (the installer also
@@ -1022,6 +1023,7 @@ export function writeWorkspaceHooks(): boolean {
 // drop a file into an empty folder.
 export function ensureGitignore(root: string): void {
   const SENTINEL = '# >>> Tokengram (auto-managed) — runtime artifacts, do not commit >>>';
+  const END = '# <<< Tokengram (auto-managed) <<<';
   try {
     const isGitRepo = fs.existsSync(path.join(root, '.git'));
     const giPath = path.join(root, '.gitignore');
@@ -1034,7 +1036,6 @@ export function ensureGitignore(root: string): void {
     } catch {
       cur = '';
     }
-    if (cur.includes('# >>> Tokengram (auto-managed)')) return; // already written
 
     const block =
       SENTINEL + '\n' +
@@ -1059,7 +1060,25 @@ export function ensureGitignore(root: string): void {
       '.tokengram.reindex.want\n' +
       '.tokengram.*.lock.tmp.*\n' +
       '*.quarantine_pending\n' +
-      '# <<< Tokengram (auto-managed) <<<\n';
+      // Timestamped backups Tokengram writes before editing settings.json / .mcp.json
+      // (menu.ts, setupWizard.ts). These must never be committed nor conflict on merge.
+      '*.bak-*\n' +
+      END + '\n';
+
+    // Versioned block: if an older managed block already exists, REPLACE it in
+    // place so previously set-up projects pick up newly-added artifact patterns
+    // (auto-heal). Only rewrite when the content actually changed — otherwise no-op.
+    const existing = new RegExp(
+      '# >>> Tokengram \\(auto-managed\\)[\\s\\S]*?' +
+        END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') +
+        '\\n?',
+    );
+    if (existing.test(cur)) {
+      const next = cur.replace(existing, block);
+      if (next !== cur) fs.writeFileSync(giPath, next, 'utf-8');
+      return;
+    }
+
     const sep = cur === '' ? '' : cur.endsWith('\n') ? '\n' : '\n\n';
     fs.appendFileSync(giPath, sep + block, 'utf-8');
   } catch {
@@ -1099,6 +1118,13 @@ export function ensureClaudeMdGuidance(root: string): void {
       '\n' +
       'These are guidelines, not hard rules — if a tool is genuinely the right\n' +
       'choice for the task, use it.\n' +
+      '\n' +
+      // Language-neutral: an English-only context nudges the model to think in
+      // English even for non-English users — this line counteracts that without
+      // hard-coding any language (user complaint 2026-07-06).
+      'Think and respond in the same language the user writes their task in.\n' +
+      'Code, commands, file names, and technical terms may stay in their\n' +
+      'original form.\n' +
       CLAUDE_MD_END;
 
     const mdPath = path.join(root, 'CLAUDE.md');

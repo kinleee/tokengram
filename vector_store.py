@@ -44,6 +44,7 @@ import json
 import hashlib
 import logging
 import os
+import time
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 
@@ -419,6 +420,13 @@ class ChromaVectorStore:
         # (skip_predelete=True, hash_filter=False) — o, hash-i özü yoxlayır.
         skipped_files = 0
         if hash_filter:
+            # Ghost sweep ƏVVƏL: legacy-forma/ölü chunk-lar silinir və onların
+            # hash girişləri atılır → aşağıdakı hash-gate həmin faylları
+            # "dəyişib" sayıb ELƏ BU KEÇİDDƏ yenidən embed edir.
+            try:
+                self.sweep_ghosts()
+            except Exception as e:
+                logger.warning(f"Ghost sweep keçildi: {e}")
             by_file: Dict[Optional[str], List] = {}
             for chunk in chunks:
                 fp = chunk.metadata.get("file_path") if hasattr(chunk, "metadata") else None
@@ -471,7 +479,10 @@ class ChromaVectorStore:
                             where={"file_path": {"$in": paths[j:j + 500]}}
                         )
                     except Exception as e:
-                        logger.debug(f"Batch pre-delete keçildi: {e}")
+                        # SUSMA: pre-delete uğursuzsa köhnə chunk-lar qalır,
+                        # yeniləri üstünə əlavə olunur → axtarış köhnə kodu
+                        # qaytarır. Bunu görünən et (sweep_ghosts sonra təmizləyər).
+                        logger.warning(f"Batch pre-delete uğursuz ({len(paths[j:j + 500])} fayl): {e}")
 
         stats = {"indexed": 0, "skipped": skipped_files, "errors": 0}
         total = len(chunks)
@@ -650,6 +661,104 @@ class ChromaVectorStore:
         except Exception as e:
             logger.error(f"Fayl silmə xətası: {e}")
     
+    def sweep_ghosts(self, min_interval_hours: float = 0.0) -> int:
+        """Kabus (ghost) chunk-ları təmizlə.
+
+        Chunk ID-si `file_path::chunk_N`-dir və köhnə chunk-lar metadata
+        file_path-i ilə silinir. Yol forması tarixən dəyişib (nisbi →
+        absolute-backslash → kanonik POSIX): köhnə forma ilə yazılmış
+        chunk-ların həm ID-si, həm metadata-sı bugünkü kanonik `$in`
+        delete-ə düşmür → fayl redaktə olunduqca indeksdə KÖHNƏ
+        reviziyaları yan-yana yığılır və axtarış köhnə kodu qaytarır
+        (2026-07-07: savings_report.py-nin 3 reviziyası canlı görüldü).
+        Silinmiş/rename olunmuş faylların chunk-ları da əbədi qalırdı.
+
+        Ghost tərifi:
+          a) metadata-da file_path yoxdur — heç bir path-delete onu tapa bilməz
+          b) file_path kanonik formada deyil — legacy-dövr yazısı
+          c) kanonikdir, amma fayl diskdə yoxdur — silinib/rename olunub
+
+        (b)/(c)-də faylın kanonik hash-store girişi də atılır ki, mövcud
+        fayl növbəti reindex-də mütləq yenidən embed olunsun (əks halda
+        hash "dəyişməyib" deyər və fayl indekssiz qalardı).
+
+        Args:
+            min_interval_hours: >0 və son sweep bundan təzədirsə heç nə
+                edilmir (marker: chroma_db/.ghost_sweep_ts). Drain kimi
+                tez-tez çağrılan yollar üçün; açıq reindex 0 ilə çağırır.
+
+        Returns:
+            Silinən ghost chunk sayı.
+        """
+        marker = Path(self.db_path) / ".ghost_sweep_ts"
+        if min_interval_hours > 0:
+            try:
+                if (marker.exists()
+                        and time.time() - marker.stat().st_mtime
+                        < min_interval_hours * 3600):
+                    return 0
+            except OSError:
+                pass
+
+        ghost_ids: List[str] = []
+        stale_hash_keys = set()
+        exists_cache: Dict[str, bool] = {}
+        offset = 0
+        try:
+            while True:
+                page = self.collection.get(
+                    include=["metadatas"], limit=5000, offset=offset
+                )
+                ids = list(page.get("ids", []) if page else [])
+                if not ids:
+                    break
+                metas = page.get("metadatas") or [{}] * len(ids)
+                for cid, meta in zip(ids, metas):
+                    fp = (meta or {}).get("file_path")
+                    if not fp:
+                        ghost_ids.append(cid)  # (a)
+                        continue
+                    canon = _canonical_path(fp)
+                    if canon != fp:
+                        ghost_ids.append(cid)  # (b)
+                        stale_hash_keys.add(canon)
+                        continue
+                    alive = exists_cache.get(canon)
+                    if alive is None:
+                        alive = Path(canon).exists()
+                        exists_cache[canon] = alive
+                    if not alive:
+                        ghost_ids.append(cid)  # (c)
+                        stale_hash_keys.add(canon)
+                offset += len(ids)
+        except Exception as e:
+            logger.warning(f"Ghost sweep skan xətası: {e}")
+            return 0
+
+        if ghost_ids:
+            try:
+                for i in range(0, len(ghost_ids), 5000):
+                    self.collection.delete(ids=ghost_ids[i:i + 5000])
+            except Exception as e:
+                logger.warning(f"Ghost sweep silmə xətası: {e}")
+                return 0
+            # Hash girişlərini bir yazı ilə at (hər pop üçün ayrı _save yox)
+            removed_any = False
+            for k in stale_hash_keys:
+                if self.hash_store.hashes.pop(k, None) is not None:
+                    removed_any = True
+            if removed_any:
+                self.hash_store._save()
+            logger.info(
+                f"👻 Ghost sweep: {len(ghost_ids)} köhnə-forma/ölü chunk silindi"
+            )
+
+        try:
+            marker.touch()
+        except OSError:
+            pass
+        return len(ghost_ids)
+
     def refresh_collection(self):
         """Collection handle-ı persistent client-dən yenidən al.
 

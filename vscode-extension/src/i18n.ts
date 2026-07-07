@@ -94,6 +94,10 @@ const EN: Messages = {
   'menu.error': 'Tokengram: {action} failed — {message}',
   'menu.noWorkspace': 'Tokengram: no workspace folder open',
 
+  'menu.subscribe': '$(rocket) Subscribe / Abünə ol',
+  'menu.subscribeDesc': 'open checkout — keep your savings after the trial',
+  'menu.dashboard': '$(account) Open account / dashboard',
+  'menu.dashboardDesc': 'view your key, manage subscription, move to a new device',
   'menu.license': '$(key) Set license key',
   'menu.licenseDesc': 'enter Tokengram license key (mla_live_xxx)',
   'license.prompt': 'Paste your Tokengram license key',
@@ -126,6 +130,9 @@ const EN: Messages = {
     'Index is ready, but no license key was found — searches will fail. ' +
     'Start your free trial? (needs internet once)',
   'trial.startButton': 'Start free trial',
+  'trial.emailPrompt': 'Email (optional) — to recover your key and get a reminder before the trial ends',
+  'trial.emailPlaceholder': 'you@example.com (leave empty to skip)',
+  'trial.emailInvalid': 'Enter a valid email or leave it empty',
   'trial.starting': 'Tokengram: starting your free trial…',
   'trial.started': 'Free trial started — {days} day(s) left. Your savings counter is live.',
   'trial.expired':
@@ -184,6 +191,7 @@ const EN: Messages = {
 
   'bar.tipFull':
     'State: {state}\n' +
+    'All-time saved: {savedLifetime} tokens  ← the headline number\n' +
     'Last 24h: {tasks} tasks, {saved} tokens saved ({pct} on tracked ops) · {files} files\n' +
     '  • search_code: {search} tok\n' +
     '  • Grep: {grep} tok ({greps} greps)\n' +

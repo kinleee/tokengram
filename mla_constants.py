@@ -155,3 +155,145 @@ def estimate_tokens(text) -> int:
     else:
         n = len(str(text))
     return max(1, n // CHARS_PER_TOKEN)
+
+
+# =============================================================================
+#  Gitignore-aware filtrləmə
+# =============================================================================
+# Yuxarıdakı sabit EXCLUDED_* siyahıları yalnız UNIVERSAL adları tutur
+# (node_modules, .env, lock faylları...). Layihəyə-XAS ignore-lar (şəxsi config,
+# generated artefakt, müvəqqəti data) yalnız layihənin öz `.gitignore`-undan
+# bilinir. Burada onlara da hörmət edirik.
+#
+# `git check-ignore` istifadə edirik — `pathspec` ASILILIĞI YOX. Git-in tam
+# semantikası (nested .gitignore, .git/info/exclude, global excludes, `!`
+# negation, `**`, anchoring) pulsuz gəlir.
+#
+# KRİTİK: git yalnız UNTRACKED faylları ignore edir; `git add -f` ilə zorla
+# track edilmiş (və ya qayda əlavə olunmadan əvvəl commit edilmiş) fayl ignore
+# qaydasına uysa belə repo-nun canlı mənbəsidir → ONU ATMIRIQ. Yəni atılan =
+# (ignore-a uyğun) AND (tracked DEYİL).
+#
+# Qeyri-git qovluq / git quraşdırılmayıb / hər hansı xəta → TƏHLÜKƏSİZ no-op:
+# heç nə atılmır, mövcud davranış dəyişmir (legit fayllar zərər görmür).
+import os as _os
+import subprocess as _subprocess
+
+_GIT_AVAILABLE = None          # None=yoxlanmayıb, True/False
+_REPO_ROOT_CACHE = {}          # str(dir) -> repo toplevel | None
+
+
+def _git_available() -> bool:
+    global _GIT_AVAILABLE
+    if _GIT_AVAILABLE is None:
+        try:
+            _subprocess.run(
+                ["git", "--version"],
+                stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL,
+                timeout=5,
+            )
+            _GIT_AVAILABLE = True
+        except Exception:
+            _GIT_AVAILABLE = False
+    return _GIT_AVAILABLE
+
+
+def _repo_root(directory):
+    """`directory`-ni əhatə edən git iş-ağacının kökü; git deyilsə None (cache-li)."""
+    key = str(directory)
+    if key in _REPO_ROOT_CACHE:
+        return _REPO_ROOT_CACHE[key]
+    root = None
+    if _git_available():
+        try:
+            r = _subprocess.run(
+                ["git", "-C", key, "rev-parse", "--show-toplevel"],
+                stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL, timeout=5,
+            )
+            if r.returncode == 0:
+                out = r.stdout.decode("utf-8", "surrogateescape").strip()
+                root = out or None
+        except Exception:
+            root = None
+    _REPO_ROOT_CACHE[key] = root
+    return root
+
+
+def _posix_rel(p, root):
+    """Mütləq yolu repo-kökünə nisbi POSIX yola çevir (git forward-slash gözləyir)."""
+    try:
+        rel = _os.path.relpath(str(p), root)
+    except ValueError:
+        return None  # Windows-da fərqli disk → repo xaricində
+    return rel.replace(_os.sep, "/")
+
+
+def _git_stdin_set(root, args, rels):
+    """NUL-birləşmiş `rels`-i git-ə --stdin -z ilə ötür; echo edilən yolların
+    set-ini qaytar. Sondakı NUL-dan qaçırıq (bəzi git versiyalarında batch-i
+    pozur). Xətada None."""
+    if not rels:
+        return set()
+    payload = b"\x00".join(r.encode("utf-8", "surrogateescape") for r in rels)
+    try:
+        r = _subprocess.run(
+            ["git", "-C", root] + args, input=payload,
+            stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL, timeout=30,
+        )
+    except Exception:
+        return None
+    if r.returncode not in (0, 1):   # 0=bəzisi uyğun, 1=heç biri, 128=xəta
+        return None
+    out = r.stdout.decode("utf-8", "surrogateescape")
+    return {seg for seg in out.split("\x00") if seg}
+
+
+def _tracked_set(root):
+    """Repo-da bütün tracked faylların nisbi POSIX yol set-i. Xətada None."""
+    try:
+        r = _subprocess.run(
+            ["git", "-C", root, "ls-files", "-z"],
+            stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL, timeout=30,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    out = r.stdout.decode("utf-8", "surrogateescape")
+    return {seg for seg in out.split("\x00") if seg}
+
+
+def filter_gitignored(directory, paths):
+    """`paths`-dan untracked+ignored faylları çıxar (git semantikası). Tracked
+    fayllar HEÇ VAXT atılmır. `directory` git iş-ağacı deyilsə / git yoxdursa /
+    xətada → `paths` olduğu kimi (no-op). Sıra qorunur."""
+    paths = list(paths)
+    if not paths:
+        return paths
+    root = _repo_root(directory)
+    if not root:
+        return paths
+    pairs = [(p, _posix_rel(p, root)) for p in paths]
+    pairs = [(p, rel) for p, rel in pairs if rel is not None and not rel.startswith("../")]
+    if not pairs:
+        return paths
+    ignored = _git_stdin_set(root, ["check-ignore", "-z", "--stdin"],
+                             [rel for _, rel in pairs])
+    if not ignored:
+        return paths  # heç biri ignore deyil (və ya xəta) → toxunma
+    tracked = _tracked_set(root) or set()
+    drop = {p for p, rel in pairs if rel in ignored and rel not in tracked}
+    if not drop:
+        return paths
+    return [p for p in paths if p not in drop]
+
+
+def is_gitignored(path, directory=None) -> bool:
+    """Tək fayl üçün incremental yoxlama: untracked+ignored isə True.
+    Git deyilsə / xətada False (atılmaz)."""
+    if directory is None:
+        try:
+            directory = _os.path.dirname(_os.path.abspath(str(path)))
+        except Exception:
+            return False
+    return len(filter_gitignored(directory, [path])) == 0

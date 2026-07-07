@@ -215,8 +215,12 @@ class TestExpiredTrialKeyedFlow(TrialTestBase):
 
 
 class TestLicenseStatus(TrialTestBase):
+    # days_left = (horizon - now) // 86400 (floor, "qalan TAM gün").
+    # Sərhəd üstünə düz N*86400 qoymaq flaky idi: modul-load `NOW`-u ilə testin
+    # işlədiyi an arasındakı saniyələr floor-u N-1-ə salırdı (tam suite-də
+    # collection ~30s çəkir). Yarım-gün buffer testi sərhəddən çəkir.
     def test_status_trialing_uses_period_end(self):
-        period_end = NOW + 5 * 86400
+        period_end = NOW + 5 * 86400 + 43200
         guard = lic.LicenseGuard(_trial_claims(period_end=period_end))
         orig = lic.ensure_license_cached
         lic.ensure_license_cached = lambda: guard
@@ -232,7 +236,8 @@ class TestLicenseStatus(TrialTestBase):
     def test_status_active_without_period_end_falls_back_to_exp(self):
         claims = lic.Claims(
             user_id="u", license_key="mla_live_x", fingerprint=FP,
-            exp=NOW + 3 * 86400, subscription_status="active", period_end=None,
+            exp=NOW + 3 * 86400 + 43200,  # +yarım gün: floor sərhəd flakiness-i
+            subscription_status="active", period_end=None,
         )
         orig = lic.ensure_license_cached
         lic.ensure_license_cached = lambda: lic.LicenseGuard(claims)

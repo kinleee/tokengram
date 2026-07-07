@@ -55,6 +55,8 @@ from mla_constants import (
     EXCLUDED_FILE_PATTERNS,
     EXCLUDED_FILE_SUFFIXES,
     MAX_FILE_SIZE_BYTES,
+    filter_gitignored,
+    is_gitignored,
 )
 
 # ============================================

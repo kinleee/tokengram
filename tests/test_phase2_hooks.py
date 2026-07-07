@@ -79,25 +79,40 @@ class _HookTestBase(unittest.TestCase):
 
 
 class TestPreRead(_HookTestBase):
-    def test_block_typescript_100_lines(self):
+    # pre_read_check artıq HEÇ VAXT bloklamır (exit 2 yoxdur): hard-block Edit
+    # axınını sındırırdı (Edit əvvəl Read istəyir) → warn-only-yə keçirildi.
+    # Semantika: <250 sətir → silent allow (read_pass log); ≥250 → allow + TIP
+    # stderr-də (read_warn + read_pass log); limit-li Read → read_chunked log.
+
+    def test_allow_typescript_100_lines_silent_read_pass(self):
         _set_flag("on")
         f = self.make_file("foo.ts", 100)
         rc, _, err = _run_hook(PRE_READ, {"tool_name": "Read", "tool_input": {"file_path": str(f)}})
-        self.assertEqual(rc, 2, msg=err)
-        self.assertIn("MlaReindex", err)  # New extension hint must appear
+        self.assertEqual(rc, 0, msg=err)
+        self.assertEqual(err.strip(), "")  # 100 < 250 → səssiz
+        log = _read_session_log()
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["type"], "read_pass")
+        self.assertEqual(log[0]["reason"], "silent_allow")
 
-    def test_block_go_60_lines(self):
+    def test_allow_go_60_lines_silent(self):
         _set_flag("on")
         f = self.make_file("foo.go", 60)
         rc, _, _ = _run_hook(PRE_READ, {"tool_name": "Read", "tool_input": {"file_path": str(f)}})
-        self.assertEqual(rc, 2)
-
-    def test_warn_python_40_lines(self):
-        _set_flag("on")
-        f = self.make_file("foo.py", 40)
-        rc, _, err = _run_hook(PRE_READ, {"tool_name": "Read", "tool_input": {"file_path": str(f)}})
         self.assertEqual(rc, 0)
+        log = _read_session_log()
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["type"], "read_pass")
+
+    def test_warn_python_300_lines_allows_with_tip(self):
+        _set_flag("on")
+        f = self.make_file("foo.py", 300)
+        rc, _, err = _run_hook(PRE_READ, {"tool_name": "Read", "tool_input": {"file_path": str(f)}})
+        self.assertEqual(rc, 0)  # warn = allow, blok deyil
         self.assertIn("TIP", err)
+        types = [e["type"] for e in _read_session_log()]
+        self.assertIn("read_warn", types)
+        self.assertIn("read_pass", types)  # warn olsa da Read baş verir → real spend
 
     def test_silent_python_20_lines(self):
         _set_flag("on")
@@ -106,11 +121,25 @@ class TestPreRead(_HookTestBase):
         self.assertEqual(rc, 0)
         self.assertEqual(err.strip(), "")
 
-    def test_block_json_100_lines(self):
+    def test_allow_json_100_lines(self):
         _set_flag("on")
         f = self.make_file("foo.json", 100)
         rc, _, _ = _run_hook(PRE_READ, {"tool_name": "Read", "tool_input": {"file_path": str(f)}})
-        self.assertEqual(rc, 2)
+        self.assertEqual(rc, 0)
+
+    def test_chunked_read_logs_read_chunked(self):
+        _set_flag("on")
+        f = self.make_file("foo.ts", 300)
+        rc, _, _ = _run_hook(
+            PRE_READ,
+            {"tool_name": "Read", "tool_input": {"file_path": str(f), "limit": 40}},
+        )
+        self.assertEqual(rc, 0)
+        log = _read_session_log()
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["type"], "read_chunked")
+        self.assertEqual(log[0]["limit"], 40)
+        self.assertLess(log[0]["estimated_spent_tokens"], log[0]["estimated_baseline_tokens"])
 
     def test_flag_off_passthrough(self):
         _set_flag("off")

@@ -196,6 +196,12 @@ def _filter_indexable(path_str: str) -> Optional[Path]:
         return None
     if any(p.name.startswith(pat) for pat in config.EXCLUDED_FILE_PATTERNS):
         return None
+    # Layihənin .gitignore-u (untracked+ignored) — git deyilsə/xətada no-op
+    try:
+        if config.is_gitignored(p):
+            return None
+    except Exception:
+        pass
     return p
 
 
@@ -295,6 +301,15 @@ def _drain_pending_queue() -> int:
             # batch-dan sonra tam korpus təkrar tokenləşdirilib pickle edilirdi →
             # 200-fayllıq drain = 10× tam yenidənqurma. İndi `_drain_signal_loop`
             # bütün batch-lar bitəndən sonra BİR DƏFƏ yenidən qurur (aşağıda).
+
+            # Ghost sweep (24h guard): legacy path-forma və silinmiş-fayl
+            # chunk-ları per-fayl delete-lərin görmədiyi yerdə yığılıb qalır →
+            # axtarış köhnə kod reviziyası qaytarır. Drainer kilidi hələ
+            # bizdədir — təhlükəsiz silmə pəncərəsidir.
+            try:
+                store.sweep_ghosts(min_interval_hours=24)
+            except Exception as e:
+                logger.warning(f"Ghost sweep keçildi: {e}")
     finally:
         dlock.release()
 
@@ -558,6 +573,50 @@ def search_code(
         _log_search(query, results, "")
         return "No matching code found."
 
+    # Hunt hesabı (sübut-əsaslı sayğac üçün): MLA-suz agent bu cavabı keyword
+    # (grep/BM25) axtarışı ilə tapası idi. Cavab faylının yalnız-keyword
+    # sıralamasındakı yeri (rank) = neçə namizəd faylı vərəqləyəcəkdi.
+    # hunt_tokens = o namizədlərin skim qiyməti + cavab faylının özü.
+    # Stop hook bunu YALNIZ nəticələrə sonradan toxunulmayanda (chunk-lar özü
+    # cavab verib) kredit kimi işlədir. Xəta → sahə yazılmır (hook fallback edir).
+    hunt_tokens = None
+    kw_rank = None
+    try:
+        answer_fp = results[0].metadata.get("file_path")
+        if answer_fp:
+            if mode == "fast":
+                # Nəticə onsuz da BM25 sıralamasıdır → rank 1: keyword axtarışı
+                # cavabı dərhal tapardı; ov = yalnız cavab faylının özü.
+                kw_rank = 1
+                hunt_tokens = min(_file_token_count(answer_fp), 10_000)
+            else:
+                kw = engine.bm25_index.search(query, top_k=16)
+                kw_files = []
+                _seen = set()
+                for kr in kw:
+                    kfp = kr.metadata.get("file_path")
+                    if kfp and kfp not in _seen:
+                        _seen.add(kfp)
+                        kw_files.append(kfp)
+                if answer_fp in kw_files:
+                    idx = kw_files.index(answer_fp)
+                    kw_rank = idx + 1
+                else:
+                    # Konseptual sorğu — keyword axtarışı cavabı ümumiyyətlə
+                    # tapmır; agent maksimal sayda namizəd gəzəcəkdi.
+                    idx = min(len(kw_files), 5)
+                    kw_rank = 0
+                # Namizədlər "skim" qiyməti ilə (tam oxunmur, baxılır):
+                # fayl başına ~200 sətir ≈ 2k token; cavab faylı tam (10k cap).
+                skim = sum(
+                    min(_file_token_count(c), 2_000)
+                    for c in kw_files[: min(idx, 5)]
+                )
+                hunt_tokens = skim + min(_file_token_count(answer_fp), 10_000)
+    except Exception:
+        hunt_tokens = None
+        kw_rank = None
+
     blocks = [f"Confidence: {confidence} (mode={mode})\n"]
     for i, r in enumerate(results, 1):
         blocks.append(
@@ -565,7 +624,7 @@ def search_code(
             f"{r.content}"
         )
     response = "\n\n".join(blocks)
-    _log_search(query, results, response)
+    _log_search(query, results, response, hunt_tokens, kw_rank)
     return response
 
 
@@ -594,7 +653,13 @@ def _file_token_count(fp: str) -> int:
     return n
 
 
-def _log_search(query: str, results, response_text: str) -> None:
+def _log_search(
+    query: str,
+    results,
+    response_text: str,
+    hunt_tokens=None,
+    kw_rank=None,
+) -> None:
     """Hər search_code çağırışını analytics üçün qeyd edir.
 
     Stop hook (savings_report.py) bunu oxuyaraq qənaət hesablayır.
@@ -625,6 +690,11 @@ def _log_search(query: str, results, response_text: str) -> None:
             "files": unique_files,
             "actual_tokens": count_tokens(response_text),
         }
+        # Sübut-əsaslı sayğac üçün ov (hunt) metrikaları — hesablana bilibsə.
+        if isinstance(hunt_tokens, (int, float)) and hunt_tokens > 0:
+            entry["hunt_tokens"] = int(hunt_tokens)
+        if isinstance(kw_rank, int):
+            entry["kw_rank"] = kw_rank
         with open(SESSION_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
@@ -838,6 +908,16 @@ def _cli_reindex(argv: list) -> int:
     if not directory.exists() or not directory.is_dir():
         print(f"[tokengram] error: directory not found: {directory}", file=_sys.stderr)
         return 1
+
+    # LİSENZİYA GATE — extension-ın Re-index düyməsi bu CLI-ni MCP-dən kənar
+    # birbaşa çağırır; bu yoxlama olmadan bitmiş trial/ləğv edilmiş açar TAM
+    # embedding hesablamasını pulsuz alırdı. Search alətləri onsuz da hər
+    # çağırışda yoxlanır — reindex də eyni qaydaya tabedir.
+    # Exit 5 = license (3 = korrupsiya, 4 = lock timeout).
+    err = _check_license()
+    if err is not None:
+        print(err, file=_sys.stderr)
+        return 5
 
     # Reindex-dən əvvəl ölü-PID qalıq kilidlərini süpür (split-brain orfan lock):
     # köhnə paket qovluğunda qalan ölü writer.lock canlı reindex-i bloklamasın.

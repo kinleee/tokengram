@@ -32,7 +32,8 @@ class TestSearchCodeDirect(unittest.TestCase):
         result = self.mcp_server.search_code("savings report", top_k=2, mode="fast")
         self.assertIsInstance(result, str)
         self.assertGreater(len(result), 100, "fast mode should return real content")
-        self.assertIn("Etibar:", result)
+        # EN-default keçidi (az.json removal, fdc3ef5): başlıq artıq İngiliscədir
+        self.assertIn("Confidence:", result)
 
     def test_fast_mode_with_file_type_filter(self):
         result = self.mcp_server.search_code(

@@ -124,18 +124,26 @@ class TestStopChain(unittest.TestCase):
         self.assertEqual(r["blocks"], 1)
         self.assertEqual(r["greps"], 1)
         self.assertEqual(r["bash_inspects"], 1)
-        # Baseline = 500 + 1000 + 500 + 600 = 2600
-        self.assertEqual(r["baseline_tokens"], 2600)
-        # Actual = 100 + 75 + 120 = 295  (block-da 0)
-        self.assertEqual(r["actual_tokens"], 295)
+        # Sübut-əsaslı model (method 2): search-ün nəticəsinə toxunulmayıb →
+        # hunt fallback = min(top_file, cap) = 500; block = 1000 (real cəhd).
+        # Sübutsuz (un-steered) grep/bash KREDİT ALMIR — xərcləri ungated-ə düşür.
+        self.assertEqual(r["method"], 2)
+        # Baseline = 500 (search hunt) + 1000 (block) = 1500
+        self.assertEqual(r["baseline_tokens"], 1500)
+        # Actual = yalnız search chunk-ları = 100 (grep/bash ungated xərcdir)
+        self.assertEqual(r["actual_tokens"], 100)
+        # Ungated = grep 75 + bash 120 = 195
+        self.assertEqual(r["ungated_spent_tokens"], 195)
 
-    def test_savings_off_flag_clears_session_no_history(self):
+    def test_savings_off_flag_keeps_session_no_history(self):
         SESSION_LOG.write_text('{"query":"x","files":{},"actual_tokens":0}\n', encoding="utf-8")
         _set_flag("off")
         rc, _, _ = _run(SAVINGS_SCRIPT)
         self.assertEqual(rc, 0)
-        # OFF-da session silinir, history yazılmır
-        self.assertFalse(SESSION_LOG.exists())
+        # OFF-da hook heç nəyə TOXUNMUR: silmə cəhdi paralel yazı ilə yarışa
+        # bilər → session olduğu kimi qalır, history yazılmır (savings_report
+        # main() ilk gate-də çıxır).
+        self.assertTrue(SESSION_LOG.exists())
         self.assertFalse(HISTORY.exists())
 
     # ------------- arch_doc tests -------------
@@ -207,26 +215,39 @@ class TestStopChain(unittest.TestCase):
         self.assertFalse(SESSION_LOG.exists(), "after savings_report, session_log gone")
         self.assertTrue(HISTORY.exists())
 
-    def test_savings_summary_az_locale(self):
-        """MLA_LANG=az → Azərbaycan dilində xülasə."""
+    def test_savings_summary_az_falls_back_to_english(self):
+        """MLA_LANG=az → EN fallback (az.json qəsdən silindi, commit fdc3ef5).
+
+        AZ dəstəyi launch üçün çıxarılıb; i18n.tr() itkin locale faylında
+        İngiliscəyə düşməlidir — crash yox, boş sətir yox.
+        """
         SESSION_LOG.write_text(
             json.dumps({"ts": time.time(), "query": "x", "files": {"a.py": 100}, "actual_tokens": 50}) + "\n",
             encoding="utf-8",
         )
         rc, _, err = _run(SAVINGS_SCRIPT, lang="az")
         self.assertEqual(rc, 0)
-        self.assertIn("axtarış", err)
-        self.assertIn("qənaət", err)
+        self.assertIn("search", err)
+        self.assertIn("saved", err)
 
     def test_settings_json_hook_order(self):
-        """settings.json-da Stop hook-da arch_doc.py birinci, savings_report.py ikinci sırada gəlir."""
+        """Canonical Stop zənciri: savings_report.py → flush_queue.py.
+
+        arch_doc artıq Stop chain-də DEYİL (canonical dəst =
+        setupWizard.ts REQUIRED_HOOK_SCRIPTS, 6 skript). savings_report
+        flush_queue-dan əvvəl gəlməlidir: əvvəl session hesablanır,
+        sonra reindex queue drain olunur.
+        """
         data = json.loads(SETTINGS.read_text(encoding="utf-8"))
         stop = data["hooks"]["Stop"][0]["hooks"]
         names = [h["command"] for h in stop]
-        # arch_doc savings_report-dan əvvəl olmalıdır
-        arch_idx = next(i for i, n in enumerate(names) if "arch_doc" in n)
+        self.assertFalse(
+            any("arch_doc" in n for n in names),
+            msg=f"arch_doc Stop chain-ə qayıdıb? got: {names}",
+        )
         sav_idx = next(i for i, n in enumerate(names) if "savings_report" in n)
-        self.assertLess(arch_idx, sav_idx, msg=f"got: {names}")
+        flush_idx = next(i for i, n in enumerate(names) if "flush_queue" in n)
+        self.assertLess(sav_idx, flush_idx, msg=f"got: {names}")
 
 
 if __name__ == "__main__":

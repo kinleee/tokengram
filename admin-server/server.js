@@ -29,6 +29,7 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const Database = require('better-sqlite3');
 const { SignJWT, importPKCS8 } = require('jose');
+const { sendMail } = require('./mailer');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'tokengram.db');
@@ -37,7 +38,20 @@ const JWT_PUBLIC_KEY_PATH = process.env.JWT_PUBLIC_KEY_PATH || path.join(__dirna
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
 const JWT_TTL_SECONDS = 7 * 24 * 60 * 60;
-const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || '30', 10);
+const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || '3', 10);
+
+// ---- Lemon Squeezy ----
+// Bütün dəyərlər Lemon panelindən gəlir (.env-ə yazılır); kod onları runtime-da oxuyur.
+const LEMON_WEBHOOK_SECRET = (process.env.LEMON_WEBHOOK_SECRET || '').trim();
+// Tam checkout URL-i: https://<store>.lemonsqueezy.com/checkout/buy/<variant-uuid>
+const LEMON_CHECKOUT_URL = (process.env.LEMON_CHECKOUT_URL || '').trim();
+const PRICE_LABEL = process.env.PRICE_LABEL || '$3/month';
+
+// Mail linkləri + magic-link / dashboard üçün.
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://tokengram.click').replace(/\/+$/, '');
+// Açar bir maşına bağlıdır; user başqa cihaza keçmək üçün "release" edə bilir,
+// amma bu cooldown açarın çox nəfər arasında gəzməsinin qarşısını alır.
+const REBIND_COOLDOWN_DAYS = parseInt(process.env.REBIND_COOLDOWN_DAYS || '7', 10);
 
 // ---- DB ----
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -48,6 +62,32 @@ db.pragma('foreign_keys = ON');
 // Schema (idempotent)
 const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
 db.exec(schemaSql);
+
+// Migrasiyalar — CREATE IF NOT EXISTS mövcud cədvələ sütun əlavə etmir,
+// ona görə canlı DB-də çatışmayan sütunları ALTER ilə əlavə edirik (idempotent).
+(function migrate() {
+    const has = (table, col) =>
+        db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+    // users.contact_email — real email (qeyri-unikal). `email` daxili unikal id olaraq
+    // qalır (trial-da saxta, admin-də real); real email-i ayrıca burada saxlayırıq ki,
+    // UNIQUE(email) ilə toqquşma olmasın və eyni adam çox cihazda trial ala bilsin.
+    if (!has('users', 'contact_email')) {
+        db.exec('ALTER TABLE users ADD COLUMN contact_email TEXT');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_users_contact_email ON users(contact_email)');
+    }
+    // licenses.last_rebind_at — self-service re-bind cooldown üçün.
+    if (!has('licenses', 'last_rebind_at')) {
+        db.exec('ALTER TABLE licenses ADD COLUMN last_rebind_at INTEGER');
+    }
+    // subscriptions.portal_url — Lemon customer portal (kart dəyiş / ləğv et) linki.
+    if (!has('subscriptions', 'portal_url')) {
+        db.exec('ALTER TABLE subscriptions ADD COLUMN portal_url TEXT');
+    }
+    // trials.reminded_at — "trial sabah bitir" maili bir dəfə göndərilsin deyə.
+    if (!has('trials', 'reminded_at')) {
+        db.exec('ALTER TABLE trials ADD COLUMN reminded_at INTEGER');
+    }
+})();
 
 // Admin bootstrap
 (function bootstrapAdmin() {
@@ -106,7 +146,8 @@ app.use((req, res, next) => {
     });
     next();
 });
-app.use(express.json({ limit: '64kb' }));
+// rawBody webhook HMAC üçün saxlanır (express.json parse-dən əvvəlki xam buffer).
+app.use(express.json({ limit: '64kb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 app.use(
     session({
@@ -150,6 +191,55 @@ function nowSec() {
 
 function newId(prefix) {
     return prefix + crypto.randomBytes(8).toString('hex');
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---- Email şablonları (sadə, inline-styled) ----
+const MAIL_WRAP = (inner) =>
+    `<div style="font-family:Segoe UI,system-ui,sans-serif;max-width:480px;margin:0 auto;color:#1a2230">${inner}
+     <p style="color:#9aa6b8;font-size:12px;margin-top:28px">Tokengram · ${PUBLIC_BASE_URL}</p></div>`;
+const KEY_BOX = (key) =>
+    `<p style="font-family:monospace;background:#f1f4f9;border:1px solid #d8e0ec;border-radius:8px;padding:12px 14px;word-break:break-all">${escapeHtml(key)}</p>`;
+
+function emailActiveHtml(key, portalUrl) {
+    return MAIL_WRAP(
+        `<h2>Abunəliyin aktivdir 🎉</h2>
+         <p>Təşəkkürlər! Lisenziya açarın (cihazını dəyişsən bu açarı yenidən işlət):</p>
+         ${KEY_BOX(key)}
+         <p><a href="${PUBLIC_BASE_URL}/dashboard">Hesabını aç →</a></p>
+         ${portalUrl ? `<p><a href="${escapeHtml(portalUrl)}">Abunəliyi idarə et (kart / ləğv)</a></p>` : ''}`,
+    );
+}
+
+function emailTrialKeyHtml(key) {
+    return MAIL_WRAP(
+        `<h2>Tokengram trial-ın başladı</h2>
+         <p>${TRIAL_DAYS} günlük pulsuz trial-ın aktivdir. Lisenziya açarın (saxla — cihaz bərpası üçün):</p>
+         ${KEY_BOX(key)}
+         <p>Hesabın: <a href="${PUBLIC_BASE_URL}/dashboard">${PUBLIC_BASE_URL}/dashboard</a></p>`,
+    );
+}
+
+function emailTrialEndingHtml(key) {
+    return MAIL_WRAP(
+        `<h2>Trial-ın sabah bitir</h2>
+         <p>Pulsuz trial müddətin bitmək üzrədir. Davam etmək üçün ${escapeHtml(PRICE_LABEL)} ilə abunə ol —
+            <b>eyni açar avtomatik işləməyə davam edəcək</b>, heç nə dəyişmir.</p>
+         <p><a href="${PUBLIC_BASE_URL}/buy?key=${encodeURIComponent(key)}">Abunə ol (${escapeHtml(PRICE_LABEL)}) →</a></p>`,
+    );
+}
+
+function emailMagicLinkHtml(link) {
+    return MAIL_WRAP(
+        `<h2>Tokengram-a giriş</h2>
+         <p>Hesabına daxil olmaq üçün linkə klik et (15 dəqiqə etibarlıdır):</p>
+         <p><a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>
+         <p style="color:#9aa6b8;font-size:12px">Bu linki sən istəməmisənsə, nəzərə alma.</p>`,
+    );
 }
 
 // ====================================================================
@@ -295,10 +385,19 @@ app.post('/trial', async (req, res) => {
     if (!fp || fp.length < 16 || fp.length > 128) {
         return res.status(400).json({ error: 'missing_fingerprint' });
     }
+    // Email könüllüdür və verify gözləmir — sadəcə əlaqə/conversion üçün saxlanır
+    // (anti-abuse onsuz da fingerprint-dədir). Yanlış formatı sakitcə nəzərə almırıq.
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const validEmail = email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) && email.length <= 200;
     const now = nowSec();
 
     const existing = db.prepare('SELECT user_id, license_key FROM trials WHERE fingerprint = ?').get(fp);
     if (existing) {
+        // Reinstall halında user email-i indi verə bilər — boşdursa doldur.
+        if (validEmail) {
+            db.prepare('UPDATE users SET contact_email = ? WHERE id = ? AND contact_email IS NULL')
+                .run(email, existing.user_id);
+        }
         const sub = db
             .prepare(
                 `SELECT status, current_period_end FROM subscriptions
@@ -331,8 +430,11 @@ app.post('/trial', async (req, res) => {
     const trialEnd = now + TRIAL_DAYS * 86400;
     const trx = db.transaction(() => {
         const userId = newId('usr_');
-        const email = `trial-${fp.slice(0, 12)}@trial.tokengram.local`;
-        db.prepare('INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)').run(userId, email, now);
+        // `email` daxili unikal id-dir (saxta, fingerprint-ə bağlı). Real email
+        // (varsa) contact_email-ə gedir — UNIQUE toqquşmasın deyə.
+        const internalEmail = `trial-${fp.slice(0, 12)}@trial.tokengram.local`;
+        db.prepare('INSERT INTO users (id, email, contact_email, created_at) VALUES (?, ?, ?, ?)')
+            .run(userId, internalEmail, validEmail ? email : null, now);
         const licenseKey = newId('mla_trial_');
         db.prepare(
             'INSERT INTO licenses (key, user_id, machine_fingerprint, activated_at, note, created_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -375,10 +477,177 @@ app.post('/trial', async (req, res) => {
             period_end: trialEnd,
         }, ttl);
         logAudit('system-trial', 'create_trial', created.licenseKey, { fingerprint: fp.slice(0, 12), trialEnd });
+        if (validEmail) {
+            sendMail({
+                to: email,
+                subject: 'Tokengram — trial açarın',
+                html: emailTrialKeyHtml(created.licenseKey),
+                text: `Trial başladı. Açarın: ${created.licenseKey}\nHesab: ${PUBLIC_BASE_URL}/dashboard`,
+            }).catch(() => {});
+        }
         res.json({ token, expires_at: now + ttl, license_key: created.licenseKey, trial_ends_at: trialEnd });
     } catch (e) {
         console.error('[trial] JWT sign error:', e);
         res.status(500).json({ error: 'jwt_sign_failed' });
+    }
+});
+
+// ====================================================================
+// Lemon Squeezy webhook — abunə statusunun mənbəyi.
+//  • İmza: X-Signature = HMAC-SHA256(raw body, LEMON_WEBHOOK_SECRET) hex.
+//  • Event adı: X-Event-Name. Data JSON:API formatında body.data.attributes.
+//  • Bizim license_key (checkout-da /buy ötürür) body.meta.custom_data-dadır.
+// İdempotentdir: Lemon retry edə bilər, ona görə lemon subscription id ilə upsert.
+// ====================================================================
+function verifyLemonSignature(req) {
+    if (!LEMON_WEBHOOK_SECRET || !req.rawBody) return false;
+    const sig = String(req.headers['x-signature'] || '');
+    if (!sig) return false;
+    const digest = crypto.createHmac('sha256', LEMON_WEBHOOK_SECRET).update(req.rawBody).digest('hex');
+    try {
+        return crypto.timingSafeEqual(Buffer.from(digest, 'utf8'), Buffer.from(sig, 'utf8'));
+    } catch {
+        return false; // uzunluq fərqi timingSafeEqual-ı throw etdirir
+    }
+}
+
+// Lemon abunə statusu → bizim sxem statusu.
+// Lemon: on_trial, active, paused, past_due, unpaid, cancelled, expired.
+// 'cancelled' = ləğv olunub AMMA period sonuna (ends_at) qədər hələ aktivdir →
+// 'active' saxlayırıq; vaxt qapısı (current_period_end>now) /validate-də onsuz da kəsir.
+// 'expired' = həqiqi bitmə → 'cancelled'.
+function mapLemonStatus(s, endsAtInFuture) {
+    switch (s) {
+        case 'active': return 'active';
+        case 'on_trial': return 'trialing';
+        case 'cancelled': return endsAtInFuture ? 'active' : 'cancelled';
+        case 'expired': return 'cancelled';
+        case 'past_due':
+        case 'unpaid':
+        case 'paused': return 'past_due';
+        default: return 'incomplete';
+    }
+}
+
+app.post('/webhook/lemon', (req, res) => {
+    if (!verifyLemonSignature(req)) {
+        return res.status(401).json({ error: 'invalid_signature' });
+    }
+    const eventName = String(req.headers['x-event-name'] || '');
+    const body = req.body || {};
+    const data = body.data || {};
+    const attr = data.attributes || {};
+    const custom = (body.meta && body.meta.custom_data) || {};
+
+    // Yalnız abunə OBYEKTİ daşıyan event-lər (subscription_*). payment_success/failed
+    // data.type='subscription-invoices'-dir — onları nəzərə almırıq, çünki status
+    // dəyişikliyi onsuz da müşayiət edən subscription_updated event-i ilə gəlir.
+    if (data.type !== 'subscriptions') {
+        return res.json({ ok: true, ignored: eventName, type: data.type || null });
+    }
+
+    const lemonSubId = String(data.id || '');
+    if (!lemonSubId) return res.status(400).json({ error: 'missing_subscription_id' });
+    const lemonStatus = String(attr.status || '');
+    const toEpoch = (s) => (s ? Math.floor(new Date(s).getTime() / 1000) : 0);
+    const renewsAt = toEpoch(attr.renews_at);
+    const endsAt = toEpoch(attr.ends_at);
+    const email = String(attr.user_email || '').trim().toLowerCase();
+    const licenseKey = String(custom.license_key || '').trim();
+    const portalUrl = attr.urls && attr.urls.customer_portal ? String(attr.urls.customer_portal) : null;
+    const now = nowSec();
+
+    // period_end: aktivdə renews_at; ləğv/bitmədə ends_at.
+    let periodEnd = renewsAt || endsAt || now;
+    if ((lemonStatus === 'cancelled' || lemonStatus === 'expired') && endsAt) periodEnd = endsAt;
+    const status = mapLemonStatus(lemonStatus, endsAt > now);
+
+    try {
+        const trx = db.transaction(() => {
+            // 1) İstifadəçi + lisenziyanı tap (prioritet sırası):
+            //    (a) bu lemon abunəsi artıq var, (b) custom license_key (trial→paid),
+            //    (c) email, (d) heç biri → trial-sız birbaşa alış: yeni hesab.
+            let userId = null;
+            let key = null;
+
+            const existingSub = db
+                .prepare('SELECT user_id FROM subscriptions WHERE polar_subscription_id = ?')
+                .get(lemonSubId);
+            if (existingSub) userId = existingSub.user_id;
+
+            if (!userId && licenseKey) {
+                const lic = db.prepare('SELECT key, user_id FROM licenses WHERE key = ?').get(licenseKey);
+                if (lic) { userId = lic.user_id; key = lic.key; }
+            }
+            if (!userId && email) {
+                const u = db
+                    .prepare('SELECT id FROM users WHERE contact_email = ? OR email = ? LIMIT 1')
+                    .get(email, email);
+                if (u) userId = u.id;
+            }
+            if (!userId) {
+                userId = newId('usr_');
+                const internalEmail = email || `lemon-${lemonSubId}@buyer.tokengram.local`;
+                db.prepare('INSERT INTO users (id, email, contact_email, created_at) VALUES (?, ?, ?, ?)')
+                    .run(userId, internalEmail, email || null, now);
+            } else if (email) {
+                db.prepare('UPDATE users SET contact_email = ? WHERE id = ?').run(email, userId);
+            }
+
+            // 2) Lisenziya: trial açarı varsa onu paid-ə yüksəlt (eyni açar → extension
+            //    avtomatik active olur, kopyala-yapışdır lazım deyil). Yoxsa yeni yarat.
+            if (!key) {
+                const lic = db.prepare('SELECT key FROM licenses WHERE user_id = ? ORDER BY created_at ASC LIMIT 1').get(userId);
+                if (lic) {
+                    key = lic.key;
+                } else {
+                    key = newId('mla_live_');
+                    db.prepare('INSERT INTO licenses (key, user_id, note, created_at) VALUES (?, ?, ?, ?)')
+                        .run(key, userId, 'lemon-paid', now);
+                }
+            }
+            // Aktiv statusda revoke-u qaldır + paid kimi qeyd et + köhnə trial
+            // abunə sətrini ləğv et. Yoxsa paid abunə bitəndə trialing sətri
+            // (öz period_end-i ilə) hələ də müstəqil giriş verə bilər.
+            if (status === 'active' || status === 'trialing') {
+                db.prepare("UPDATE licenses SET revoked = 0, note = 'lemon-paid' WHERE key = ?").run(key);
+                db.prepare(
+                    "UPDATE subscriptions SET status = 'cancelled', updated_at = ? " +
+                    "WHERE user_id = ? AND plan = 'trial' AND polar_subscription_id != ?",
+                ).run(now, userId, lemonSubId);
+            }
+
+            // 3) Abunəni upsert et (lemon subscription id ilə açarlanır → idempotent).
+            const row = db.prepare('SELECT id FROM subscriptions WHERE polar_subscription_id = ?').get(lemonSubId);
+            if (row) {
+                db.prepare('UPDATE subscriptions SET status = ?, current_period_end = ?, plan = ?, portal_url = COALESCE(?, portal_url), updated_at = ? WHERE id = ?')
+                    .run(status, periodEnd, 'monthly', portalUrl, now, row.id);
+            } else {
+                db.prepare(
+                    `INSERT INTO subscriptions
+                       (id, user_id, polar_subscription_id, status, current_period_end, plan, portal_url, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, 'monthly', ?, ?, ?)`,
+                ).run(newId('sub_'), userId, lemonSubId, status, periodEnd, portalUrl, now, now);
+            }
+            return { userId, key, isNew: !row };
+        });
+        const out = trx();
+        logAudit('system-lemon', `webhook_${eventName}`, out.key, {
+            lemonSubId, lemonStatus, status, periodEnd, email: email.slice(0, 60),
+        });
+        // İlk dəfə aktivləşmədə user-ə açar + portal maili (best-effort, bloklamır).
+        if (out.isNew && status === 'active' && email) {
+            sendMail({
+                to: email,
+                subject: 'Tokengram — abunəliyin aktivdir 🎉',
+                html: emailActiveHtml(out.key, portalUrl),
+                text: `Abunəliyin aktivdir. Lisenziya açarın: ${out.key}\nHesab: ${PUBLIC_BASE_URL}/dashboard`,
+            }).catch(() => {});
+        }
+        res.json({ ok: true });
+    } catch (e) {
+        console.error('[webhook/lemon] error:', e);
+        res.status(500).json({ error: 'webhook_processing_failed' });
     }
 });
 
@@ -629,45 +898,241 @@ app.get('/admin/audit', requireAdmin, (_req, res) => {
 });
 
 // ====================================================================
-// /buy — Paddle checkout hazır olana qədər stub.
-// Landing-dəki bütün CTA düymələri bura gəlir (?plan=trial|monthly|yearly).
-// Paddle inteqrasiyası bitəndə bu route Paddle checkout URL-inə 302 edəcək
-// (bax: PAYMENT_PLAN.md, addım 4).
+// Customer hesab — parolsuz magic-link sign-in + dashboard.
+// Admin session-dan ayrıdır (req.session.userEmail vs adminEmail).
 // ====================================================================
-app.get('/buy', (req, res) => {
-    const plan = ['trial', 'monthly', 'yearly'].includes(String(req.query.plan))
-        ? String(req.query.plan)
-        : 'monthly';
-    const planLabel = { trial: '1-day Free Trial', monthly: 'Pro — $5/month', yearly: 'Pro — $29/year' }[plan];
+function requireUser(req, res, next) {
+    if (!req.session.userEmail) return res.status(401).json({ error: 'unauthorized' });
+    next();
+}
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+// Giriş linki istə — mail göndərilir. Hesab tapılsa da tapılmasa da eyni cavab
+// (email mövcudluğunu sızdırmırıq).
+app.post('/auth/request-link', async (req, res) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!email || !EMAIL_RE.test(email) || email.length > 200) {
+        return res.status(400).json({ error: 'invalid_email' });
+    }
+    const user = db.prepare('SELECT id FROM users WHERE contact_email = ? OR email = ? LIMIT 1').get(email, email);
+    if (user) {
+        const token = crypto.randomBytes(32).toString('hex');
+        const now = nowSec();
+        db.prepare('INSERT INTO magic_links (token, email, expires_at, created_at) VALUES (?, ?, ?, ?)')
+            .run(token, email, now + 15 * 60, now);
+        const link = `${PUBLIC_BASE_URL}/auth/verify?token=${token}`;
+        await sendMail({
+            to: email,
+            subject: 'Tokengram — giriş linki',
+            html: emailMagicLinkHtml(link),
+            text: `Giriş linki (15 dəq): ${link}`,
+        }).catch(() => {});
+    }
+    res.json({ ok: true });
+});
+
+app.get('/auth/verify', (req, res) => {
+    const token = String(req.query.token || '');
+    const now = nowSec();
+    const row = db.prepare('SELECT token, email, expires_at, used_at FROM magic_links WHERE token = ?').get(token);
+    if (!row || row.used_at || row.expires_at < now) {
+        return res.status(400).type('html').send(
+            '<p style="font-family:sans-serif">Link etibarsız və ya vaxtı keçib. <a href="/dashboard">Yenidən cəhd et</a></p>',
+        );
+    }
+    db.prepare('UPDATE magic_links SET used_at = ? WHERE token = ?').run(now, token);
+    req.session.userEmail = row.email;
+    res.redirect(302, '/dashboard');
+});
+
+app.post('/auth/logout', (req, res) => {
+    delete req.session.userEmail;
+    res.json({ ok: true });
+});
+
+// Hesab məlumatı (JSON) — dashboard JS bunu çəkir.
+app.get('/account', requireUser, (req, res) => {
+    const email = req.session.userEmail;
+    const rows = db
+        .prepare(
+            `SELECT l.key, l.machine_fingerprint, l.revoked, l.last_rebind_at, l.note,
+                    (SELECT s.status FROM subscriptions s WHERE s.user_id = l.user_id
+                       ORDER BY s.current_period_end DESC LIMIT 1) AS status,
+                    (SELECT s.current_period_end FROM subscriptions s WHERE s.user_id = l.user_id
+                       ORDER BY s.current_period_end DESC LIMIT 1) AS expires_at,
+                    (SELECT s.portal_url FROM subscriptions s WHERE s.user_id = l.user_id
+                       ORDER BY s.current_period_end DESC LIMIT 1) AS portal_url
+             FROM licenses l JOIN users u ON u.id = l.user_id
+             WHERE (u.contact_email = ? OR u.email = ?) AND l.revoked = 0
+             ORDER BY l.created_at DESC`,
+        )
+        .all(email, email);
+    res.json({ email, price_label: PRICE_LABEL, rebind_cooldown_days: REBIND_COOLDOWN_DAYS, keys: rows });
+});
+
+// Cihazı boşalt (re-bind) — açarı cari maşından ayırır ki, yeni maşında
+// activate olunsun. Cooldown açarın çox nəfər arasında gəzməsini dayandırır.
+app.post('/account/release-device', requireUser, (req, res) => {
+    const email = req.session.userEmail;
+    const key = String(req.body?.license_key || '');
+    const lic = db
+        .prepare(
+            `SELECT l.key, l.last_rebind_at FROM licenses l JOIN users u ON u.id = l.user_id
+             WHERE l.key = ? AND (u.contact_email = ? OR u.email = ?)`,
+        )
+        .get(key, email, email);
+    if (!lic) return res.status(404).json({ error: 'not_found' });
+    const now = nowSec();
+    const cooldown = REBIND_COOLDOWN_DAYS * 86400;
+    if (lic.last_rebind_at && now - lic.last_rebind_at < cooldown) {
+        const daysLeft = Math.ceil((cooldown - (now - lic.last_rebind_at)) / 86400);
+        return res.status(429).json({ error: 'cooldown', days_left: daysLeft });
+    }
+    db.prepare('UPDATE licenses SET machine_fingerprint = NULL, activated_at = NULL, last_rebind_at = ? WHERE key = ?')
+        .run(now, key);
+    logAudit('user-' + email, 'release_device', key, null);
+    res.json({ ok: true });
+});
+
+// Dashboard — tək səhifə. JS /account-u çəkir: 401 → giriş formu, 200 → açarlar.
+app.get('/dashboard', (_req, res) => {
     res.type('html').send(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Tokengram — Checkout</title><link rel="icon" type="image/png" href="/icon.png">
+<html lang="az"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tokengram — Hesab</title><link rel="icon" type="image/png" href="/icon.png">
 <style>
-  body { font-family: "Segoe UI", system-ui, sans-serif; background: #070b14; color: #e8edf7;
-         display: grid; place-items: center; min-height: 100vh; margin: 0; text-align: center; }
-  .card { max-width: 420px; padding: 40px 32px; border: 1px solid rgba(77,144,255,.3); border-radius: 16px;
-          background: rgba(17,25,45,.6); box-shadow: 0 0 50px rgba(77,144,255,.12); }
-  img { width: 72px; filter: drop-shadow(0 0 20px rgba(77,144,255,.35)); }
-  h1 { font-size: 1.3rem; margin: 18px 0 6px; }
-  .plan { color: #7fb4ff; font-weight: 600; }
-  p { color: #93a0b8; font-size: .92rem; line-height: 1.55; }
-  a.btn { display: inline-block; margin-top: 18px; padding: 10px 24px; border-radius: 10px;
-          background: linear-gradient(135deg,#2f6fe0,#4d90ff); color: #fff; text-decoration: none; font-weight: 600; }
+  :root{--bg:#070b14;--card:rgba(17,25,45,.6);--ln:rgba(77,144,255,.3);--fg:#e8edf7;--mut:#93a0b8;--acc:#4d90ff}
+  *{box-sizing:border-box} body{font-family:"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;min-height:100vh;display:grid;place-items:center;padding:20px}
+  .card{width:100%;max-width:560px;padding:32px;border:1px solid var(--ln);border-radius:16px;background:var(--card)}
+  h1{font-size:1.3rem;margin:0 0 4px} .mut{color:var(--mut);font-size:.9rem}
+  input{width:100%;padding:11px 13px;border-radius:9px;border:1px solid var(--ln);background:#0c1322;color:var(--fg);font-size:1rem;margin:14px 0}
+  button,a.btn{display:inline-block;padding:10px 18px;border:0;border-radius:9px;background:linear-gradient(135deg,#2f6fe0,#4d90ff);color:#fff;font-weight:600;font-size:.95rem;cursor:pointer;text-decoration:none}
+  .ghost{background:none;border:1px solid var(--ln);color:var(--fg)}
+  .key{font-family:monospace;background:#0c1322;border:1px solid var(--ln);border-radius:8px;padding:10px 12px;word-break:break-all;margin:8px 0}
+  .row{border-top:1px solid var(--ln);padding:16px 0} .row:first-child{border-top:0}
+  .tag{font-size:.75rem;padding:2px 8px;border-radius:20px;background:rgba(77,144,255,.15);color:#9cc2ff}
+  .tag.warn{background:rgba(255,170,60,.15);color:#ffce8a} .tag.bad{background:rgba(255,90,90,.15);color:#ff9b9b}
+  .hide{display:none} .msg{color:#9cc2ff;font-size:.9rem;margin-top:10px}
 </style></head><body>
 <div class="card">
-  <img src="/icon.png" alt="Tokengram">
-  <h1>Checkout opens very soon</h1>
-  <p>You picked <span class="plan">${planLabel}</span>.<br>
-     Payments go live shortly — drop us a line and we'll send your checkout link the moment it's ready.</p>
-  <a class="btn" href="mailto:n.ilkin.humbatov@gmail.com?subject=Tokengram%20${encodeURIComponent(plan)}%20plan">Notify me</a>
+  <div id="signin">
+    <h1>Tokengram hesabı</h1>
+    <p class="mut">Email-ini yaz — giriş linki göndərək (parol yoxdur).</p>
+    <input id="email" type="email" placeholder="sən@example.com" autocomplete="email">
+    <button id="send">Giriş linki göndər</button>
+    <div id="m1" class="msg hide"></div>
+  </div>
+  <div id="account" class="hide">
+    <h1>Hesabın</h1>
+    <p class="mut"><span id="who"></span> · <a href="#" id="logout" class="mut">çıxış</a></p>
+    <div id="keys"></div>
+  </div>
 </div>
+<script>
+const $=s=>document.querySelector(s);
+function fmtDate(t){return t?new Date(t*1000).toLocaleDateString():'—'}
+$('#send').onclick=async()=>{
+  const email=$('#email').value.trim(); if(!email)return;
+  await fetch('/auth/request-link',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email})});
+  const m=$('#m1');m.textContent='Linki '+email+' ünvanına göndərdik. Mailini yoxla.';m.classList.remove('hide');
+};
+$('#logout').onclick=async(e)=>{e.preventDefault();await fetch('/auth/logout',{method:'POST'});location.reload();};
+async function release(key,btn){
+  btn.disabled=true;
+  const r=await fetch('/account/release-device',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({license_key:key})});
+  if(r.status===429){const j=await r.json();alert('Cooldown: '+j.days_left+' gün sonra mümkün olacaq.');btn.disabled=false;return;}
+  if(!r.ok){alert('Alınmadı.');btn.disabled=false;return;}
+  alert('Cihaz boşaldıldı. İndi yeni maşında extension-da açarı işlət.');load();
+}
+async function load(){
+  const r=await fetch('/account');
+  if(r.status===401){$('#signin').classList.remove('hide');$('#account').classList.add('hide');return;}
+  const d=await r.json();
+  $('#signin').classList.add('hide');$('#account').classList.remove('hide');
+  $('#who').textContent=d.email;
+  $('#keys').innerHTML=d.keys.map(k=>{
+    const active=(k.status==='active'||k.status==='trialing')&&k.expires_at&&k.expires_at>Date.now()/1000;
+    const tag=active?'<span class="tag">'+(k.status==='trialing'?'trial':'aktiv')+'</span>':'<span class="tag bad">deaktiv</span>';
+    const manage=k.portal_url?'<a class="btn ghost" href="'+k.portal_url+'">Abunəliyi idarə et</a>':
+      '<a class="btn" href="/buy?key='+encodeURIComponent(k.key)+'&email='+encodeURIComponent(d.email)+'">Abunə ol ('+d.price_label+')</a>';
+    return '<div class="row">'+tag+' <span class="mut">bitmə: '+fmtDate(k.expires_at)+'</span>'+
+      '<div class="key">'+k.key+'</div>'+
+      (k.machine_fingerprint?'<button class="ghost" data-k="'+k.key+'">Cihazı boşalt (yeni maşına keç)</button> ':'<span class="mut">heç bir cihaza bağlı deyil</span> ')+
+      manage+'</div>';
+  }).join('')||'<p class="mut">Açar yoxdur.</p>';
+  document.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>release(b.dataset.k,b));
+}
+load();
+</script>
 </body></html>`);
+});
+
+// ====================================================================
+// /buy — Lemon Squeezy checkout-a yönləndirir.
+// license_key (varsa) custom data kimi ötürülür ki, ödəniş webhook-da mövcud
+// trial açarına bağlansın (eyni açar paid-ə yüksəlir → extension-da kopyala yox).
+// LEMON_CHECKOUT_URL .env-də yoxdursa nəzakətli "tezliklə" səhifəsi göstərilir.
+// ====================================================================
+app.get('/buy', (req, res) => {
+    if (!LEMON_CHECKOUT_URL) {
+        return res.status(503).type('html').send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tokengram — Checkout</title><link rel="icon" type="image/png" href="/icon.png">
+<style>body{font-family:"Segoe UI",system-ui,sans-serif;background:#070b14;color:#e8edf7;display:grid;place-items:center;min-height:100vh;margin:0;text-align:center}
+.card{max-width:420px;padding:40px 32px;border:1px solid rgba(77,144,255,.3);border-radius:16px;background:rgba(17,25,45,.6)}
+h1{font-size:1.3rem;margin:18px 0 6px}p{color:#93a0b8;font-size:.92rem;line-height:1.55}</style></head>
+<body><div class="card"><h1>Checkout opens very soon</h1><p>Ödəniş (${PRICE_LABEL}) hazırlanır — tezliklə.</p></div></body></html>`);
+    }
+    const licenseKey = String(req.query.key || req.query.license_key || '').trim();
+    const email = String(req.query.email || '').trim();
+    let url;
+    try {
+        url = new URL(LEMON_CHECKOUT_URL);
+    } catch {
+        return res.status(500).type('text').send('LEMON_CHECKOUT_URL səhvdir');
+    }
+    if (email) url.searchParams.set('checkout[email]', email);
+    if (licenseKey) url.searchParams.set('checkout[custom][license_key]', licenseKey);
+    res.redirect(302, url.toString());
 });
 
 // ---- Static UI ----
 // Admin paneli /admin/ altına köçdü; kök (/) artıq tokengram.click landing-i verir.
 app.use('/admin', express.static(path.join(__dirname, 'public')));
 app.use('/', express.static(path.join(__dirname, 'site')));
+
+// ====================================================================
+// "Trial sabah bitir" xatırlatması — conversion driver. 12 saatda bir:
+// trialing + 24 saata bitir + email var + hələ xəbərdarlıq göndərilməyib.
+// ====================================================================
+function runTrialReminders() {
+    try {
+        const now = nowSec();
+        const rows = db
+            .prepare(
+                `SELECT t.fingerprint, t.license_key, u.contact_email AS email, s.current_period_end
+                 FROM trials t
+                 JOIN users u ON u.id = t.user_id
+                 JOIN subscriptions s ON s.user_id = t.user_id AND s.status = 'trialing'
+                 WHERE t.reminded_at IS NULL AND u.contact_email IS NOT NULL
+                   AND s.current_period_end > ? AND s.current_period_end < ?`,
+            )
+            .all(now, now + 86400);
+        for (const r of rows) {
+            sendMail({
+                to: r.email,
+                subject: 'Tokengram — trial-ın sabah bitir',
+                html: emailTrialEndingHtml(r.license_key),
+                text: `Trial-ın sabah bitir. Abunə ol: ${PUBLIC_BASE_URL}/buy?key=${encodeURIComponent(r.license_key)}`,
+            }).catch(() => {});
+            db.prepare('UPDATE trials SET reminded_at = ? WHERE fingerprint = ?').run(now, r.fingerprint);
+        }
+        if (rows.length) console.log(`[reminder] ${rows.length} trial-bitmə maili göndərildi`);
+    } catch (e) {
+        console.error('[reminder] xəta:', e.message);
+    }
+}
+setInterval(runTrialReminders, 12 * 60 * 60 * 1000).unref();
+setTimeout(runTrialReminders, 30 * 1000).unref(); // boot-dan 30s sonra bir dəfə
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[tokengram-admin] http://0.0.0.0:${PORT}`);
