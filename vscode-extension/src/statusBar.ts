@@ -379,7 +379,14 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
     const trialDays = licenseState === 'trialing' ? trialDaysLeft() : null;
     const trialBadge = trialDays !== null ? tr('bar.trialBadge', { days: trialDays }) : '';
     const tail = [liveBadge, indexingBadge, trialBadge].filter(Boolean).join(' ');
-    item.text = tr('bar.summary', { icon, savedK })
+    // "0.0k saved" on a fresh install reads as broken — until the first proven
+    // token lands, show a neutral "ready" instead of a zero.
+    const noProvenYet =
+      safeSummary.savedTokensLifetime < 100 &&
+      safeSummary.pendingSavedTokens === 0;
+    item.text = (noProvenYet
+      ? tr('bar.summaryReady', { icon })
+      : tr('bar.summary', { icon, savedK }))
       + (tail ? ' ' + tail : '');
     item.color = color;
 
@@ -415,7 +422,8 @@ export function createStatusBar(context: vscode.ExtensionContext): vscode.Dispos
       totalBlocks: safeSummary.totalBlocks,
       totalWarns: safeSummary.totalWarns,
       totalFiles: safeSummary.totalFiles,
-    }) + '\n' + tr('bar.tip.lastUpdate', {
+    }) + (noProvenYet ? '\n' + tr('bar.tip.readyNote') : '')
+      + '\n' + tr('bar.tip.lastUpdate', {
       history: fileMtimeIso(historyPath),
       session: fileMtimeIso(sessionLogPath),
     }) + staleNote + trialNote;

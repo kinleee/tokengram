@@ -122,6 +122,12 @@ const EN: Messages = {
   'bar.noProject': '$(database) Tokengram: no project',
   'bar.noProjectTip': 'No workspace folder open',
   'bar.summary': '{icon} Tokengram: {savedK}k saved',
+  // Fresh install / no proven savings yet — "0.0k saved" reads as broken,
+  // so the bar shows a neutral "ready" until the first evidence-backed token.
+  'bar.summaryReady': '{icon} Tokengram: ready',
+  'bar.tip.readyNote':
+    'No proven savings yet — the number appears after the first ' +
+    'search_code-backed task. Tokengram only counts savings it can prove.',
   'bar.liveBadge': '$(zap) {saved} now',
   'bar.indexingBadge': '$(sync~spin) {n}',
   'bar.calibrating': 'calibrating',
@@ -191,7 +197,7 @@ const EN: Messages = {
 
   'bar.tipFull':
     'State: {state}\n' +
-    'All-time saved: {savedLifetime} tokens  ← the headline number\n' +
+    'All-time proven savings: {savedLifetime} tokens  ← the headline number\n' +
     'Last 24h: {tasks} tasks, {saved} tokens saved ({pct} on tracked ops) · {files} files\n' +
     '  • search_code: {search} tok\n' +
     '  • Grep: {grep} tok ({greps} greps)\n' +
@@ -202,7 +208,9 @@ const EN: Messages = {
     '{totalGreps} greps, {totalBashInspects} bash, {totalBlocks} blocks, ' +
     '{totalWarns} warns, {totalFiles} files saved\n' +
     'Note: percentage covers search/Read/Grep/Bash routed through Tokengram; ' +
-    'Edit, raw Bash output, and system-prompt overhead are not counted.',
+    'Edit, raw Bash output, and system-prompt overhead are not counted.\n' +
+    '✓ Evidence-based: only savings with hard proof are counted — a smaller, ' +
+    'honest number you can verify against your own usage.',
 
   'menu.breakdown': '$(list-tree) Event breakdown',
   'menu.breakdownDesc': 'open Output panel with raw session-log + history details',

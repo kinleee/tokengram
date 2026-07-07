@@ -521,6 +521,52 @@ def _check_license() -> Optional[str]:
 # ALƏTLƏR (TOOLS)
 # ============================================
 
+# --- Kompakt cavab (0.1.47) --------------------------------------------------
+# search_code nəticələri sessiya sonuna qədər kontekstdə qalır (MCP qalığı) —
+# usage hesabatında 17%-ə çıxmışdı. İki kəsik:
+#   1) Dedup — eyni məzmunlu chunk-lar (məs. hooks/ 3 nüsxə) bir dəfə qayıdır.
+#   2) Snippet qapağı — nəhəng chunk-ın quyruğu kəsilir; tam mətn lazımdırsa
+#      agent faylı özü açır (header-də yol var).
+
+_SNIPPET_MAX_LINES = 30
+_SNIPPET_MAX_CHARS = 2500
+
+
+def _dedup_results(results):
+    """Eyni (normalizə olunmuş) məzmunlu nəticələri atır.
+
+    Qaytarır: (unikal nəticələr, atılanların file_info siyahısı).
+    Score sırası qorunur — saxlanan həmişə ən yüksək skorlu nüsxədir.
+    """
+    seen: set = set()
+    out = []
+    dropped_infos = []
+    for r in results:
+        key = hash(" ".join(r.content.split()))
+        if key in seen:
+            dropped_infos.append(str(r.file_info))
+            continue
+        seen.add(key)
+        out.append(r)
+    return out, dropped_infos
+
+
+def _clip_snippet(text: str) -> str:
+    """Chunk mətnini sətir/simvol qapağı ilə kəsir (kontekst qənaəti)."""
+    lines = text.splitlines()
+    clipped = False
+    if len(lines) > _SNIPPET_MAX_LINES:
+        lines = lines[:_SNIPPET_MAX_LINES]
+        clipped = True
+    out = "\n".join(lines)
+    if len(out) > _SNIPPET_MAX_CHARS:
+        out = out[:_SNIPPET_MAX_CHARS]
+        clipped = True
+    if clipped:
+        out += "\n… [truncated — Read the file for the full chunk]"
+    return out
+
+
 @mcp.tool()
 def search_code(
     query: str,
@@ -556,6 +602,9 @@ def search_code(
                 r for r in bm25_results
                 if r.metadata.get("file_extension") == file_type
             ]
+        # Dedup trim-dən ƏVVƏL — top_k*2 namizəd var, dublikatın yerini
+        # növbəti unikal chunk doldursun (cavab yenə top_k dolu qayıtsın).
+        bm25_results, _ = _dedup_results(bm25_results)
         results = bm25_results[:top_k]
         confidence = "BM25_ONLY"
     elif mode == "semantic":
@@ -568,6 +617,11 @@ def search_code(
         results, confidence = engine.search(
             query, top_k=top_k, file_type=file_type, use_reranker=True
         )
+
+    # Dedup (semantic/rerank yolunda; fast onsuz da yuxarıda dedup olunub).
+    # Atılanların adı footer-də qalır — agent eyni məzmunun başqa nüsxələrini
+    # (sync tələb edən hooks kopiyaları kimi) görməyə davam etsin.
+    results, dup_dropped = _dedup_results(results)
 
     if not results:
         _log_search(query, results, "")
@@ -621,7 +675,13 @@ def search_code(
     for i, r in enumerate(results, 1):
         blocks.append(
             f"--- Source #{i}: {r.file_info} (score: {r.score:.3f}) ---\n"
-            f"{r.content}"
+            f"{_clip_snippet(r.content)}"
+        )
+    if dup_dropped:
+        shown = ", ".join(dup_dropped[:3])
+        more = f" +{len(dup_dropped) - 3} more" if len(dup_dropped) > 3 else ""
+        blocks.append(
+            f"({len(dup_dropped)} identical duplicate chunk(s) omitted: {shown}{more})"
         )
     response = "\n\n".join(blocks)
     _log_search(query, results, response, hunt_tokens, kw_rank)
