@@ -1,12 +1,15 @@
 """Phase 6 — i18n test suite.
 
+NOTE (2026-07-06): AZ locale faylı QƏSDƏN silinib (commit fdc3ef5,
+"az.json removal") — launch English-only-dir. `i18n._SUPPORTED` hələ
+"az"-ı tanıyır, amma az.json yoxdur → `tr()` EN-ə fallback etməlidir.
+AZ geri gələrsə: az.json bərpa et + buradakı fallback testlərini yenidən
+key/placeholder-parity testlərinə çevir (git tarixçəsində hazır formaları var).
+
 Verifies:
-  * `i18n.py` has the same keys in `en.json` and `az.json` (no missing or
-    extra translations).
-  * Format placeholders (`{name}`, `{lines}`, …) match across locales —
-    otherwise `template.format(**kwargs)` raises KeyError silently
-    (the fallback returns the raw template, losing data).
-  * `tr()` correctly switches based on `MLA_LANG`.
+  * `en.json` sağlamdır (boş tərcümə yoxdur, placeholder-lər düzgün formatdır).
+  * az.json yoxdur və `MLA_LANG=az` EN-ə səssiz fallback edir (crash yox).
+  * `tr()` `MLA_LANG` əsasında düzgün seçir.
   * Missing key returns the key literal (loud fail-mode).
 """
 import json
@@ -30,32 +33,31 @@ def _placeholders(s: str):
 class TestMessageFiles(unittest.TestCase):
     def setUp(self):
         self.en = json.loads((MESSAGES_DIR / "en.json").read_text(encoding="utf-8"))
-        self.az = json.loads((MESSAGES_DIR / "az.json").read_text(encoding="utf-8"))
 
-    def test_key_parity(self):
-        en_keys = set(self.en.keys())
-        az_keys = set(self.az.keys())
-        missing_in_az = en_keys - az_keys
-        extra_in_az = az_keys - en_keys
-        self.assertFalse(missing_in_az, f"keys missing in az: {missing_in_az}")
-        self.assertFalse(extra_in_az, f"unknown keys in az: {extra_in_az}")
+    def test_az_json_intentionally_absent(self):
+        """az.json qəsdən yoxdur (fdc3ef5). Geri qayıdıbsa, bu test qəsdən
+        sınır: parity testlərini git tarixçəsindən bərpa etmək lazımdır."""
+        self.assertFalse(
+            (MESSAGES_DIR / "az.json").exists(),
+            "az.json geri gəlib — phase6-nı key/placeholder-parity rejiminə qaytar",
+        )
 
-    def test_placeholder_parity(self):
-        for key in self.en:
-            self.assertEqual(
-                _placeholders(self.en[key]),
-                _placeholders(self.az[key]),
-                msg=f"placeholder mismatch in key={key!r}: "
-                f"en={self.en[key]!r} az={self.az[key]!r}",
-            )
+    def test_en_placeholders_are_valid_identifiers(self):
+        """`template.format(**kwargs)` yalnız identifier placeholder-lərlə
+        işləyir — `{0}` / `{a.b}` kimi formalar tr()-in kwargs müqaviləsini pozur."""
+        for key, val in self.en.items():
+            for ph in _placeholders(val):
+                self.assertTrue(
+                    ph.isidentifier(),
+                    msg=f"bad placeholder {{{ph}}} in en.json key={key!r}",
+                )
 
     def test_no_empty_translations(self):
-        for locale_name, table in (("en", self.en), ("az", self.az)):
-            for key, val in table.items():
-                self.assertTrue(
-                    val.strip(),
-                    msg=f"empty translation in {locale_name}.json key={key!r}",
-                )
+        for key, val in self.en.items():
+            self.assertTrue(
+                val.strip(),
+                msg=f"empty translation in en.json key={key!r}",
+            )
 
 
 class TestTrFunction(unittest.TestCase):
@@ -85,16 +87,17 @@ class TestTrFunction(unittest.TestCase):
         msg = self._tr("arch_missing")
         self.assertIn("hasn't been generated", msg)
 
-    def test_az_locale_via_mla_lang(self):
+    def test_az_locale_via_mla_lang_falls_back_to_en(self):
+        # az.json silinib (fdc3ef5) → az seçimi EN template qaytarır
         os.environ["MLA_LANG"] = "az"
         msg = self._tr("arch_missing")
-        self.assertIn("yaradılmayıb", msg)
+        self.assertIn("hasn't been generated", msg)
 
-    def test_az_locale_via_lang_env(self):
+    def test_az_locale_via_lang_env_falls_back_to_en(self):
         os.environ.pop("MLA_LANG", None)
         os.environ["LANG"] = "az_AZ.UTF-8"
         msg = self._tr("arch_missing")
-        self.assertIn("yaradılmayıb", msg)
+        self.assertIn("hasn't been generated", msg)
 
     def test_unknown_locale_falls_back_to_en(self):
         os.environ["MLA_LANG"] = "kr"  # not supported

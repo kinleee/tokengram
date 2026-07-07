@@ -73,6 +73,21 @@ export function activate(context: vscode.ExtensionContext) {
   // and other extensions (especially Claude Code's startup model/storage load)
   // do not wait on our setup check. ensureAutoInstall is fire-and-forget anyway.
   setTimeout(() => void ensureAutoInstall(context), 0);
+  // One-time notice after the method-2 cut-over (0.2.5+): the headline now sums
+  // ONLY evidence-based records, so users coming from older versions see their
+  // big historical total "disappear" and think the counter broke. Explain once.
+  notifyMethod2CutoverOnce(context);
+}
+
+function notifyMethod2CutoverOnce(context: vscode.ExtensionContext): void {
+  const KEY = 'tokengram.method2NoticeShown';
+  if (context.globalState.get<boolean>(KEY)) return;
+  void context.globalState.update(KEY, true);
+  void vscode.window.showInformationMessage(
+    'Tokengram: the savings counter was recalibrated — it now counts only ' +
+    'evidence-based savings (searches that verifiably replaced reads). ' +
+    'Older estimates were archived, so the total starts lower but is accurate.',
+  );
 }
 
 // When a file is saved in the VS Code editor, we write it to the index queue

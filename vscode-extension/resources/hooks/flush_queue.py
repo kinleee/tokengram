@@ -206,6 +206,13 @@ def _cold_drain() -> int:
                 errors += 1
             if i % 5 == 0:
                 dlock.touch()  # so the lock isn't considered stale during a long drain
+        # Ghost sweep (24h guard): legacy path-form / deleted-file chunks that
+        # per-file deletes can't see pile up and return STALE code revisions in
+        # search. We still hold the drainer lock — safe window to delete.
+        try:
+            store.sweep_ghosts(min_interval_hours=24)
+        except Exception as e:
+            sys.stderr.write(f"[tokengram flush] ghost sweep skipped: {e}\n")
     except Exception as e:
         sys.stderr.write(f"[tokengram flush] ChromaDB error: {e}\n")
         return 0

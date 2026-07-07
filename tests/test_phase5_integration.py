@@ -100,26 +100,29 @@ class TestSlashCommandBackends(unittest.TestCase):
 
     # ---- reset_savings.py (/MlaResetBar) ----
 
-    def test_reset_with_content_creates_backup(self):
-        HISTORY.write_text('{"ts": 1, "searches": 1}\n', encoding="utf-8")
+    def test_reset_with_content_creates_timestamped_backup(self):
+        """Backup HƏMİŞƏ timestamped `.bak.<ts>`-dir (folder tidy, ext 0.1.56) —
+        suffix-siz `.jsonl.bak` artıq yaranmır."""
+        content = '{"ts": 1, "searches": 1}\n'
+        HISTORY.write_text(content, encoding="utf-8")
         rc, out, _ = _run(RESET)
         self.assertEqual(rc, 0)
         self.assertEqual(HISTORY.read_text(encoding="utf-8"), "")
-        # Backup yaranıb (default name)
-        backup = HISTORY.with_suffix(".jsonl.bak")
-        self.assertTrue(backup.exists())
-        backup.unlink(missing_ok=True)
-
-    def test_reset_with_existing_backup_uses_timestamped_name(self):
-        HISTORY.write_text('{"ts": 1}\n', encoding="utf-8")
-        HISTORY.with_suffix(".jsonl.bak").write_text("old backup\n", encoding="utf-8")
-        rc, _, _ = _run(RESET)
-        self.assertEqual(rc, 0)
-        # Default bak hələ var
-        self.assertTrue(HISTORY.with_suffix(".jsonl.bak").exists())
-        # Yeni timestamped bak da var
         timestamped = list(ROOT.glob(".mla_savings_history.jsonl.bak.*"))
         self.assertGreaterEqual(len(timestamped), 1)
+        # Backup köhnə history-nin surətidir
+        newest = max(timestamped, key=lambda p: p.stat().st_mtime)
+        self.assertEqual(newest.read_text(encoding="utf-8"), content)
+
+    def test_reset_backup_retention_keeps_two(self):
+        """Hər reset yeni .bak yaradır, amma yalnız son 2-si saxlanır —
+        .bak yığını qovluğu zibilləmesin."""
+        for i in range(3):
+            HISTORY.write_text(f'{{"ts": {i}}}\n', encoding="utf-8")
+            rc, _, _ = _run(RESET)
+            self.assertEqual(rc, 0)
+        timestamped = list(ROOT.glob(".mla_savings_history.jsonl.bak.*"))
+        self.assertLessEqual(len(timestamped), 2, msg=f"got: {[p.name for p in timestamped]}")
 
     def test_reset_empty_history_idempotent(self):
         HISTORY.write_text("", encoding="utf-8")
@@ -133,10 +136,12 @@ class TestSlashCommandBackends(unittest.TestCase):
         HISTORY.write_text("{}\n", encoding="utf-8")
         old_mtime = HISTORY.stat().st_mtime
         time.sleep(0.05)
-        rc, out, _ = _run(REFRESH)
+        rc, out, err = _run(REFRESH)
         self.assertEqual(rc, 0)
         self.assertGreater(HISTORY.stat().st_mtime, old_mtime)
-        self.assertIn("refresh triggered", out)
+        # Mesaj STDERR-ə yazılır — hook stdout-u Claude kontekstinə düşür,
+        # ona görə insan-üçün status sətirləri stderr-dədir.
+        self.assertIn("refresh triggered", err)
 
     def test_refresh_bar_creates_history_if_missing(self):
         HISTORY.unlink(missing_ok=True)
@@ -160,11 +165,12 @@ class TestSlashCommandBackends(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("hasn't been generated", out)
 
-    def test_show_arch_missing_file_az_locale(self):
+    def test_show_arch_missing_file_az_falls_back_to_en(self):
+        # az.json qəsdən silinib (fdc3ef5) → az locale EN mesajı qaytarır
         ARCH_DOC.unlink(missing_ok=True)
         rc, out, _ = _run(SHOW_ARCH, lang="az")
         self.assertEqual(rc, 0)
-        self.assertIn("hələ yaradılmayıb", out)
+        self.assertIn("hasn't been generated", out)
 
 
 class TestSavingsReader24hMath(unittest.TestCase):

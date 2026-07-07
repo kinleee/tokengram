@@ -301,6 +301,15 @@ def _drain_pending_queue() -> int:
             # batch-dan sonra tam korpus təkrar tokenləşdirilib pickle edilirdi →
             # 200-fayllıq drain = 10× tam yenidənqurma. İndi `_drain_signal_loop`
             # bütün batch-lar bitəndən sonra BİR DƏFƏ yenidən qurur (aşağıda).
+
+            # Ghost sweep (24h guard): legacy path-forma və silinmiş-fayl
+            # chunk-ları per-fayl delete-lərin görmədiyi yerdə yığılıb qalır →
+            # axtarış köhnə kod reviziyası qaytarır. Drainer kilidi hələ
+            # bizdədir — təhlükəsiz silmə pəncərəsidir.
+            try:
+                store.sweep_ghosts(min_interval_hours=24)
+            except Exception as e:
+                logger.warning(f"Ghost sweep keçildi: {e}")
     finally:
         dlock.release()
 
