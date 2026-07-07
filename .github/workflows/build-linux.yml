@@ -93,6 +93,16 @@ jobs:
         working-directory: vscode-extension
         run: npm run build:prod
 
+      # Read the extension version so the produced VSIX carries it in its
+      # filename (tokengram-linux-x64-<version>.vsix). An unversioned
+      # "tokengram-linux-x64.vsix" was the recurring "linux vsix yoxdur"
+      # trap: after `gh run download` it landed nested + version-less, so it
+      # looked missing next to the versioned Windows/past-Linux VSIXes.
+      - name: Read extension version
+        id: extver
+        working-directory: vscode-extension
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
       # Bundle ONLY the Linux wheel into the linux-x64 VSIX. Any committed
       # Windows wheel is removed first so the setup wizard cannot pick the wrong
       # platform's wheel (it selects by version, not by platform tag).
@@ -106,7 +116,7 @@ jobs:
       # x64 Linux editors and never to Windows/macOS users.
       - name: Package linux-x64 VSIX
         working-directory: vscode-extension
-        run: npx vsce package --target linux-x64 -o tokengram-linux-x64.vsix
+        run: npx vsce package --target linux-x64 -o tokengram-linux-x64-${{ steps.extver.outputs.version }}.vsix
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -114,7 +124,7 @@ jobs:
           name: tokengram-linux-x64
           path: |
             dist/tokengram-*.whl
-            vscode-extension/tokengram-linux-x64.vsix
+            vscode-extension/tokengram-linux-x64-*.vsix
           if-no-files-found: error
 
 # Follow-ups (not blocking the first Linux release):
