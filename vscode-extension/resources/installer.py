@@ -501,14 +501,32 @@ def install_hooks_locally(venv: Path, home: Path) -> None:
     # these only exist as compiled .pyd inside the package — so we copy them
     # (and the messages/ directory that i18n reads at runtime) next to hooks/.
     # Without this, every hook crashes with ModuleNotFoundError on a clean machine.
+    #
+    # PURGE home-root copies FIRST: a stale one silently SHADOWS the venv wheel
+    # for every hook (home comes before site-packages on sys.path). An old
+    # mla_constants without `is_gitignored` killed queue_change for ~2 weeks
+    # exactly this way (ImportError → silent exit 0: no file_edit evidence, no
+    # reindex queue). Purge-then-copy also drops orphans a newer layout no
+    # longer ships (e.g. a differently-tagged .pyd).
     for stem in ("mla_constants", "i18n"):
-        copied = False
-        for match in pkg_root.glob(f"{stem}.*"):
-            if match.suffix.lower() in (".py", ".pyd", ".so"):
+        matches = [
+            m for m in pkg_root.glob(f"{stem}.*")
+            if m.suffix.lower() in (".py", ".pyd", ".so")
+        ]
+        for legacy in home.glob(f"{stem}.*"):
+            if legacy.suffix.lower() in (".py", ".pyd", ".so"):
+                try:
+                    legacy.unlink()
+                except OSError:
+                    pass
+        if matches:
+            for match in matches:
                 shutil.copy2(match, home / match.name)
-                copied = True
-        if not copied:
-            log(f"[5/5] warning: '{stem}' module not found in package at {pkg_root}")
+        else:
+            log(
+                f"[5/5] warning: '{stem}' not in package at {pkg_root}; "
+                "home copies purged — hooks fall back to the venv wheel"
+            )
     src_messages = pkg_root / "messages"
     if src_messages.exists():
         dst_messages = home / "messages"

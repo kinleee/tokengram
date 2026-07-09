@@ -67,7 +67,6 @@ try:
         EXCLUDED_DIRS,
         EXCLUDED_FILE_PATTERNS,
         EXCLUDED_FILE_SUFFIXES,
-        is_gitignored,
     )
     from license_gate import enforcement_active
     from project_root import find_project_root
@@ -75,6 +74,16 @@ try:
 except Exception:
     # Dependency import failed — silently skip the queue hook, block nothing.
     sys.exit(0)
+
+# OPTIONAL API — a stale mla_constants build without is_gitignored must NOT
+# kill the whole hook. It silently did exactly that for ~2 weeks (ImportError
+# above → exit 0): no file_edit evidence, no reindex queue for agent edits,
+# stale index ghosts. Gitignore filtering degrades to a no-op instead.
+try:
+    from mla_constants import is_gitignored
+except Exception:
+    def is_gitignored(_p):
+        return False
 
 PROJECT_ROOT = find_project_root()
 QUEUE_FILE = PROJECT_ROOT / ".mla_pending.txt"
@@ -110,11 +119,11 @@ def main() -> int:
     except Exception:
         pass
 
-    # Savings evidence: log WHICH file the agent edited. The Stop hook's Tier-1
-    # attribution uses this — a search-surfaced file later EDITED without ever
-    # being read means the chunk supplied the content (strongest per-file
-    # evidence). Logged BEFORE the index filters: search only surfaces indexed
-    # files anyway, so extra paths are inert, but the evidence stays complete.
+    # Savings evidence: log WHICH file the agent edited. The Stop hook's
+    # method-3 attribution uses this — a search-surfaced file later EDITED is
+    # the strongest proof the search steered real work (the search keeps its
+    # discovery credit). Logged BEFORE the index filters: search only surfaces
+    # indexed files anyway, so extra paths are inert, but evidence stays complete.
     try:
         append_atomic(
             PROJECT_ROOT / ".mla_session_log.jsonl",

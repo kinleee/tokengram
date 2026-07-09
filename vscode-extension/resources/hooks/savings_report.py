@@ -175,13 +175,12 @@ def main() -> int:
     chunked_baseline = 0
     chunked_spent = 0
     search_baseline = 0
-    search_tier1 = 0        # Tier-1 ("replaced a read") portion — audit field
     search_hunt = 0         # hunt ("finding cost") portion — audit field
+    search_used = 0         # searches whose surfaced files were then USED (audit)
     ungated_spent = 0       # spend of events with NO steering evidence
-    credited_tier1 = set()  # per-file dedup: a file earns Tier-1 credit once
     unique_files_for_count = set()
 
-    # ---- EVIDENCE PASS (method 2) -------------------------------------------
+    # ---- EVIDENCE PASS (method 3) -------------------------------------------
     # Savings are EVIDENCE-BASED: an event earns credit only when the session
     # itself shows Tokengram caused the saving. Heuristic credits with no
     # steering evidence (agent grepped / chunk-read on its own) earn 0 — their
@@ -189,9 +188,10 @@ def main() -> int:
     #   searched_first: file -> ts of the FIRST search that surfaced it
     #   blocked_first : file -> ts of the first read_block (legacy configs)
     #   edit_ts       : file -> [ts...] of agent edits (queue_change file_edit)
-    #   fully_read    : files read in full (read_pass) — cancels search credit (B1)
-    #   touched_read  : files with any chunk/grep/bash event — their credit (if
-    #                   any) lives on those events, never doubled on the search
+    #   fully_read    : files read in full (read_pass) — with touched_read and
+    #                   edit_ts these mark a search's results as USED (method 3)
+    #   touched_read  : files with any chunk/grep/bash event — content credit
+    #                   lives on those events, never doubled on the search
     searched_first = {}
     blocked_first = {}
     edit_ts = {}
@@ -225,9 +225,6 @@ def main() -> int:
             searched_first.get(f, float("inf")) < ev_ts
             or blocked_first.get(f, float("inf")) < ev_ts
         )
-
-    search_cancelled = 0
-    cancelled_spent = 0  # chunk tokens of credit-less searches (pure overhead)
 
     for e in entries:
         entry_type = e.get("type", "search_code")
@@ -291,56 +288,52 @@ def main() -> int:
             files = e.get("files", {})
             ev_actual = e.get("actual_tokens", 0)
             ev_ts = e.get("ts", 0)
+            total_actual += ev_actual
             if not files:
-                total_actual += ev_actual
                 continue
             unique_files_for_count.update(files.keys())
             normed = {fp: _norm(fp) for fp in files}
 
-            # Tier 1 — "replaced a read": a surfaced file the agent later EDITED
-            # without ever reading it (no read_pass / chunk / grep on it): the
-            # chunk supplied the content it worked from. Strongest evidence —
-            # credit the file's full size (capped). Deduped across searches.
-            tier1 = 0
-            for fp, n in normed.items():
-                if not n or n in credited_tier1:
-                    continue
-                if n in fully_read or n in touched_read:
-                    continue
-                if any(t > ev_ts for t in edit_ts.get(n, ())):
-                    tier1 += min(files[fp], MAX_BASELINE_PER_EVENT)
-                    credited_tier1.add(n)
-
-            any_touched = any(n and n in touched_read for n in normed.values())
-            any_fully_read = any(n and n in fully_read for n in normed.values())
-
-            if tier1 > 0:
-                search_baseline += tier1
-                search_tier1 += tier1
-                total_actual += ev_actual
-            elif any_touched:
-                # Follow-up chunk/grep events carry the credit (gated above) —
-                # the search itself adds nothing more (no double counting).
-                total_actual += ev_actual
-            elif any_fully_read:
-                # B1 — the agent read a surfaced file in full anyway: the chunks
-                # were pure overhead. No credit; cost goes to the denominator.
-                search_cancelled += 1
-                cancelled_spent += ev_actual
-            else:
-                # Untouched results + completed task = the chunks alone answered.
-                # Credit the counterfactual cost of FINDING this without MLA:
-                # the server-computed hunt_tokens (keyword-rank simulation over
-                # the real repo). Old wheels lack the field → fall back to the
-                # top file alone — never the whole result list.
-                hunt = e.get("hunt_tokens")
-                if not isinstance(hunt, (int, float)) or hunt <= 0:
-                    top_tokens = next(iter(files.values()))
-                    hunt = min(top_tokens, MAX_BASELINE_PER_EVENT)
-                hunt = int(min(hunt, 5 * MAX_BASELINE_PER_EVENT))
-                search_baseline += hunt
-                search_hunt += hunt
-                total_actual += ev_actual
+            # ---- METHOD 3 (2026-07-09) ----------------------------------
+            # Every search that surfaced files earns the DISCOVERY credit:
+            # server-computed hunt_tokens = the counterfactual cost of
+            # finding this without the index (keyword-rank simulation over
+            # the real repo). Two evidence shapes, same credit:
+            #  * results USED later (chunk/grep/bash/full read/edit) — the
+            #    strongest proof the search steered the work. Content credit
+            #    stays on the follow-up events (steered chunk etc.); the
+            #    search claims only the finding cost — nothing counted twice.
+            #  * results untouched + task completed — the chunks alone
+            #    answered (unchanged method-2 behaviour).
+            # Method 2's B1 rule cancelled the WHOLE credit when a surfaced
+            # file was later read in full — punishing exactly the most
+            # productive chain (search → read → edit) and zeroing real
+            # sessions ("0 saved on a productive day"). The full read pays
+            # its own read_pass tokens into the denominator; it does not
+            # erase the finding value. Tier-1 (full-file credit for "edited
+            # without ever reading") is REMOVED: Claude Code's Edit tool
+            # requires a prior Read, so the condition was unsatisfiable —
+            # 26/26 shipped records had tier1=0 — and its file-size payout
+            # would re-inflate savings if it ever fired.
+            used = any(
+                n and (
+                    n in touched_read
+                    or n in fully_read
+                    or any(t > ev_ts for t in edit_ts.get(n, ()))
+                )
+                for n in normed.values()
+            )
+            hunt = e.get("hunt_tokens")
+            if not isinstance(hunt, (int, float)) or hunt <= 0:
+                # Old wheels lack the field → fall back to the top file
+                # alone — never the whole result list.
+                top_tokens = next(iter(files.values()))
+                hunt = min(top_tokens, MAX_BASELINE_PER_EVENT)
+            hunt = int(min(hunt, 5 * MAX_BASELINE_PER_EVENT))
+            search_baseline += hunt
+            search_hunt += hunt
+            if used:
+                search_used += 1
 
     has_search = search_count > 0
     has_block = block_count > 0
@@ -375,9 +368,7 @@ def main() -> int:
     # the inspect heuristic was 20% × baseline, while the real value could be the
     # full file. For real usage bash_output is the measured value; bash_actual is
     # a temporary double-count, and bash_inspect could be removed entirely later.
-    untracked_spent = (
-        read_pass_tokens + bash_output_tokens + cancelled_spent + ungated_spent
-    )
+    untracked_spent = read_pass_tokens + bash_output_tokens + ungated_spent
     total_spent = actual + untracked_spent
     # "Real %" — the ratio of the tokens MLA diverted over the whole session to
     # TOTAL session spend (saved + actual + untracked). In an edit-heavy refactor
@@ -443,13 +434,17 @@ def main() -> int:
             "saving_tokens": saving,
             "saving_pct": round(pct, 2),
             "file_count": len(unique_files_for_count),
-            # B1: how many searches had their saving cancelled because the file was later read in full.
-            "search_cancelled": search_cancelled,
-            # Method 2 = evidence-based attribution (2026-07-06). The bar's
-            # headline sums only method>=2 records — earlier records were written
-            # under inflationary heuristics and remain for audit only.
-            "method": 2,
-            "search_tier1_tokens": search_tier1,
+            # Legacy field — method 3 cancels nothing (kept for the bar/audit).
+            "search_cancelled": 0,
+            # Method 3 = evidence-based attribution v2 (2026-07-09): every
+            # search with surfaced files earns the discovery (hunt) credit —
+            # used results are the strongest steering evidence, not a reason
+            # to cancel (method 2's B1 zeroed productive sessions). Tier-1 is
+            # gone (Edit requires a prior Read → unsatisfiable; 26/26 records
+            # had tier1=0). The bar's headline sums method>=2 records.
+            "method": 3,
+            "search_tier1_tokens": 0,  # legacy field (tier-1 removed)
+            "search_used": search_used,
             "search_hunt_tokens": search_hunt,
             "ungated_spent_tokens": ungated_spent,
         }

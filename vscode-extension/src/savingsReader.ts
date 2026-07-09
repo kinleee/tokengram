@@ -195,7 +195,7 @@ interface PendingDelta {
   // Untracked real-spend
   readPassTokens: number;
   bashOutputTokens: number;
-  // Spend of events that earned NO credit (no steering evidence / cancelled) —
+  // Spend of events that earned NO credit (no steering evidence) —
   // real cost for the % denominator, never a saving.
   ungatedSpent: number;
   // ts (epoch sec) of the NEWEST session-log entry. The bar uses its age to tell
@@ -263,7 +263,7 @@ function readSessionLog(historyPath: string): PendingDelta | null {
   if (parsed.length === 0) return null;
   d.newestTs = parsed.reduce((m, e) => Math.max(m, e.ts ?? 0), 0);
 
-  // ---- EVIDENCE PASS (method 2) — mirrors hooks/savings_report.py. ----------
+  // ---- EVIDENCE PASS (method 3) — mirrors hooks/savings_report.py. ----------
   // An event earns credit only when the session shows Tokengram caused the
   // saving (a search/block surfaced the file BEFORE the event). Un-steered
   // heuristic events earn 0; their cost still counts as real spend. Keep the
@@ -273,9 +273,6 @@ function readSessionLog(historyPath: string): PendingDelta | null {
     p ? p.replace(/\\/g, '/').toLowerCase() : null;
   const searchedFirst = new Map<string, number>();
   const blockedFirst = new Map<string, number>();
-  const editTs = new Map<string, number[]>();
-  const fullyRead = new Set<string>();
-  const touchedRead = new Set<string>();
   for (const e of parsed) {
     const t = e.type ?? 'search_code';
     const ts = e.ts ?? 0;
@@ -294,14 +291,6 @@ function readSessionLog(historyPath: string): PendingDelta | null {
       if (!blockedFirst.has(f) || ts < (blockedFirst.get(f) as number)) {
         blockedFirst.set(f, ts);
       }
-    } else if (t === 'file_edit') {
-      const arr = editTs.get(f) ?? [];
-      arr.push(ts);
-      editTs.set(f, arr);
-    } else if (t === 'read_pass') {
-      fullyRead.add(f);
-    } else if (t === 'read_chunked' || t === 'grep_search' || t === 'bash_inspect') {
-      touchedRead.add(f);
     }
   }
   const steered = (f: string | null, evTs: number): boolean =>
@@ -309,7 +298,6 @@ function readSessionLog(historyPath: string): PendingDelta | null {
     (((searchedFirst.get(f) ?? Infinity) < evTs) ||
       ((blockedFirst.get(f) ?? Infinity) < evTs));
 
-  const creditedTier1 = new Set<string>();
   for (const e of parsed) {
     const t = e.type ?? 'search_code';
     const evTs = e.ts ?? 0;
@@ -370,8 +358,8 @@ function readSessionLog(historyPath: string): PendingDelta | null {
       const files = e.files ?? {};
       const fentries = Object.entries(files);
       const evActual = e.actual_tokens ?? 0;
+      d.searchActual += evActual;
       if (fentries.length === 0) {
-        d.searchActual += evActual;
         continue;
       }
       for (const [p] of fentries) uniqueFiles.set(p, 0);
@@ -379,40 +367,19 @@ function readSessionLog(historyPath: string): PendingDelta | null {
         ([fp, tok]) => [norm(fp), tok as number] as const,
       );
 
-      // Tier 1 — "replaced a read": surfaced file later EDITED without ever
-      // being read: the chunk supplied the content. Deduped across searches.
-      let tier1 = 0;
-      for (const [n, tok] of normed) {
-        if (!n || creditedTier1.has(n)) continue;
-        if (fullyRead.has(n) || touchedRead.has(n)) continue;
-        if ((editTs.get(n) ?? []).some((x) => x > evTs)) {
-          tier1 += Math.min(tok, MAX_BASELINE_PER_EVENT);
-          creditedTier1.add(n);
-        }
+      // METHOD 3 (2026-07-09): every search with surfaced files earns the
+      // DISCOVERY credit (server-computed hunt cost). Used results
+      // (chunk/grep/bash/full read/edit afterwards) are the strongest
+      // steering evidence — not a reason to cancel (method 2's B1 zeroed
+      // productive sessions); content credit stays on the follow-up events.
+      // Tier-1 is gone (Edit requires a prior Read → unsatisfiable).
+      // Mirrors hooks/savings_report.py — keep the two in sync.
+      let hunt = e.hunt_tokens;
+      if (typeof hunt !== 'number' || hunt <= 0) {
+        hunt = Math.min(normed[0][1], MAX_BASELINE_PER_EVENT);
       }
-      const anyTouched = normed.some(([n]) => n !== null && touchedRead.has(n));
-      const anyFullyRead = normed.some(([n]) => n !== null && fullyRead.has(n));
-
-      if (tier1 > 0) {
-        d.searchBaseline += tier1;
-        d.searchActual += evActual;
-      } else if (anyTouched) {
-        // Follow-up chunk/grep events carry the credit — no double counting.
-        d.searchActual += evActual;
-      } else if (anyFullyRead) {
-        // B1 — a surfaced file was read in full anyway: chunks were overhead.
-        d.ungatedSpent += evActual;
-      } else {
-        // Untouched results = the chunks alone answered. Credit the hunt cost
-        // (server-computed); old wheels lack it → top file alone as fallback.
-        let hunt = e.hunt_tokens;
-        if (typeof hunt !== 'number' || hunt <= 0) {
-          hunt = Math.min(normed[0][1], MAX_BASELINE_PER_EVENT);
-        }
-        hunt = Math.min(hunt, 5 * MAX_BASELINE_PER_EVENT);
-        d.searchBaseline += hunt;
-        d.searchActual += evActual;
-      }
+      hunt = Math.min(hunt, 5 * MAX_BASELINE_PER_EVENT);
+      d.searchBaseline += hunt;
     }
   }
   d.fileCount = uniqueFiles.size;

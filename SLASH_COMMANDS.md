@@ -37,7 +37,7 @@ State file: `.mla_enforcement.flag` (`on` / `off`). When **OFF** the hooks
 do nothing — the counter freezes and the session log stops accumulating
 (the log itself is left untouched to avoid racing a parallel writer).
 
-## Token tracking — evidence-based attribution ("method 2", 2026-07-06)
+## Token tracking — evidence-based attribution ("method 3", 2026-07-09)
 
 The Stop hook `savings_report.py` reads `.mla_session_log.jsonl` after
 each task. An event earns savings credit **only when the session itself
@@ -45,21 +45,33 @@ shows Tokengram caused the saving** — heuristic credits with no steering
 evidence earn 0 (the old chunked/grep heuristics minted ~72% of the
 displayed total with no evidence; that inflation is gone).
 
-Credit tiers (strongest first):
+Credit rules:
 
-| Tier | Evidence | Credit |
+| Rule | Evidence | Credit |
 |---|---|---|
-| **Tier 1 — replaced a read** | `search_code` surfaced a file that the agent later **edited without ever reading it** | full file size (capped at 10k/event), deduped per file |
-| **Steered chunk/grep** | a search surfaced the file **before** the chunked Read / Grep happened | full-read alternative (capped); the chunk's own cost counts as spend |
-| **Hunt** | search results never touched and the task completed — the snippets alone answered | server-computed `hunt_tokens` (keyword-rank simulation of finding the file without MLA) |
-| **B1 — cancelled** | the agent read a surfaced file **in full** anyway | 0 — the search was pure overhead; its cost goes to the denominator |
+| **Search — discovery (hunt)** | `search_code` surfaced files; whether the agent then **used** them (chunk/grep/bash/full read/edit — the strongest steering proof) or the snippets alone answered | server-computed `hunt_tokens` (keyword-rank simulation of finding the file without the index), capped |
+| **Steered chunk/grep** | a search surfaced the file **before** the chunked Read / Grep happened | full-read alternative (capped); the chunk's own cost counts as spend. Content credit is separate from the search's discovery credit — nothing is counted twice |
 | **Un-steered chunk/grep/bash** | the agent chunked/grepped on its own habit; no search pointed it there | 0 credit; the spend still counts (`ungated_spent_tokens`) |
 
-Every history record is stamped `"method": 2`. The status bar sums
+Removed in method 3 (2026-07-09):
+
+* **Tier 1** ("edited without ever reading", full-file credit) — Claude
+  Code's Edit tool requires a prior Read, so the condition was
+  unsatisfiable: 26/26 shipped records had `tier1=0`. The field
+  `search_tier1_tokens` is kept (always 0) for schema compatibility.
+* **B1 cancellation** (full read of a surfaced file zeroed the whole
+  search credit) — it punished exactly the most productive chain
+  (search → read → edit) and produced "0 saved on a productive day"
+  reports. The full read already pays its own `read_pass` tokens into
+  the denominator; it does not erase the finding value.
+  `search_cancelled` is kept (always 0); `search_used` counts searches
+  whose surfaced files the agent then used.
+
+Every history record is stamped `"method": 3`. The status bar sums
 **only `method >= 2` records** — older records (written under the
 inflationary heuristics) stay in `.mla_savings_history.jsonl` for audit
-but are excluded from all displayed totals. Full reads, bash output and
-cancelled searches all count as real spend, so the percentage is honest:
+but are excluded from all displayed totals. Full reads and bash output
+count as real spend, so the percentage is honest:
 `saved / (saved + spent + untracked)`.
 
 ## Localization (`MLA_LANG`)

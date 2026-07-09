@@ -2,6 +2,25 @@
 
 All notable changes to the Tokengram VS Code extension are documented here.
 
+## 0.2.8
+
+**Searches you actually use now count — the counter no longer punishes
+productive work.**
+
+- **Fair attribution (method 3).** A search whose results you then read or
+  edit is the strongest proof the search steered your work — it now keeps
+  its "finding cost" credit. Previous versions cancelled the whole credit
+  the moment a surfaced file was read in full, which zeroed out exactly the
+  most productive sessions (search → read → edit). Nothing is counted
+  twice: content savings still live on the follow-up chunked reads.
+- **Agent edits re-index again.** A stale support module could silently
+  disable the edit hook — agent-made edits then never re-indexed (stale
+  search results creeping in over time). The hook now survives that
+  condition, the installer purges the stale copies, and hook bundles
+  refresh once per extension version instead of "only when missing".
+- Wheel 0.1.48; history records are stamped `method: 3` (the bar keeps
+  summing all evidence-based records, `method >= 2`).
+
 ## 0.2.7
 
 **Your savings number may look smaller — that's intentional, and it's good news.**

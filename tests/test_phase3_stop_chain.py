@@ -124,16 +124,96 @@ class TestStopChain(unittest.TestCase):
         self.assertEqual(r["blocks"], 1)
         self.assertEqual(r["greps"], 1)
         self.assertEqual(r["bash_inspects"], 1)
-        # Sübut-əsaslı model (method 2): search-ün nəticəsinə toxunulmayıb →
+        # Sübut-əsaslı model (method 3): search-ün nəticəsinə toxunulmayıb →
         # hunt fallback = min(top_file, cap) = 500; block = 1000 (real cəhd).
         # Sübutsuz (un-steered) grep/bash KREDİT ALMIR — xərcləri ungated-ə düşür.
-        self.assertEqual(r["method"], 2)
+        self.assertEqual(r["method"], 3)
         # Baseline = 500 (search hunt) + 1000 (block) = 1500
         self.assertEqual(r["baseline_tokens"], 1500)
         # Actual = yalnız search chunk-ları = 100 (grep/bash ungated xərcdir)
         self.assertEqual(r["actual_tokens"], 100)
         # Ungated = grep 75 + bash 120 = 195
         self.assertEqual(r["ungated_spent_tokens"], 195)
+        # Method 3 sahələri: tier1 ölüb (həmişə 0), heç nə cancel olunmur,
+        # nəticələrə toxunulmayıb → search_used = 0.
+        self.assertEqual(r["search_tier1_tokens"], 0)
+        self.assertEqual(r["search_cancelled"], 0)
+        self.assertEqual(r["search_used"], 0)
+        self.assertEqual(r["search_hunt_tokens"], 500)
+
+    def test_savings_used_search_not_cancelled(self):
+        """Method 3-ün əsas fix-i: search → TAM oxu → edit (ən produktiv real
+        zəncir) hunt kreditini SAXLAYIR. Method 2-nin B1 qaydası bunu tam
+        sıfırlayırdı — GOLD-un 'produktiv gündə 0 qənaət' hesabatlarının kökü."""
+        base = time.time()
+        entries = [
+            {"ts": base, "query": "find auth", "files": {"C:/tg_t/a.py": 5000},
+             "actual_tokens": 120, "hunt_tokens": 800},
+            {"ts": base + 1, "type": "read_pass", "file": "C:\\tg_t\\a.py",
+             "reason": "warn_allow", "estimated_tokens": 2000},
+            {"ts": base + 2, "type": "file_edit", "file": "C:\\tg_t\\a.py"},
+        ]
+        SESSION_LOG.write_text(
+            "\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8",
+        )
+        rc, _, _ = _run(SAVINGS_SCRIPT)
+        self.assertEqual(rc, 0)
+        r = json.loads(HISTORY.read_text(encoding="utf-8").splitlines()[0])
+        # Server-hesablı hunt (800) kreditə düşür — cancel YOXDUR.
+        self.assertEqual(r["search_hunt_tokens"], 800)
+        self.assertEqual(r["baseline_tokens"], 800)
+        self.assertEqual(r["search_cancelled"], 0)
+        self.assertEqual(r["search_used"], 1)
+        # Tam oxunun xərci məxrəcdədir (read_pass 2000), kredit deyil.
+        self.assertEqual(r["read_pass_tokens"], 2000)
+        self.assertEqual(r["actual_tokens"], 120)
+        self.assertEqual(r["saving_tokens"], 800 - 120)
+
+    def test_savings_search_plus_steered_chunk_both_credit(self):
+        """Search → steered chunked Read: discovery (hunt) + content (chunk)
+        kreditləri ayrı-ayrı, ikiqat sayma yoxdur."""
+        base = time.time()
+        entries = [
+            {"ts": base, "query": "bar states", "files": {"C:/tg_t/f.ts": 4000},
+             "actual_tokens": 50, "hunt_tokens": 600},
+            {"ts": base + 1, "type": "read_chunked", "file": "C:\\tg_t\\f.ts",
+             "lines": 400, "limit": 30,
+             "estimated_baseline_tokens": 3000, "estimated_spent_tokens": 300},
+        ]
+        SESSION_LOG.write_text(
+            "\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8",
+        )
+        rc, _, _ = _run(SAVINGS_SCRIPT)
+        self.assertEqual(rc, 0)
+        r = json.loads(HISTORY.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(r["search_hunt_tokens"], 600)
+        self.assertEqual(r["chunked_baseline_tokens"], 3000)
+        self.assertEqual(r["chunked_spent_tokens"], 300)
+        # Baseline = hunt 600 + chunk 3000; actual = search 50 + chunk 300.
+        self.assertEqual(r["baseline_tokens"], 3600)
+        self.assertEqual(r["actual_tokens"], 350)
+        self.assertEqual(r["search_used"], 1)
+        self.assertEqual(r["ungated_spent_tokens"], 0)
+
+    def test_savings_edit_after_search_hunt_level_not_file_size(self):
+        """Tier-1 ölüdür: search-dən sonra edit fayl-ölçüsü (9999) deyil,
+        hunt səviyyəsində (700) kredit alır — köhnə inflyasiya qayıtmır."""
+        base = time.time()
+        entries = [
+            {"ts": base, "query": "cfg", "files": {"C:/tg_t/g.py": 9999},
+             "actual_tokens": 40, "hunt_tokens": 700},
+            {"ts": base + 1, "type": "file_edit", "file": "C:\\tg_t\\g.py"},
+        ]
+        SESSION_LOG.write_text(
+            "\n".join(json.dumps(e) for e in entries) + "\n", encoding="utf-8",
+        )
+        rc, _, _ = _run(SAVINGS_SCRIPT)
+        self.assertEqual(rc, 0)
+        r = json.loads(HISTORY.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(r["search_tier1_tokens"], 0)
+        self.assertEqual(r["search_hunt_tokens"], 700)
+        self.assertEqual(r["baseline_tokens"], 700)
+        self.assertEqual(r["search_used"], 1)
 
     def test_savings_off_flag_keeps_session_no_history(self):
         SESSION_LOG.write_text('{"query":"x","files":{},"actual_tokens":0}\n', encoding="utf-8")

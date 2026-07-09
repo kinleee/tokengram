@@ -60,7 +60,9 @@ interface MenuItem extends vscode.QuickPickItem {
     | 'license'
     | 'breakdown'
     | 'subscribe'
-    | 'dashboard';
+    | 'dashboard'
+    | 'advanced'
+    | 'back';
 }
 
 function venvHasTokengram(): boolean {
@@ -327,26 +329,48 @@ function readMcpConfig(p: string): McpServerEntry | null {
   return null;
 }
 
-// If the hooks and required modules are missing from `~/.tokengram/`, copy them
-// from the VSIX bundle's resources/hooks/. If the hooks already exist, leave them alone.
+// Copy hooks + support modules from the VSIX bundle's resources/ into
+// `~/.tokengram/`. Refreshes ONCE per extension version (stamp file): the old
+// "leave alone if present" logic let a stale copy survive every update — an
+// old mla_constants without `is_gitignored` silently killed queue_change for
+// ~2 weeks (ImportError → exit 0: no file_edit evidence, no reindex queue).
+// Missing files are always restored; same-version existing files stay as-is.
 function ensureGlobalHooks(extensionPath: string): boolean {
   const homeHooks = path.join(TOKENGRAM_HOME, 'hooks');
   const homeMessages = path.join(TOKENGRAM_HOME, 'messages');
   const homeMlaConsts = path.join(TOKENGRAM_HOME, 'mla_constants.py');
   const homeI18n = path.join(TOKENGRAM_HOME, 'i18n.py');
+  const stampPath = path.join(TOKENGRAM_HOME, '.hooks_version');
+
+  let extVersion = '';
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(extensionPath, 'package.json'), 'utf-8'),
+    ) as { version?: string };
+    extVersion = pkg.version ?? '';
+  } catch {
+    /* no version → stamp check degrades to presence-only */
+  }
+  let stamped = '';
+  try {
+    stamped = fs.readFileSync(stampPath, 'utf-8').trim();
+  } catch {
+    /* no stamp yet → treat as needing a refresh */
+  }
 
   const allPresent =
     fs.existsSync(path.join(homeHooks, 'pre_read_check.py')) &&
     fs.existsSync(homeMlaConsts) &&
     fs.existsSync(homeI18n);
-  if (allPresent) return true;
+  if (allPresent && extVersion !== '' && stamped === extVersion) return true;
 
   const srcHooks = path.join(extensionPath, 'resources', 'hooks');
   const srcMessages = path.join(extensionPath, 'resources', 'messages');
   const srcMlaConsts = path.join(extensionPath, 'resources', 'mla_constants.py');
   const srcI18n = path.join(extensionPath, 'resources', 'i18n.py');
 
-  if (!fs.existsSync(srcHooks)) return false;
+  // No bundle to copy from — report whatever is already there.
+  if (!fs.existsSync(srcHooks)) return allPresent;
 
   try {
     fs.mkdirSync(TOKENGRAM_HOME, { recursive: true });
@@ -356,6 +380,23 @@ function ensureGlobalHooks(extensionPath: string): boolean {
     }
     if (fs.existsSync(srcMlaConsts)) fs.copyFileSync(srcMlaConsts, homeMlaConsts);
     if (fs.existsSync(srcI18n)) fs.copyFileSync(srcI18n, homeI18n);
+    // Compiled leftovers at HOME ROOT shadow both these fresh .py copies and
+    // the venv wheel (hooks put home first on sys.path). Refresh each from
+    // the installed wheel when possible, otherwise drop the shadow so the
+    // import falls through to venv site-packages / the .py just copied.
+    const pkgDir = path.join(
+      TOKENGRAM_HOME, 'venv', 'Lib', 'site-packages', 'tokengram',
+    );
+    for (const f of fs.readdirSync(TOKENGRAM_HOME)) {
+      const isCompiled = f.endsWith('.pyd') || f.endsWith('.so');
+      const isOurs = f.startsWith('mla_constants.') || f.startsWith('i18n.');
+      if (!isCompiled || !isOurs) continue;
+      const fresh = path.join(pkgDir, f);
+      const dest = path.join(TOKENGRAM_HOME, f);
+      if (fs.existsSync(fresh)) fs.copyFileSync(fresh, dest);
+      else fs.rmSync(dest, { force: true });
+    }
+    if (extVersion !== '') fs.writeFileSync(stampPath, extVersion, 'utf-8');
     return true;
   } catch {
     return false;
@@ -833,6 +874,38 @@ function dashboardUrl(): string {
 async function runAction(action: MenuItem['action'], root: string, extensionPath: string) {
   const channel = vscode.window.createOutputChannel('MLA Agent');
   switch (action) {
+    case 'advanced': {
+      // Diagnostics / recovery live behind one entry so the main menu stays
+      // product-facing: no hook/session-log jargon in front of every user.
+      const subItems: MenuItem[] = [
+        {
+          label: tr('menu.sync'),
+          description: tr('menu.syncDesc'),
+          action: 'sync',
+        },
+        {
+          label: tr('menu.breakdown'),
+          description: tr('menu.breakdownDesc'),
+          action: 'breakdown',
+        },
+        {
+          label: tr('menu.advancedBack'),
+          description: tr('menu.advancedBackDesc'),
+          action: 'back',
+        },
+      ];
+      const sub = await vscode.window.showQuickPick(subItems, {
+        placeHolder: tr('menu.advancedPlaceholder'),
+        matchOnDescription: true,
+      });
+      if (!sub) break;
+      await runAction(sub.action, root, extensionPath);
+      break;
+    }
+    case 'back': {
+      await vscode.commands.executeCommand('tokengram.menu');
+      break;
+    }
     case 'subscribe': {
       await vscode.env.openExternal(vscode.Uri.parse(buyUrl()));
       break;
@@ -1185,29 +1258,19 @@ export function registerMenuCommand(
         action: 'refresh',
       },
       {
-        label: tr('menu.arch'),
-        description: tr('menu.archDesc'),
-        action: 'arch',
-      },
-      {
-        label: tr('menu.sync'),
-        description: tr('menu.syncDesc'),
-        action: 'sync',
-      },
-      {
         label: tr('menu.reindex'),
         description: tr('menu.reindexDesc'),
         action: 'reindex',
       },
       {
+        label: tr('menu.arch'),
+        description: tr('menu.archDesc'),
+        action: 'arch',
+      },
+      {
         label: tr('menu.license'),
         description: tr('menu.licenseDesc'),
         action: 'license',
-      },
-      {
-        label: tr('menu.breakdown'),
-        description: tr('menu.breakdownDesc'),
-        action: 'breakdown',
       },
       {
         label: tr('menu.reset'),
@@ -1235,6 +1298,13 @@ export function registerMenuCommand(
       label: tr('menu.dashboard'),
       description: tr('menu.dashboardDesc'),
       action: 'dashboard',
+    });
+    // Diaqnostika/bərpa alətləri (sync, breakdown) alt-menyuda — əsas menyu
+    // istifadəçi üzlü qalır, texniki jarqon gizlənir.
+    items.push({
+      label: tr('menu.advanced'),
+      description: tr('menu.advancedDesc'),
+      action: 'advanced',
     });
     const pick = await vscode.window.showQuickPick(items, {
       placeHolder: tr('menu.placeholder'),

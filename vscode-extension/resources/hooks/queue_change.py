@@ -33,16 +33,16 @@
 ============================================
 hooks/queue_change.py — PostToolUse Hook (Fast)
 ============================================
-PHASE 8b: runs after Claude Code Edit/Write/MultiEdit.
-This script only writes the file path into the pending
-queue — it does NOT load ChromaDB or the embedding model.
+PHASE 8b: Claude Code calls this after Edit/Write/MultiEdit.
+This script only writes the file path to the pending queue —
+it does not load ChromaDB or the embedding model.
 
-Why? Loading Python+Chroma for 3-5 seconds on every edit
-would slow Claude Code down. Queue strategy:
+Why this way? Loading Python+Chroma (3-5 seconds) on every
+edit would slow Claude Code down. Queue strategy:
 - This script: ~50ms (only writes a file)
 - Stop hook (flush_queue.py): runs once, merges everything
 
-JSON format received from stdin:
+JSON format coming from stdin:
 {
   "tool_name": "Edit" | "Write" | "MultiEdit",
   "tool_input": {"file_path": "..."},
@@ -67,14 +67,23 @@ try:
         EXCLUDED_DIRS,
         EXCLUDED_FILE_PATTERNS,
         EXCLUDED_FILE_SUFFIXES,
-        is_gitignored,
     )
     from license_gate import enforcement_active
     from project_root import find_project_root
     from atomic_write import append_atomic
 except Exception:
-    # Dependency import failed — skip the queue hook silently, block nothing.
+    # Dependency import failed — silently skip the queue hook, block nothing.
     sys.exit(0)
+
+# OPTIONAL API — a stale mla_constants build without is_gitignored must NOT
+# kill the whole hook. It silently did exactly that for ~2 weeks (ImportError
+# above → exit 0): no file_edit evidence, no reindex queue for agent edits,
+# stale index ghosts. Gitignore filtering degrades to a no-op instead.
+try:
+    from mla_constants import is_gitignored
+except Exception:
+    def is_gitignored(_p):
+        return False
 
 PROJECT_ROOT = find_project_root()
 QUEUE_FILE = PROJECT_ROOT / ".mla_pending.txt"
@@ -87,7 +96,7 @@ def main() -> int:
         # Bad JSON — exit quietly, don't block Claude Code
         return 0
 
-    # In off-mode don't grow the queue (so flush_queue doesn't run forever).
+    # In off-mode don't let the queue grow (so flush_queue doesn't run forever).
     if not enforcement_active(PROJECT_ROOT):
         return 0
 
@@ -99,7 +108,7 @@ def main() -> int:
     p = Path(file_path)
 
     # Don't queue files in temporary directories. When ChromaDB/test scripts
-    # created and edited a .py file under AppData\Local\Temp the hook wrote them
+    # created and edited a .py file under AppData\Local\Temp, the hook wrote them
     # to the queue; the file is later deleted, but the line stayed as a "ghost".
     try:
         import tempfile
@@ -110,11 +119,11 @@ def main() -> int:
     except Exception:
         pass
 
-    # Savings evidence: log WHICH file the agent edited. The Stop hook's Tier-1
-    # attribution uses this — a search-surfaced file later EDITED without ever
-    # being read means the chunk supplied the content (strongest per-file
-    # evidence). Logged BEFORE the index filters: search only surfaces indexed
-    # files anyway, so extra paths are inert, but the evidence stays complete.
+    # Savings evidence: log WHICH file the agent edited. The Stop hook's
+    # method-3 attribution uses this — a search-surfaced file later EDITED is
+    # the strongest proof the search steered real work (the search keeps its
+    # discovery credit). Logged BEFORE the index filters: search only surfaces
+    # indexed files anyway, so extra paths are inert, but evidence stays complete.
     try:
         append_atomic(
             PROJECT_ROOT / ".mla_session_log.jsonl",
@@ -126,7 +135,7 @@ def main() -> int:
     except Exception:
         pass
 
-    # Filters (lowercase suffix to handle the Windows `.PY` != `.py` problem)
+    # Filters (lowercase suffix for the Windows `.PY` != `.py` problem)
     if p.suffix.lower() not in SUPPORTED_EXTENSIONS:
         return 0
     if any(part in EXCLUDED_DIRS for part in p.parts):
@@ -135,16 +144,16 @@ def main() -> int:
         return 0
     if any(p.name.endswith(sfx) for sfx in EXCLUDED_FILE_SUFFIXES):
         return 0
-    # Project .gitignore (untracked+ignored) — no-op if not git / on error
+    # Layihənin .gitignore-u (untracked+ignored) — git deyilsə/xətada no-op
     try:
         if is_gitignored(p):
             return 0
     except Exception:
         pass
 
-    # If already in the queue (.txt) or being drained (.processing), don't write
-    # again — editing the same file repeatedly inflated the queue. The drainer
-    # dedups anyway, but the counter/re-embed work grew. Case-sensitive (Windows).
+    # Don't re-write if it's already in the queue (.txt) or in drain (.processing) —
+    # editing the same file repeatedly bloated the queue. The drainer dedups
+    # anyway, but the counter/re-embed work grew. Case-insensitive (Windows).
     resolved = str(p.resolve())
     want = resolved.lower()
     processing = PROJECT_ROOT / ".mla_pending.processing"

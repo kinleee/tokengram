@@ -42,23 +42,23 @@ import * as vscode from 'vscode';
 type Messages = Record<string, string>;
 
 const EN: Messages = {
-  'menu.placeholder': 'Pick an Tokengram action',
+  'menu.placeholder': 'Pick a Tokengram action',
   'menu.toggleOn': '$(circle-filled) Turn ON',
   'menu.toggleOff': '$(circle-large-outline) Turn OFF',
   'menu.currentState': 'current: {state}',
   'menu.refresh': '$(refresh) Refresh Tokengram',
-  'menu.refreshDesc': 'deep recovery — unstick a frozen index, then refresh the bar',
-  'menu.arch': '$(book) Show arch doc',
-  'menu.archDesc': '.mla_arch.md in the side panel',
-  'menu.sync': '$(save) Sync session log → history',
-  'menu.syncDesc': 'manual run when the Stop hook is skipped',
-  'menu.reindex': '$(database) ChromaDB re-index',
-  'menu.reindexDesc': 'Re-index the workspace — incremental (only changed files; first run is full)',
+  'menu.refreshDesc': 'check index health and refresh the status bar',
+  'menu.arch': '$(book) Project architecture',
+  'menu.archDesc': 'auto-generated overview of this codebase',
+  'menu.sync': '$(save) Sync savings data',
+  'menu.syncDesc': 'recover savings that were not counted yet',
+  'menu.reindex': '$(database) Re-index project',
+  'menu.reindexDesc': 'update the code index — incremental (only changed files; first run is full)',
   'menu.reset': '$(trash) Reset savings history',
   'menu.resetDesc': 'old history is moved to a backup file',
   'menu.toggleResult': 'Tokengram: {output}',
   'menu.refreshResult': 'Tokengram: index healthy — status bar refreshed',
-  'menu.refreshTitle': 'Refreshing Tokengram — checking for a frozen index...',
+  'menu.refreshTitle': 'Refreshing Tokengram — checking index health...',
   'menu.refreshRecovered':
     'Tokengram recovered: terminated {n} frozen process(es) (index stuck ~{mins} min). Re-indexing {pending} pending file(s) now...',
   'menu.refreshReindexBtn': 'Re-index now',
@@ -70,7 +70,7 @@ const EN: Messages = {
     'Tokengram: index was stuck — auto-recovering {pending} file(s) (killed {n} frozen process(es)). Re-indexing now...',
   'menu.refreshCleared':
     'Tokengram: cleared {cleared} stale lock file(s) left by dead processes; bar refreshed.',
-  'menu.archMissing': 'No .mla_arch.md yet — it appears after the first Read of an indexable file.',
+  'menu.archMissing': 'No architecture doc yet — it builds automatically as Tokengram works in this project.',
   'menu.toggleNeedsLicense':
     'Tokengram cannot be turned ON without a license key. Set your license key first.',
   'menu.toggleLicenseInvalid':
@@ -80,7 +80,7 @@ const EN: Messages = {
     'Reset savings history? (old history will be backed up)',
   'menu.resetConfirmYes': 'Reset',
   'menu.resetResult': 'Tokengram: {output}',
-  'menu.reindexTitle': 'Tokengram: re-indexing ChromaDB (may take a minute)',
+  'menu.reindexTitle': 'Tokengram: re-indexing the project (may take a minute)',
   'menu.reindexDone': 'Tokengram: re-index complete',
   'menu.reindexCreatedConfig':
     'Tokengram: .mcp.json created for this project — re-index starting.',
@@ -212,8 +212,13 @@ const EN: Messages = {
     '✓ Evidence-based: only savings with hard proof are counted — a smaller, ' +
     'honest number you can verify against your own usage.',
 
-  'menu.breakdown': '$(list-tree) Event breakdown',
-  'menu.breakdownDesc': 'open Output panel with raw session-log + history details',
+  'menu.breakdown': '$(list-tree) Savings details',
+  'menu.breakdownDesc': 'per-event log of how savings were counted',
+  'menu.advanced': '$(tools) Advanced tools',
+  'menu.advancedDesc': 'diagnostics and recovery',
+  'menu.advancedPlaceholder': 'Advanced Tokengram tools',
+  'menu.advancedBack': '$(arrow-left) Back',
+  'menu.advancedBackDesc': 'return to the main menu',
   'breakdown.title': 'Tokengram event breakdown',
   'breakdown.noWorkspace': '(no workspace open)',
   'breakdown.sessionLogHeading': '## Pending session log',
